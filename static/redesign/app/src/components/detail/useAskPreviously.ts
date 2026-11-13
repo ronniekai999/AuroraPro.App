@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { failureWords } from '@/lib/failureWords'
 import {
   APIError,
   askPreviously,
@@ -129,7 +130,7 @@ export function useAskPreviously({
       return data
     } catch (caught) {
       if (isCurrent(capturedIdentity, controller)) {
-        setConversationError(caught instanceof Error ? caught.message : 'Couldn’t load your questions')
+        setConversationError(failureWords(caught, 'load your questions') ?? 'Could not load your questions.')
       }
       return undefined
     } finally {
@@ -219,7 +220,7 @@ export function useAskPreviously({
       // the model was running. Reload first so no stale unsafe turn remains.
       if (caught instanceof APIError && caught.status === 409) await loadConversation()
       if (isCurrent(capturedIdentity, controller)) {
-        setSendError(caught instanceof Error ? caught.message : 'Couldn’t answer that right now')
+        setSendError(failureWords(caught, 'answer that') ?? 'Could not answer that.')
       }
     } finally {
       if (isCurrent(capturedIdentity, controller)) {
@@ -271,14 +272,17 @@ export function useAskPreviously({
         await loadConversation()
       } else {
         const restore = conversationRef.current?.highest_hidden_up_to
-        if (!restore?.episode_id) throw new Error('That episode is no longer in this library.')
+        if (!restore?.episode_id) {
+          if (isCurrent(capturedIdentity, controller)) setConversationError('That episode is no longer in this library.')
+          return
+        }
         await markWatched(mediaId, { episode_id: restore.episode_id, profile_id: profileId }, controller.signal)
         if (!isCurrent(capturedIdentity, controller)) return
         await Promise.all([loadConversation(), onRefreshRecap?.()])
       }
     } catch (caught) {
       if (isCurrent(capturedIdentity, controller)) {
-        setConversationError(caught instanceof Error ? caught.message : 'That change couldn’t be completed')
+        setConversationError(failureWords(caught, 'make that change') ?? 'That change could not be made.')
       }
     } finally {
       if (isCurrent(capturedIdentity, controller)) {

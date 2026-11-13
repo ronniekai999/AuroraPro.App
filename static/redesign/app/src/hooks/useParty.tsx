@@ -52,9 +52,10 @@ import {
   type ReceivedSeekPayload,
   type TickPayload,
 } from '@/lib/party'
-import { apiFetch, getStoredUser, refreshAccessToken } from '@/lib/api'
+import { APIError, NetworkError, apiFetch, getStoredUser, refreshAccessToken } from '@/lib/api'
 import { cacheLastParty } from '@/lib/lastParty'
 import { createVoiceController, type VoiceController, type VoiceState } from '@/lib/voice'
+import { failureReason, failureWords } from '@/lib/failureWords'
 
 // 2026-05-25 — room-socket keepalive cadence. Server's gorilla/websocket
 // already does protocol-level PING/PONG every 60s, but some upstream
@@ -159,6 +160,25 @@ const INITIAL_STATE: PartyState = {
 const MAX_CHAT = 200
 const MAX_REACTIONS = 100
 
+/** What a join came to. `error` is the app's own sentence, for a person.
+ *  `reason`, beside it, is for code to branch on, never words: 'offline_room'
+ *  for a code that names a persistent room with no live party; when the
+ *  code's lookup failed, the server's `error.reason` if it sent one, else
+ *  `http_<status>` for a refusal, or 'network' when no answer came. */
+export interface JoinResult {
+  ok: boolean
+  error?: string
+  reason?: string
+}
+
+function joinFailureReason(err: unknown): string | undefined {
+  const fromServer = failureReason(err)
+  if (fromServer) return fromServer
+  if (err instanceof APIError) return `http_${err.status}`
+  if (err instanceof NetworkError) return 'network'
+  return undefined
+}
+
 export interface UseParty {
   state: PartyState
   // Phase 4.6 — voice mesh state + actions. Voice rides the room
@@ -199,7 +219,7 @@ export interface UseParty {
   // (orphan party row, no UI feedback). When we JUST created the
   // party, we know it's active — preflight is redundant + the source
   // of the silent failure.
-  join: (code: string, opts?: { skipPreflight?: boolean }) => Promise<{ ok: boolean; error?: string }>
+  join: (code: string, opts?: { skipPreflight?: boolean }) => Promise<JoinResult>
   // Tear down both sockets and clear state.
   leave: () => void
   sendChat: (message: string) => void
@@ -1191,7 +1211,7 @@ export function useParty(currentUserId?: number, actingProfileId: number | null 
   // recurse without stale-closure shenanigans (mirrors openRoomSocketRef).
   openSyncSocketRef.current = openSyncSocket
 
-  const join = useCallback(async (rawCode: string, opts?: { skipPreflight?: boolean }): Promise<{ ok: boolean; error?: string }> => {
+  const join = useCallback(async (rawCode: string, opts?: { skipPreflight?: boolean }): Promise<JoinResult> => {
     const code = rawCode.trim().toUpperCase()
     if (!/^[A-Z0-9]{6}$/.test(code)) {
       const error = 'Party code must be 6 letters or digits.'
@@ -1228,14 +1248,16 @@ export function useParty(currentUserId?: number, actingProfileId: number | null 
         // joinable — for "offline_room" surface a friendly message so
         // the user knows to start the party from the room first.
         if (info.type !== 'active') {
+          // The words keep "persistent room": a caller still reads that.
           const error = 'That code is a persistent room; no live session right now.'
           setStatePatch({ joining: false, error })
-          return { ok: false, error }
+          return { ok: false, error, reason: 'offline_room' }
         }
       } catch (err) {
-        const error = err instanceof Error ? err.message : 'Invalid party code.'
+        // The code's lookup answers 404 for a code no party holds now.
+        const error = failureWords(err, 'check that code', { status: { 404: 'No party is using that code right now.' } }) ?? 'Could not check that code.'
         setStatePatch({ joining: false, error })
-        return { ok: false, error }
+        return { ok: false, error, reason: joinFailureReason(err) }
       }
     }
 
@@ -1403,7 +1425,7 @@ export function useParty(currentUserId?: number, actingProfileId: number | null 
     } catch (err) {
       userInitiatedLeaveRef.current = false
       setStatePatch({
-        error: err instanceof Error ? err.message : 'Failed to end the party.',
+        error: failureWords(err, 'end the party') ?? 'Could not end the party.',
       })
       return false
     }

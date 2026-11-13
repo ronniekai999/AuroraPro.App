@@ -10,6 +10,7 @@
 // been sent.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { failureWords } from '@/lib/failureWords'
 import { createPortal } from 'react-dom'
 import { collectClientContext, submitBugReport, type BugReportSubmitResult } from '@/lib/api'
 import { Icon } from '@/components/Icon'
@@ -593,11 +594,10 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       if (fileInputRef.current) {
         fileInputRef.current.value = ''
       }
-    } catch (err) {
+    } catch {
       if (!mountedRef.current) return
-      refuse(err instanceof Error
-        ? `Capture failed: ${err.message}`
-        : 'Capture failed — try again or upload a screenshot from disk instead.')
+      // The capture library's and the browser's words are for a developer.
+      refuse('The capture failed. Try again, or attach a screenshot from your device instead.')
       setCaptureAnnounce('Capture failed.')
     } finally {
       if (mountedRef.current) {
@@ -743,9 +743,7 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       if (name === 'NotAllowedError' || name === 'AbortError') {
         return
       }
-      refuse(err instanceof Error
-        ? `Screen recording failed to start: ${err.message}`
-        : 'Screen recording failed to start.')
+      refuse('Screen recording could not start.')
       return
     }
     if (!mountedRef.current) {
@@ -786,11 +784,9 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
         videoBitsPerSecond: 2_500_000,
         audioBitsPerSecond: 96_000,
       })
-    } catch (err) {
+    } catch {
       releaseMediaStream()
-      refuse(err instanceof Error
-        ? `Recorder init failed: ${err.message}`
-        : 'Recorder init failed.')
+      refuse('Screen recording could not start.')
       return
     }
     recorder.ondataavailable = (e) => {
@@ -855,12 +851,10 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       // captures and let a future "show progress" UI sample partial
       // size as the recording proceeds.
       recorder.start(1000)
-    } catch (err) {
+    } catch {
       releaseMediaStream()
       mediaRecorderRef.current = null
-      refuse(err instanceof Error
-        ? `Recorder failed to start: ${err.message}`
-        : 'Recorder failed to start.')
+      refuse('Screen recording could not start.')
       setCaptureAnnounce('Recording failed to start.')
       return
     }
@@ -1006,7 +1000,8 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       // Aborts are user-initiated (Cancel); don't surface them as
       // errors. AbortError comes from fetch when signal.aborted.
       if (err && (err as Error).name === 'AbortError') return
-      const why = err instanceof Error && err.message ? err.message : 'The report could not be sent.'
+      // The route answers 404 only when bug reporting is off on the server.
+      const why = failureWords(err, 'send the report', { status: { 404: 'Bug reports are not turned on for this server.' } }) ?? 'The report could not be sent.'
       unsentRef.current = why
       refuse(why)
     } finally {

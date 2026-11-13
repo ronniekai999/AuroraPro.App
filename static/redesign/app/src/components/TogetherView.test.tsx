@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import TogetherView, { watchedAgo, type TogetherViewProps } from './TogetherView'
-import type { ActiveParty, MyPartyInvite } from '@/lib/api'
+import { APIError, type ActiveParty, type MyPartyInvite } from '@/lib/api'
 import { cacheLastParty, readLastParty } from '@/lib/lastParty'
 
 // The page's own requests: the viewer's rooms and what the people they
@@ -465,7 +465,7 @@ describe('the ways into a party', () => {
 
   it('says so when the rooms cannot be loaded or a room cannot be made, and the rest of the page still works', async () => {
     api.listRooms.mockRejectedValue(new Error('boom'))
-    api.createRoom.mockRejectedValue(new Error('room limit reached'))
+    api.createRoom.mockRejectedValue(new APIError(400, 'room limit reached', null))
     render(<TogetherView {...props({ activeParties: [party()] })} />)
     const rooms = within(screen.getByRole('region', { name: 'Your rooms' }))
     expect(await rooms.findByText('Your rooms could not be loaded.')).toBeInTheDocument()
@@ -475,13 +475,15 @@ describe('the ways into a party', () => {
     fireEvent.change(field, { target: { value: 'One more' } })
     field.focus()
     fireEvent.submit(field.closest('form')!)
-    expect(await rooms.findByText('room limit reached')).toHaveAttribute('role', 'alert')
+    // The refusal in the app's words, not the server's.
+    expect(await rooms.findByText('Could not make the room.')).toHaveAttribute('role', 'alert')
+    expect(rooms.queryByText('room limit reached')).toBeNull()
     // The name is kept, the field still has the focus (it was never
     // disabled), and the refusal is tied to it.
     expect(field).toHaveValue('One more')
     expect(field).toHaveFocus()
     expect(field).toHaveAttribute('aria-invalid', 'true')
-    expect(field).toHaveAccessibleDescription('room limit reached')
+    expect(field).toHaveAccessibleDescription('Could not make the room.')
   })
 })
 

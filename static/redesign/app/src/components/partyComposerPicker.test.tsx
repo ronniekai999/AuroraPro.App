@@ -17,7 +17,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { PartyComposerModal, type PartyComposerLaunch } from './PartyComposerModal'
-import { listMembers, type MemberSummary } from '@/lib/api'
+import { APIError, listMembers, type MemberSummary } from '@/lib/api'
 
 const ROSTER: MemberSummary[] = [
   { user_id: 1, username: 'ronnie', display_name: 'Ronnie', is_following: true },
@@ -166,10 +166,11 @@ describe('PartyComposerModal people picker', () => {
   })
 
   it('surfaces a roster fetch failure instead of reporting no matches', async () => {
-    mockedListMembers.mockRejectedValue(new Error("boom"))
+    mockedListMembers.mockRejectedValue(new APIError(500, 'boom', null))
     renderComposer()
 
-    expect(await screen.findByText(/Couldn't load members: boom/i)).toBeInTheDocument()
+    expect(await screen.findByText(/Could not load the members just now\./)).toBeInTheDocument()
+    expect(screen.queryByText(/boom/)).toBeNull()
     // The live region must not tell a screen-reader user that nobody
     // matched when the truth is that we never found out.
     expect(resultsStatus()).toHaveTextContent(/Could not load members/i)
@@ -180,9 +181,9 @@ describe('PartyComposerModal people picker', () => {
   // trigger never changes while the modal is mounted, so the host has to
   // close the composer and start over.
   it('recovers from a failed roster fetch without reopening the modal', async () => {
-    mockedListMembers.mockRejectedValue(new Error('boom'))
+    mockedListMembers.mockRejectedValue(new APIError(500, 'boom', null))
     renderComposer()
-    await screen.findByText(/Couldn't load members: boom/i)
+    await screen.findByText(/Could not load the members just now\./)
 
     mockedListMembers.mockResolvedValue(ROSTER)
     await userEvent.click(screen.getByRole('button', { name: /Try again/i }))

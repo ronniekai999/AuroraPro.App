@@ -90,7 +90,7 @@ function MemberProfileEditor({ onToast }: { onToast?: OnToast }) {
       syncForm(p)
       onToast?.('Your member profile is saved', 'success')
     } catch (e) {
-      onToast?.(refusalMessage(e, 'Your member profile could not be saved.'), 'error')
+      onToast?.(refusalMessage(e, 'Your member profile could not be saved.', { doing: 'save your member profile' }), 'error')
     } finally {
       setSaving(false)
     }
@@ -108,7 +108,7 @@ function MemberProfileEditor({ onToast }: { onToast?: OnToast }) {
       onToast?.(next ? 'Finished titles now show on your page' : 'Finished titles are hidden from your page', 'success')
     } catch (e) {
       setForm(f => ({ ...f, share_watch_history: !next }))
-      onToast?.(refusalMessage(e, 'Sharing could not be changed.'), 'error')
+      onToast?.(refusalMessage(e, 'Sharing could not be changed.', { doing: 'change sharing' }), 'error')
     } finally {
       setSharing(false)
     }

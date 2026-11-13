@@ -20,6 +20,7 @@ import { refusalMessage } from '@/lib/profileRefusal'
 import { isRestrictedProfile } from '@/lib/profileSession'
 import { ConfirmDialog } from './ConfirmDialog'
 import { PaneNote, PaneSection, SettingRow } from './controls'
+import { failureWords } from '@/lib/failureWords'
 
 type OnToast = (message: string, type?: Toast['type']) => void
 
@@ -138,7 +139,7 @@ function SignInMethods({ username, onLogout, onToast }: { username?: string; onL
       setLinks(await listOAuthLinks())
       setErr(null)
     } catch (e) {
-      setErr(e instanceof Error && e.message ? e.message : 'The sign-in methods could not be loaded.')
+      setErr(failureWords(e, 'load the sign-in methods') ?? 'The sign-in methods could not be loaded.')
     }
   }, [])
   // The ?linked=<provider> marker a finished link leaves is handled once by
@@ -152,7 +153,7 @@ function SignInMethods({ username, onLogout, onToast }: { username?: string; onL
       await startOAuthLink(provider)
     } catch (e) {
       setBusy(null)
-      onToast?.(refusalMessage(e, `${oauthProviderLabel(provider)} could not be connected.`), 'error')
+      onToast?.(refusalMessage(e, `${oauthProviderLabel(provider)} could not be connected.`, { doing: `connect ${oauthProviderLabel(provider)}` }), 'error')
     }
   }
   const disconnect = async (provider: string) => {
@@ -164,7 +165,7 @@ function SignInMethods({ username, onLogout, onToast }: { username?: string; onL
       await reload()
       setDisconnected(provider)
     } catch (e) {
-      onToast?.(refusalMessage(e, `${oauthProviderLabel(provider)} could not be disconnected.`), 'error')
+      onToast?.(refusalMessage(e, `${oauthProviderLabel(provider)} could not be disconnected.`, { doing: `disconnect ${oauthProviderLabel(provider)}` }), 'error')
     } finally {
       setBusy(null)
     }
@@ -363,5 +364,10 @@ export function passwordErrorMessage(e: unknown): string {
     if (e.status === 401 && e.message === WRONG_CURRENT_PASSWORD) return 'That is not the current password.'
     if (e.status === 429) return 'Too many attempts. Wait a minute, then try again.'
   }
-  return refusalMessage(e, 'The password could not be changed. Try again.')
+  // A 500 can come after the password was changed (the sessions could not
+  // then be ended), so it is not said to have failed.
+  return refusalMessage(e, 'The password could not be changed. Try again.', {
+    doing: 'change the password',
+    overrides: { status: { 500: 'Something went wrong on the server, and the password may or may not have changed.' } },
+  })
 }

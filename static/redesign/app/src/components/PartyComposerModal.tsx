@@ -32,6 +32,7 @@ import {
 } from '@/lib/partyInvites'
 import { PartyShareCardModal } from './PartyShareCardModal'
 import { ProfileAvatar } from './ProfileAvatar'
+import { failureWords } from '@/lib/failureWords'
 
 export interface PartyComposerLaunch {
   // null ⇒ "right now"; otherwise an RFC 3339 instant in the future.
@@ -118,7 +119,7 @@ export function PartyComposerModal({
       })
       .catch((err: unknown) => {
         if (err instanceof Error && err.name === 'AbortError') return
-        setMembersError(err instanceof Error ? err.message : 'Failed to load members')
+        setMembersError(failureWords(err, 'load the members') ?? 'Could not load the members.')
         setMembers([])
       })
     return () => ac.abort()
@@ -438,7 +439,7 @@ export function PartyComposerModal({
             frame under the input reads as "broken", not as "keep typing". */}
         {membersError ? (
           <p className="mt-2 text-[13px] text-warn">
-            Couldn't load members: {membersError}{' '}
+            {membersError}{' '}
             <button
               type="button"
               onClick={() => { setMembers(null); setRosterAttempt(n => n + 1) }}

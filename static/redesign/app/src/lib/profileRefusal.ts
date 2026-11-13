@@ -3,10 +3,12 @@
 // The profile routes send a stable `error.reason` beside a message written
 // for logs ("this profile's content rating limit just changed; reload and try
 // again"). The reason is what the app branches on, and these are the words it
-// shows. A refusal with no reason this file knows keeps the server's message,
-// which is still better than "failed".
+// shows. A refusal with no reason this file knows is said by its kind
+// (lib/failureWords) when the caller says what it was doing, else in the
+// caller's own fallback sentence: never in the server's words.
 
 import { APIError } from './api'
+import { failureWords, type FailureOverrides } from './failureWords'
 
 export type RefusalReason =
   | 'profile_restricted'
@@ -49,10 +51,17 @@ export function waitPhrase(retryAfterSec: number | undefined, fallback: string):
 
 const retryAfter = (e: unknown) => (e instanceof APIError ? e.retryAfterSec : undefined)
 
-/** The sentence for a refusal. `fallback` is for an error with no message at
- *  all (never shown for one the server explained). `reloaded: false` is for
- *  a page with no list of profiles that it reloads after a refusal. */
-export function refusalMessage(e: unknown, fallback: string, { reloaded = true }: { reloaded?: boolean } = {}): string {
+/** The sentence for a refusal. A reason this file knows has its own
+ *  sentence; any other failure is said by its kind (failureWords) with
+ *  `doing` ("add the profile"), or, without `doing` or for an abandoned
+ *  request, as `fallback`. `overrides` are failureWords' (a status this
+ *  caller knows more about). `reloaded: false` is for a page with no list
+ *  of profiles that it reloads after a refusal. */
+export function refusalMessage(
+  e: unknown,
+  fallback: string,
+  { reloaded = true, doing, overrides }: { reloaded?: boolean; doing?: string; overrides?: FailureOverrides } = {},
+): string {
   switch (refusalReason(e)) {
     case 'profile_restricted':
       return 'The profile you are watching as has a content limit, so it cannot change this. Switch to a profile without a limit first.'
@@ -78,6 +87,6 @@ export function refusalMessage(e: unknown, fallback: string, { reloaded = true }
     case 'rate_limited':
       return `Too many tries at changing a PIN in a short time. Try again ${waitPhrase(retryAfter(e), 'in a few minutes')}.`
     default:
-      return e instanceof Error && e.message ? e.message : fallback
+      return (doing ? failureWords(e, doing, overrides) : null) ?? fallback
   }
 }

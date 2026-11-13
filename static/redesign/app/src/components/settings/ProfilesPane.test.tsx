@@ -143,6 +143,15 @@ describe('what a session with a content limit is shown', () => {
   })
 })
 
+describe('a list that cannot be read', () => {
+  it('says so in the app’s words, not the server’s', async () => {
+    api.listProfiles.mockReset().mockRejectedValue(new APIError(500, 'failed to list profiles', null))
+    render(<ProfilesPane actingProfile={parent} profileKnown />)
+    expect(await screen.findByText('Could not load the profiles just now.')).toBeInTheDocument()
+    expect(document.body.textContent).not.toMatch(/failed to list/)
+  })
+})
+
 describe('stale loads', () => {
   // Each load supersedes the ones before it: an answer from before the
   // session moved to another profile must not land last and put back a list
@@ -871,8 +880,9 @@ describe('managing profiles, from a profile without a limit', () => {
     fireEvent.change(within(form).getByLabelText('Name'), { target: { value: 'Robin' } })
     fireEvent.click(within(form).getByRole('button', { name: 'Add profile' }))
     await waitFor(() => expect(api.createProfile).toHaveBeenCalledWith('Robin', {}))
-    // The server words its profile count limit for a log.
-    expect(await within(form).findByText('This account has as many profiles as the server allows. Delete one to add another.')).toHaveAttribute('role', 'alert')
+    // The server words its profile count limit for a log, as a plain 400.
+    expect(await within(form).findByText('The profile could not be added. This account may have as many profiles as the server allows: delete one to add another.')).toHaveAttribute('role', 'alert')
+    expect(form.textContent).not.toMatch(/maximum number/)
     expect(within(form).getByLabelText('Name')).toHaveValue('Robin')
   })
 
@@ -891,7 +901,9 @@ describe('managing profiles, from a profile without a limit', () => {
 
   it('words the other refusals of adding a profile', () => {
     expect(addProfileRefusal(refusal('profile_restricted', 403))).toMatch(/content limit, so it cannot change this/)
-    expect(addProfileRefusal(new APIError(400, 'name is required (max 100 characters)', null))).toBe('name is required (max 100 characters)')
-    expect(addProfileRefusal(new TypeError(''))).toBe('The profile could not be added.')
+    // Any 400 is said as the limit it most likely is, never in the server's words.
+    expect(addProfileRefusal(new APIError(400, 'name is required (max 100 characters)', null))).toBe('The profile could not be added. This account may have as many profiles as the server allows: delete one to add another.')
+    expect(addProfileRefusal(new APIError(500, 'failed to create profile', null))).toBe('Could not add the profile just now.')
+    expect(addProfileRefusal(new TypeError(''))).toBe('Could not add the profile just now.')
   })
 })

@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { APIError } from '@/lib/api'
+import { APIError, NetworkError } from '@/lib/api'
 import { ProfilePinDialog, unlockErrorMessage } from './ProfilePinDialog'
 
 const refusal = (reason: string, status = 403) =>
@@ -15,7 +15,9 @@ describe('unlockErrorMessage', () => {
     expect(unlockErrorMessage(refusal('profile_pin_invalid'), 'pin')).toBe('That PIN is not right.')
     expect(unlockErrorMessage(refusal('profile_pin_invalid'), 'password')).toBe('That password is not right.')
     expect(unlockErrorMessage(refusal('profile_pin_locked', 429), 'pin')).toMatch(/15 minutes/)
-    expect(unlockErrorMessage(new Error('network down'), 'pin')).toBe('network down')
+    // Any other failure in the app's words, never the browser's or the server's.
+    expect(unlockErrorMessage(new NetworkError('Failed to fetch'), 'pin')).toBe('Could not reach the server. Check the connection and try again.')
+    expect(unlockErrorMessage(new APIError(500, 'pq: connection refused', null), 'pin')).toBe('Could not unlock the profile just now.')
   })
 
   // The server says how long a lockout has left (Retry-After). A fixed "15

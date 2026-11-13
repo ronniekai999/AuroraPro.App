@@ -95,6 +95,13 @@ export function triggerDownload(blob: Blob, filename: string, doc: Document = do
 // downloadCard fetches the PNG and saves it. Returns an error string
 // rather than throwing so the modal can render it inline — a failed
 // download is a normal thing to report, not an exception to bubble.
+/** The words for a card that could not be fetched: the browser's own
+ *  ("Failed to fetch") are for a developer, and a status number for nobody.
+ *  A 404 is a card no longer there (an ended party's). */
+function cardFailure(status: number | null, doing: 'downloaded' | 'shared'): string {
+  return status === 404 ? 'That card is not available.' : `The card could not be ${doing} just now.`
+}
+
 export async function downloadCard(
   url: string,
   code: string,
@@ -109,13 +116,13 @@ export async function downloadCard(
   try {
     const res = await doFetch(url, { credentials: 'same-origin' })
     if (!res.ok) {
-      return { ok: false, error: `Card unavailable (${res.status})` }
+      return { ok: false, error: cardFailure(res.status, 'downloaded') }
     }
     const blob = await res.blob()
     triggerDownload(blob, cardDownloadName(code, format), opts.doc ?? document)
     return { ok: true }
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : 'Download failed' }
+  } catch {
+    return { ok: false, error: cardFailure(null, 'downloaded') }
   }
 }
 
@@ -205,11 +212,11 @@ export async function shareCard(
   try {
     const res = await doFetch(url, { credentials: 'same-origin' })
     if (!res.ok) {
-      return { ok: false, error: `Card unavailable (${res.status})` }
+      return { ok: false, error: cardFailure(res.status, 'shared') }
     }
     blob = await res.blob()
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : 'Share failed' }
+  } catch {
+    return { ok: false, error: cardFailure(null, 'shared') }
   }
 
   const filename = cardDownloadName(code, format)
@@ -229,8 +236,8 @@ export async function shareCard(
   }
   try {
     triggerDownload(blob, filename, opts.doc ?? document)
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : 'Share failed' }
+  } catch {
+    return { ok: false, error: cardFailure(null, 'shared') }
   }
   return { ok: true, outcome: 'downloaded' }
 }

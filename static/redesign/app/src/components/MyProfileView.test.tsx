@@ -95,7 +95,8 @@ describe('MyProfileView', () => {
     render(<MyProfileView {...p} activeProfile={parent} profileKnown />)
     const lean = within(screen.getByRole('radiogroup', { name: /lean towards/ }))
     fireEvent.click(lean.getByRole('radio', { name: /Mature/ }))
-    await waitFor(() => expect(p.onToast).toHaveBeenCalledWith('failed to update profile', 'error'))
+    // The server's words are for a log: the toast says what could not be done.
+    await waitFor(() => expect(p.onToast).toHaveBeenCalledWith('The lean could not be changed.', 'error'))
     await waitFor(() => expect(lean.getByRole('radio', { name: /Auto/ })).toHaveAttribute('aria-checked', 'true'))
     expect(p.onProfilesChanged).not.toHaveBeenCalled()
   })

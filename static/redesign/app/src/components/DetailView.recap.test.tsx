@@ -5,6 +5,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import DetailView from './DetailView'
 import type { Media } from '@/lib/types'
+import { APIError } from '@/lib/api'
 
 const api = vi.hoisted(() => ({
   getRecap: vi.fn(),
@@ -122,6 +123,20 @@ describe('DetailView Previously affordance', () => {
     await waitFor(() => expect(api.getRecap).toHaveBeenLastCalledWith(42, 8))
     expect(screen.queryByText('Private recap for profile seven.')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Generating recap')).toBeInTheDocument()
+  })
+})
+
+describe('DetailView: a recap that cannot be read', () => {
+  // The server's words are for a log ("llm: provider timeout"): the recap
+  // says what could not be done.
+  it('says so in the app\'s words', async () => {
+    const user = userEvent.setup()
+    api.getRecapStatus.mockResolvedValue({ available: true, has_ask_history: false })
+    api.getRecap.mockRejectedValue(new APIError(502, 'llm: provider timeout', null))
+    renderDetail(7)
+    await user.click(await screen.findByRole('button', { name: 'Previously on' }))
+    expect(await screen.findByText('Could not load the recap just now.')).toBeInTheDocument()
+    expect(document.body.textContent).not.toMatch(/llm:/)
   })
 })
 

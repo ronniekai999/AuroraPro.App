@@ -11,6 +11,7 @@ import { useEffect, useState } from 'react'
 import { PageHeader } from '@/components/PageHeader'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { followMember, listMembers, unfollowMember, type MemberSummary } from '@/lib/api'
+import { failureWords } from '@/lib/failureWords'
 
 export default function MembersView({ onOpenMember, currentUsername, onToast }: {
   onOpenMember: (username: string) => void
@@ -29,7 +30,7 @@ export default function MembersView({ onOpenMember, currentUsername, onToast }: 
     listMembers()
       .then(m => { if (!cancelled) setMembers(m) })
       .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load members')
+        if (!cancelled) setError(failureWords(e, 'load the members') ?? 'Could not load the members.')
       })
     return () => { cancelled = true }
   }, [])
@@ -44,7 +45,7 @@ export default function MembersView({ onOpenMember, currentUsername, onToast }: 
       await (next ? followMember(m.username) : unfollowMember(m.username))
     } catch (e) {
       setMembers(list => list?.map(x => x.username === m.username ? { ...x, is_following: !next } : x) ?? null)
-      onToast?.(e instanceof Error ? e.message : 'Failed to update follow', 'error')
+      onToast?.(failureWords(e, next ? `follow ${m.username}` : `unfollow ${m.username}`) ?? 'The follow could not be changed.', 'error')
     } finally {
       setBusy(prev => {
         const s = new Set(prev)

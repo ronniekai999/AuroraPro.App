@@ -20,6 +20,7 @@ import { plannedStartLabel, plannedStartLine } from '@/lib/partyInvites'
 import { isScheduledLobby, partyPresence } from '@/hooks/useActiveParties'
 import { PageHeader } from '@/components/PageHeader'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
+import { failureWords } from '@/lib/failureWords'
 
 export interface TogetherViewProps {
   currentUserId: number
@@ -612,7 +613,7 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
       setMade(room.id)
       onSay(`Room made: ${room.name}.`)
     } catch (err) {
-      setError(err instanceof Error && err.message ? err.message : 'The room could not be made.')
+      setError(failureWords(err, 'make the room') ?? 'The room could not be made.')
     } finally {
       setBusy(false)
     }

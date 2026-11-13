@@ -26,6 +26,7 @@ import {
   type CardFormat,
   type PartyCardLinks,
 } from '@/lib/partyShare'
+import { failureWords } from '@/lib/failureWords'
 
 export interface PartyShareCardModalProps {
   code: string
@@ -57,7 +58,8 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
       .then(setLinks)
       .catch((err: unknown) => {
         if (err instanceof Error && err.name === 'AbortError') return
-        setError(err instanceof Error ? err.message : 'Could not build the share card')
+        // The route refuses anyone but the party's host with a 403.
+        setError(failureWords(err, 'make the share card', { status: { 403: 'Only the party’s host can share its card.' } }) ?? 'Could not make the share card.')
       })
     return () => ac.abort()
   }, [code])

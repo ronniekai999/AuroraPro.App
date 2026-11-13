@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import type { BugReportSubmitResult } from '@/lib/api'
+import { APIError, type BugReportSubmitResult } from '@/lib/api'
 
 const submitBugReport = vi.hoisted(() => vi.fn())
 vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof import('@/lib/api')>()), submitBugReport }))
@@ -150,7 +150,7 @@ describe('sending a report', () => {
 
   it('says a report that was refused, keeps what was written, and can be sent again', async () => {
     const user = userEvent.setup()
-    submitBugReport.mockRejectedValueOnce(new Error('GitHub did not accept the report'))
+    submitBugReport.mockRejectedValueOnce(new APIError(502, 'GitHub did not accept the report', null))
     const { onToast } = setup()
     await user.click(launcher())
     const dialog = screen.getByRole('dialog')
@@ -158,7 +158,7 @@ describe('sending a report', () => {
     const send = within(dialog).getByRole('button', { name: 'Send report' })
     send.focus()
     await user.keyboard('{Enter}')
-    await waitFor(() => expect(dialog.querySelector('#bug-error')).toHaveTextContent('GitHub did not accept the report'))
+    await waitFor(() => expect(dialog.querySelector('#bug-error')).toHaveTextContent('Could not send the report just now.'))
     // By attribute as well as by where the focus is: jsdom leaves the focus
     // on a button that becomes disabled, where a browser drops it.
     const again = within(dialog).getByRole('button', { name: 'Send report' })
@@ -231,13 +231,13 @@ describe('sending a report', () => {
   // A server's refusal is about no one field.
   it('marks no field for a report the server refused', async () => {
     const user = userEvent.setup()
-    submitBugReport.mockRejectedValueOnce(new Error('GitHub did not accept the report'))
+    submitBugReport.mockRejectedValueOnce(new APIError(502, 'GitHub did not accept the report', null))
     setup()
     await user.click(launcher())
     const dialog = screen.getByRole('dialog')
     await fill(user, dialog)
     await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
-    await waitFor(() => expect(dialog.querySelector('#bug-error')).toHaveTextContent('GitHub did not accept the report'))
+    await waitFor(() => expect(dialog.querySelector('#bug-error')).toHaveTextContent('Could not send the report just now.'))
     expect(within(dialog).getByLabelText(/^Title/)).not.toHaveAttribute('aria-invalid', 'true')
     expect(within(dialog).getByLabelText(/^Description/)).not.toHaveAttribute('aria-invalid', 'true')
   })
@@ -352,24 +352,24 @@ describe('a dialog the app dismisses', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
     view.rerender(<Held dismissed onClose={onClose} onToast={onToast} />)
     expect(onClose).not.toHaveBeenCalled()
-    await act(async () => { fail(new Error('GitHub did not accept the report')) })
+    await act(async () => { fail(new APIError(502, 'GitHub did not accept the report', null)) })
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
     expect(onToast).toHaveBeenCalledTimes(1)
-    expect(onToast).toHaveBeenCalledWith('The bug report was closed because this tab is now on another profile, and the report was not sent: GitHub did not accept the report', 'error')
+    expect(onToast).toHaveBeenCalledWith('The bug report was closed because this tab is now on another profile, and the report was not sent: Could not send the report just now.', 'error')
   })
 
   // A refusal from before the switch counts too, for as long as nothing has
   // been sent since; one that was followed by a report that went does not.
   it('says it of a send that had already been refused, and not once a later one has gone', async () => {
     const user = userEvent.setup()
-    submitBugReport.mockRejectedValueOnce(new Error('GitHub did not accept the report'))
+    submitBugReport.mockRejectedValueOnce(new APIError(502, 'GitHub did not accept the report', null))
     const onClose = vi.fn()
     const onToast = vi.fn()
     const view = render(<Held dismissed={false} onClose={onClose} onToast={onToast} />)
     const dialog = screen.getByRole('dialog')
     await fill(user, dialog)
     await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
-    await waitFor(() => expect(dialog.querySelector('#bug-error')).toHaveTextContent('GitHub did not accept the report'))
+    await waitFor(() => expect(dialog.querySelector('#bug-error')).toHaveTextContent('Could not send the report just now.'))
     await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
     await within(dialog).findByRole('button', { name: 'Done' })
     onToast.mockClear()

@@ -23,6 +23,7 @@ import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel
 import { getRecap, getRecapStatus, getUserRating, setUserRating, posterURL, backdropURL, type Episode as ApiEpisode, type MediaDetail, type MediaFile, type ContinueWatchingItem, type RecapResponse, type RecapStatusResponse, type AudioTrack, type SubtitleTrack } from '@/lib/api'
 import { partyEpisodeId } from '@/lib/partyEpisode'
 import { type Media } from '@/lib/types'
+import { failureWords } from '@/lib/failureWords'
 
 interface DetailViewProps {
   media: Media
@@ -197,7 +198,7 @@ export default function DetailView({
       setRecapState({
         identity,
         loading: false,
-        error: caught instanceof Error ? caught.message : 'Failed to load recap',
+        error: failureWords(caught, 'load the recap') ?? 'Could not load the recap.',
       })
     }
   }, [media.id, profileId, profileReady])

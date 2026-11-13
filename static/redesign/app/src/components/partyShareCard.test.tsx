@@ -20,12 +20,14 @@ const { getPartyCardLinks, getPartyInviteRoster, listMembers } = vi.hoisted(() =
   listMembers: vi.fn(async () => []),
 }))
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async importOriginal => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   getPartyCardLinks,
   getPartyInviteRoster,
   listMembers,
 }))
 
+import { APIError } from '@/lib/api'
 import { PartyShareCardModal } from './PartyShareCardModal'
 import { PartyLobbyCard } from './PartyLobbyCard'
 import { PartyComposerModal } from './PartyComposerModal'
@@ -151,9 +153,11 @@ describe('PartyShareCardModal', () => {
   })
 
   it('surfaces a card-links failure instead of a broken preview', async () => {
-    getPartyCardLinks.mockRejectedValueOnce(new Error('only the host can share this party’s card'))
+    getPartyCardLinks.mockRejectedValueOnce(new APIError(403, 'only the host can share this party’s card', null))
     render(<PartyShareCardModal code="7K2QD9" onClose={() => {}} />)
-    expect(await screen.findByText(/only the host can share/i)).toBeInTheDocument()
+    // The refusal in the app's words, not the server's.
+    expect(await screen.findByText('Only the party’s host can share its card.')).toBeInTheDocument()
+    expect(screen.queryByText(/only the host can share this/i)).toBeNull()
     expect(screen.queryByAltText('Watch party card for code 7K2QD9')).not.toBeInTheDocument()
   })
 

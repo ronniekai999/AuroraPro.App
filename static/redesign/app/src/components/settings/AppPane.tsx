@@ -10,6 +10,7 @@ import { getPushConfig, sendPushTest } from '@/lib/api'
 import { installPrompt, installUIState, isIOSDevice, isStandaloneDisplay } from '@/lib/pwa'
 import { disablePush, enablePush, pushSupported, pushUIState, type PushUIState } from '@/lib/push'
 import { PaneSection, SettingRow, SettingSwitch } from './controls'
+import { failureWords } from '@/lib/failureWords'
 
 type OnToast = (message: string, type?: Toast['type']) => void
 
@@ -217,7 +218,7 @@ function PushControls({ onToast }: { onToast?: OnToast }) {
     setBusy(true)
     sendPushTest()
       .then(r => onToast?.(`Test sent to ${r.devices} device${r.devices === 1 ? '' : 's'}`, 'success'))
-      .catch((e: unknown) => onToast?.(e instanceof Error ? e.message : 'The test could not be sent', 'error'))
+      .catch((e: unknown) => onToast?.(failureWords(e, 'send the test') ?? 'The test could not be sent.', 'error'))
       .finally(() => setBusy(false))
   }
 

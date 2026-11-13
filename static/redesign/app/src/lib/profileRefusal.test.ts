@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { APIError } from './api'
+import { APIError, NetworkError } from './api'
 import { refusalMessage, refusalReason, waitPhrase } from './profileRefusal'
 
 const refusal = (reason: string, status = 409, retryAfterSec?: number) =>
@@ -41,10 +41,20 @@ describe('refusalMessage', () => {
     expect(refusalMessage(refusal('rate_limited', 429, 900), 'x')).toBe('Too many tries at changing a PIN in a short time. Try again in about 15 minutes.')
   })
 
-  it('keeps the server\'s message for a refusal with no reason it knows, and the fallback for none at all', () => {
-    expect(refusalMessage(new APIError(400, 'maximum number of profiles reached', null), 'fallback')).toBe('maximum number of profiles reached')
+  // A refusal with no reason this file knows is never said in the server's
+  // words (they are written for a log): by its kind when the caller says
+  // what it was doing, else in the caller's own sentence.
+  it('says a refusal with no reason it knows by its kind, or in the fallback, never in the server\'s words', () => {
+    const plain = new APIError(400, 'maximum number of profiles reached', null)
+    expect(refusalMessage(plain, 'fallback')).toBe('fallback')
+    expect(refusalMessage(plain, 'fallback', { doing: 'add the profile' })).toBe('Could not add the profile.')
+    expect(refusalMessage(new APIError(404, 'profile not found', null), 'fallback', { doing: 'save it' })).toBe('That is not available.')
+    expect(refusalMessage(new NetworkError('Failed to fetch'), 'fallback', { doing: 'save it' })).toBe('Could not reach the server. Check the connection and try again.')
+    expect(refusalMessage(plain, 'fallback', { doing: 'add the profile', overrides: { status: { 400: 'Mine.' } } })).toBe('Mine.')
     expect(refusalMessage(new TypeError(''), 'fallback')).toBe('fallback')
     expect(refusalMessage(null, 'fallback')).toBe('fallback')
+    // An abandoned request says nothing of its own: the fallback stands.
+    expect(refusalMessage(new DOMException('aborted', 'AbortError'), 'fallback', { doing: 'save it' })).toBe('fallback')
   })
 })
 

@@ -46,7 +46,7 @@ export function unlockErrorMessage(e: unknown, mode: 'pin' | 'password'): string
     default:
       // The lockout (with how long to wait), a session the server has ended,
       // a profile changed elsewhere: the words every profile refusal gets.
-      return refusalMessage(e, 'Something went wrong. Try again.')
+      return refusalMessage(e, 'Something went wrong. Try again.', { doing: 'unlock the profile' })
   }
 }
 

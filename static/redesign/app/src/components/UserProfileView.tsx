@@ -30,6 +30,7 @@ import {
 } from '@/lib/api'
 import { SOCIAL_NETWORKS, socialUrl } from '@/lib/socialLinks'
 import { type Media } from '@/lib/types'
+import { failureWords } from '@/lib/failureWords'
 
 function mapWatchToMedia(w: MemberRecentWatch): Media {
   return {
@@ -142,10 +143,8 @@ export default function UserProfileView({ username, onSelect, onCardContext, onO
       })
       .catch((e: unknown) => {
         if (cancelled) return
-        // apiFetch surfaces the server's message ("member not found") —
-        // show it rather than a generic failure so a dead link reads as
-        // exactly that.
-        setError(e instanceof Error ? e.message : 'Failed to load profile')
+        // A dead link (the server's 404) reads as exactly that.
+        setError(failureWords(e, 'load this page', { status: { 404: 'This member’s page is not available.' } }) ?? 'This page could not be loaded.')
       })
     return () => { cancelled = true }
   }, [username])

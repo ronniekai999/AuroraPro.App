@@ -54,6 +54,14 @@ describe('AccountPane', () => {
     api.changePassword.mockResolvedValue(undefined)
   })
 
+  // A list that could not be read is said in the app's words.
+  it('says the sign-in methods could not be loaded, not what the server said', async () => {
+    api.listOAuthLinks.mockReset().mockRejectedValue(new APIError(500, 'pq: connection refused', null))
+    render(<AccountPane user={USER} activeProfile={profile()} profileKnown onLogout={vi.fn()} />)
+    expect(await screen.findByText('Could not load the sign-in methods just now.')).toBeInTheDocument()
+    expect(document.body.textContent).not.toMatch(/pq:/)
+  })
+
   // The server's logout ends every session on the account. The control must
   // never read as signing out one device: that does not exist. And since it
   // reaches every device, one press is not enough.
@@ -177,9 +185,12 @@ describe('AccountPane', () => {
 
   it('words the other refusals of a password change', () => {
     expect(passwordErrorMessage(new APIError(429, 'rate limit exceeded, try again later', null))).toBe('Too many attempts. Wait a minute, then try again.')
-    expect(passwordErrorMessage(new APIError(400, 'new password must be at least 8 characters', null))).toBe('new password must be at least 8 characters')
+    // The server's words are for a log; the form checks the length itself.
+    expect(passwordErrorMessage(new APIError(400, 'new password must be at least 8 characters', null))).toBe('Could not change the password.')
+    // A 500 can follow a change that went through: it is not said to have failed.
+    expect(passwordErrorMessage(new APIError(500, 'password updated but session revocation failed; contact admin', null))).toBe('Something went wrong on the server, and the password may or may not have changed.')
     expect(passwordErrorMessage(new APIError(401, 'server words', { error: { code: 401, message: 'server words', reason: 'session_ended' } }))).toMatch(/signed out/)
-    expect(passwordErrorMessage(new TypeError(''))).toBe('The password could not be changed. Try again.')
+    expect(passwordErrorMessage(new TypeError(''))).toBe('Could not change the password just now.')
   })
 
   // An account that signs in only through a linked account has no password

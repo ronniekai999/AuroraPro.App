@@ -298,7 +298,9 @@ describe('the error screen: reporting the problem', () => {
     await user.keyboard('{Enter}')
     expect(api.submitBugReport).toHaveBeenCalledTimes(1)
     await act(async () => { refuse(new APIError(503, 'Reports cannot be filed right now.', { error: { code: 503, message: 'Reports cannot be filed right now.' } })) })
-    expect(within(aside).getByRole('alert')).toHaveTextContent('Reports cannot be filed right now.')
+    // Said in the app's words, not the server's.
+    expect(within(aside).getByRole('alert')).toHaveTextContent('Could not send the report just now.')
+    expect(aside.textContent).not.toMatch(/Reports cannot be filed/)
     expect(within(aside).getByRole('button', { name: 'Send report' })).toHaveFocus()
     // What was written is still there, and the next press sends it.
     expect(within(aside).getByLabelText(/^Title/)).toHaveValue('Collections will not open')
@@ -382,7 +384,7 @@ describe('the error screen: another tab changes who this browser is', () => {
     await within(aside).findByRole('alert')
     anotherTab(() => signedIn(MORGAN, 2))
     await waitFor(() => expect(panel()).toBeNull())
-    expect(said()).toBe('The report was closed because this browser moved to another profile, and it was not sent: Reports cannot be filed right now.')
+    expect(said()).toBe('The report was closed because this browser moved to another profile, and it was not sent: Could not send the report just now.')
   })
 
   // A send that is out is not cut off: the report closes when it has

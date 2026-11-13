@@ -15,6 +15,10 @@ const api = vi.hoisted(() => ({
 			this.body = body
 		}
 	},
+	// lib/failureWords reads a lost connection by this class.
+	NetworkError: class NetworkError extends TypeError {
+		constructor(message: string) { super(message); this.name = 'NetworkError' }
+	},
   askPreviously: vi.fn(),
   clearRecapConversation: vi.fn(),
   clearUnsafeRecapTurns: vi.fn(),
@@ -116,8 +120,10 @@ describe('RecapModal Ask Previously', () => {
 
     await user.click(screen.getByRole('button', { name: 'Ask Previously' }))
     expect(screen.queryByRole('textbox', { name: 'Ask about what you’ve watched' })).not.toBeInTheDocument()
-    rejectLoad(new Error('History is unavailable.'))
-    expect(await screen.findByText('History is unavailable.')).toBeInTheDocument()
+    // The server's words are for a log: the page says the kind of failure.
+    rejectLoad(new api.APIError(503, 'History is unavailable.'))
+    expect(await screen.findByText('Could not load your questions just now.')).toBeInTheDocument()
+    expect(screen.queryByText('History is unavailable.')).toBeNull()
     expect(screen.queryByRole('textbox', { name: 'Ask about what you’ve watched' })).not.toBeInTheDocument()
   })
 
@@ -151,7 +157,7 @@ describe('RecapModal Ask Previously', () => {
   it('retries a failed answer with the same idempotency key', async () => {
     const user = userEvent.setup()
     api.askPreviously
-      .mockRejectedValueOnce(new Error('The AI took too long.'))
+      .mockRejectedValueOnce(new api.APIError(504, 'The AI took too long.'))
       .mockResolvedValueOnce({ turn: turn(), current_up_to: boundary })
     renderModal()
     await user.click(screen.getByRole('button', { name: 'Ask Previously' }))
@@ -160,13 +166,34 @@ describe('RecapModal Ask Previously', () => {
     const composer = screen.getByRole('textbox', { name: 'Ask about what you’ve watched' })
     await user.type(composer, 'What happened to Paige?')
     await user.keyboard('{Enter}')
-    expect(await screen.findByText('The AI took too long.')).toBeInTheDocument()
+    expect(await screen.findByText('Could not answer that just now.')).toBeInTheDocument()
+    expect(screen.queryByText('The AI took too long.')).toBeNull()
     const firstRequestID = api.askPreviously.mock.calls[0][1]
 
     await user.click(screen.getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(api.askPreviously).toHaveBeenCalledTimes(2))
     expect(api.askPreviously.mock.calls[1][1]).toBe(firstRequestID)
     expect(await screen.findByText(/restored her bond with her sisters/i)).toBeInTheDocument()
+  })
+
+  // A change the server refuses is said in the app's words.
+  it('says a clear that did not go through in the app\'s words', async () => {
+    const user = userEvent.setup()
+		api.getRecapConversation.mockResolvedValueOnce({
+      available: true,
+			can_ask: true,
+      turns: [turn({ up_to: { ...boundary, season: 4, episode: 22 } })],
+			current_up_to: { episode_id: 402, season: 4, episode: 22 },
+			hidden_turn_count: 2,
+			highest_hidden_up_to: boundary,
+		})
+		api.clearUnsafeRecapTurns.mockRejectedValueOnce(new api.APIError(500, 'pq: deadlock detected'))
+    renderModal({ upTo: { episode_id: 402, season: 4, episode: 22 } })
+    await user.click(screen.getByRole('button', { name: 'Ask Previously' }))
+    await user.click(await screen.findByRole('button', { name: 'Clear hidden answers' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Clear hidden answers' }))
+    expect(await screen.findByText('Could not make that change just now.')).toBeInTheDocument()
+    expect(document.body.textContent).not.toMatch(/deadlock/)
   })
 
   it('protects rewound history and can clear only hidden answers', async () => {
@@ -180,7 +207,7 @@ describe('RecapModal Ask Previously', () => {
 				hidden_turn_count: 2,
 				highest_hidden_up_to: boundary,
 			})
-			.mockRejectedValueOnce(new Error('Reconciliation failed.'))
+			.mockRejectedValueOnce(new api.APIError(500, 'Reconciliation failed.'))
     renderModal({ upTo: { episode_id: 402, season: 4, episode: 22 } })
     await user.click(screen.getByRole('button', { name: 'Ask Previously' }))
 
@@ -191,7 +218,8 @@ describe('RecapModal Ask Previously', () => {
     await user.click(screen.getByRole('button', { name: 'Clear hidden answers' }))
 		await waitFor(() => expect(api.clearUnsafeRecapTurns).toHaveBeenCalledWith(42, 7, expect.any(AbortSignal)))
 		expect(screen.queryByText('2 later answers are hidden')).not.toBeInTheDocument()
-		expect(await screen.findByText('Reconciliation failed.')).toBeInTheDocument()
+		expect(await screen.findByText('Could not load your questions just now.')).toBeInTheDocument()
+		expect(screen.queryByText('Reconciliation failed.')).toBeNull()
   })
 
   it('restores the highest hidden episode through the existing progress API', async () => {
@@ -326,7 +354,8 @@ describe('RecapModal Ask Previously', () => {
 		await user.click(screen.getByRole('button', { name: 'Ask Previously' }))
 		await user.type(await screen.findByRole('textbox', { name: 'Ask about what you’ve watched' }), 'What changed?')
 		await user.keyboard('{Enter}')
-		expect(await screen.findByText('Viewing progress changed.')).toBeInTheDocument()
+		expect(await screen.findByText('Could not answer that.')).toBeInTheDocument()
+		expect(screen.queryByText('Viewing progress changed.')).toBeNull()
 		expect(screen.queryByText('Unsafe E10 question')).not.toBeInTheDocument()
 	})
 
@@ -367,13 +396,14 @@ describe('RecapModal Ask Previously', () => {
 		const user = userEvent.setup()
 		api.getRecapConversation
 			.mockResolvedValueOnce({ ...emptyConversation(), turns: [turn()] })
-			.mockRejectedValueOnce(new Error('Reconciliation failed.'))
+			.mockRejectedValueOnce(new api.APIError(500, 'Reconciliation failed.'))
 		renderModal()
 		await user.click(screen.getByRole('button', { name: 'Ask Previously' }))
 		expect(await screen.findByText('What happened to Paige?')).toBeInTheDocument()
 		await user.click(screen.getByRole('button', { name: 'Clear history' }))
 		await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Clear history' }))
-		expect(await screen.findByText('Reconciliation failed.')).toBeInTheDocument()
+		expect(await screen.findByText('Could not load your questions just now.')).toBeInTheDocument()
+		expect(screen.queryByText('Reconciliation failed.')).toBeNull()
 		expect(screen.queryByText('What happened to Paige?')).not.toBeInTheDocument()
 		expect(screen.queryByText(/restored her bond with her sisters/i)).not.toBeInTheDocument()
 	})

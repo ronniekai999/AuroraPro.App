@@ -15,6 +15,7 @@ import { refusalMessage } from '@/lib/profileRefusal'
 import { isRestrictedProfile, openDoorProfiles } from '@/lib/profileSession'
 import { PaneNote, SettingSelect } from './controls'
 import { ProfileRow } from './ProfileRow'
+import { failureWords } from '@/lib/failureWords'
 
 type OnToast = (message: string, type?: Toast['type']) => void
 
@@ -75,7 +76,7 @@ export function ProfilesPane({ actingProfile, profileKnown, profileSettled = tru
         return list
       } catch (e) {
         if (gen !== loadGenRef.current) return latestLoadRef.current
-        setErr(e instanceof Error && e.message ? e.message : 'The profiles could not be loaded.')
+        setErr(failureWords(e, 'load the profiles') ?? 'The profiles could not be loaded.')
         return null
       }
     })()
@@ -165,13 +166,16 @@ export function ProfilesPane({ actingProfile, profileKnown, profileSettled = tru
 const NAME_MAX_BYTES = 100
 const byteLength = (text: string) => new TextEncoder().encode(text).length
 
-/** What to say when adding a profile is refused. The server words its
- *  profile count limit for a log. */
+/** What to say when adding a profile is refused. The server refuses the
+ *  profile count limit with a plain 400 and words written for a log; the
+ *  form leaves no other 400 likely (it checks the name, and offers only the
+ *  avatars and limits the server takes), but a 400 cannot prove it, so the
+ *  limit is said as what it most likely is. */
 export function addProfileRefusal(e: unknown): string {
-  if (e instanceof Error && /maximum number of profiles/i.test(e.message)) {
-    return 'This account has as many profiles as the server allows. Delete one to add another.'
-  }
-  return refusalMessage(e, 'The profile could not be added.')
+  return refusalMessage(e, 'The profile could not be added.', {
+    doing: 'add the profile',
+    overrides: { status: { 400: 'The profile could not be added. This account may have as many profiles as the server allows: delete one to add another.' } },
+  })
 }
 
 function AddProfile({ first, onAdded, onToast }: {
