@@ -2023,9 +2023,10 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   a lost connection and the app's own failure; a 404 says the same whether
   or not the thing exists. The server's text is for the Admin page only, as
   a secondary line (`serverSaidForAdmin`); what is not yet on the helper
-  still shows it: the Admin page's panel loads and its update and
-  connection tests as their only line, and the manual match dialog after
-  its own sentence (known gap). The browser's own alert,
+  still shows it: on the Admin page its panel loads, its update and
+  connection tests, the stream diagnosis and the referral question's save
+  as their only line, and the manual match dialog after its own sentence
+  (known gap). The browser's own alert,
   confirm and prompt boxes are not used: `noNativeDialogs.test.ts` reads
   every source file with a scanner that blanks comments only (it knows
   strings, template literals, regular expressions and both comment kinds;
@@ -2100,8 +2101,10 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   it is out, and after `WAY_OUT_AFTER_MS` (10 s) offers a way out that
   closes it and sends or aborts nothing, the panel then saying what is
   still out and, when it lands, what came of it. While a request of a kind
-  is out no new question of that kind is asked (its opener is
-  `aria-disabled` and described by the waiting line). A refusal is said in
+  is out no new question of that kind is asked (delete library, delete room,
+  purge, deny and stop stream: the opener is `aria-disabled` and described
+  by the waiting line; the restore button is `disabled`, the retype's
+  buttons and a user's menu `aria-disabled`, with no description). A refusal is said in
   the dialog; a 404 closes it, reads the list again and says the thing was
   already gone. A role question keeps the role it was asked about and sends
   nothing if the row has changed since; a role change that may have
@@ -2109,9 +2112,11 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   Approve and deny keep the ids that are out in a set, so one row's answer
   never unlocks another row still out: the server's `Approve` checks the
   status and then writes it with nothing atomic between.
-- Failures are said by kind through `adminFailure` over `lib/failureWords`,
-  with the server's text as a capped second line (`serverSaidForAdmin`).
-  A write that got no answer is said to have maybe happened.
+- The dialogs' and the actions' failures are said by kind through
+  `adminFailure` over `lib/failureWords`, with the server's text as a
+  capped second line (`serverSaidForAdmin`); a write that got no answer is
+  said to have maybe happened. (The panel loads and a few tests still show
+  the server's text alone: see the failure-words bullet above.)
 - A restore runs on its request's context on the server
   (`internal/api/admin_backup.go`), so a reload, a closed tab or a lost
   connection stops `pg_restore` part way and can leave the database empty.
@@ -2122,7 +2127,8 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   the request's `finally`, whatever the Admin page does meanwhile. The
   outcome goes to a module store keyed by the account id from before the
   restore; the backup panel says it, or `RestoreOutcomeAlert` (mounted by
-  App for `adminUI && user`) does when the page is gone.
+  App for `adminUI && user`) does when no backup panel is mounted as it
+  lands (another Admin section, or another page).
 - Known gaps: the server-side hazard itself is unfixed (a restore should
   outlive its request); the outcome is memory only (a reload loses it) and
   keyed by the pre-restore account id (after a restore from another

@@ -141,8 +141,10 @@ function closing(code: string, open: number): number {
 }
 
 /** What names the page's global object here: `window` (with a `!`), its
- *  synonyms, and `document.defaultView`. */
-const WIN = String.raw`(?:window|globalThis|self|top|parent|document\s*(?:\?\.|\.)\s*defaultView)\s*!?`
+ *  synonyms, and `document.defaultView`, also reached through another of
+ *  them (`window.top`, `globalThis.window`, `self.parent`). */
+const WIN0 = String.raw`(?:window|globalThis|self|top|parent|document\s*(?:\?\.|\.)\s*defaultView)\s*!?`
+const WIN = String.raw`(?:${WIN0}\s*(?:\?\.|\.)\s*)*${WIN0}`
 const BOX = String.raw`(?:alert|confirm|prompt)`
 const NATIVE = [
   // `window.alert`, `window?.confirm`, `window!.prompt`, `document.defaultView!.confirm`.
@@ -187,6 +189,30 @@ function usesNative(text: string): boolean {
   return false
 }
 
+/** Where the scanner blanks something outside the comments TypeScript's
+ *  parser finds (the first such offset), or null. */
+function blankedOutsideComments(path: string, text: string): number | null {
+  const file = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
+  const inComment = new Uint8Array(text.length)
+  const mark = (ranges: ts.CommentRange[] | undefined) => {
+    for (const r of ranges ?? []) inComment.fill(1, r.pos, r.end)
+  }
+  const jsxText: ts.Node[] = []
+  const visit = (node: ts.Node) => {
+    mark(ts.getLeadingCommentRanges(text, node.pos))
+    mark(ts.getTrailingCommentRanges(text, node.end))
+    if (node.kind === ts.SyntaxKind.JsxText) jsxText.push(node)
+    for (const child of node.getChildren(file)) visit(child)
+  }
+  visit(file)
+  for (const n of jsxText) inComment.fill(0, n.pos, n.end)
+  const code = withoutComments(text)
+  for (let k = 0; k < text.length; k++) {
+    if (code[k] !== text[k] && !/\s/.test(text[k]) && !inComment[k]) return k
+  }
+  return null
+}
+
 describe('no native alert, confirm or prompt boxes', () => {
   it('none is used in the app\'s sources, outside the files still being moved off them', () => {
     const all = sources()
@@ -214,10 +240,12 @@ describe('no native alert, confirm or prompt boxes', () => {
       // view, an optional call and a tagged template.
       'window!.confirm("x")', '(window!).alert("x")', '((window as any)).confirm("x")', "(window satisfies Window)['prompt']('x')",
       'document.defaultView!.confirm("x")', 'document?.defaultView?.alert("x")', 'alert?.("x")', 'confirm`Leave?`',
+      // Through another name for the global object.
+      'window.top.alert("x")', 'window.parent.confirm("x")', 'globalThis.window.alert("x")', 'self.window.prompt("x")', 'window?.top?.["confirm"]("x")',
     ]) {
       expect(usesNative(box), box).toBe(true)
     }
-    for (const not of ['async prompt() {', '  prompt(): Promise<void>', 'await e.prompt()', 'deferred.prompt()', 'onConfirm()', 'setAlert(true)', '// window.alert("x")', '/* confirm("x") */', 'const s = "a // b"']) {
+    for (const not of ['async prompt() {', '  prompt(): Promise<void>', 'await e.prompt()', 'deferred.prompt()', 'onConfirm()', 'setAlert(true)', 'frame.parent.confirm()', 'this.top.alert()', '// window.alert("x")', '/* confirm("x") */', 'const s = "a // b"']) {
       expect(usesNative(not), not).toBe(false)
     }
   })
@@ -277,26 +305,24 @@ describe('no native alert, confirm or prompt boxes', () => {
 
   // What pins that no code is blanked: every character the scanner blanks
   // lies inside a comment as TypeScript's own parser finds them (each
-  // node's leading and trailing comment ranges, JSX text being no comment).
+  // node's leading and trailing comment ranges). JSX text holds no comment,
+  // but TypeScript's comment scanner, asked at a JSX text node, reads one
+  // that opens with `//` or `/*` as a comment, so JSX text is taken out of
+  // the comment ranges after they are marked.
   it('blanks nothing outside the comments TypeScript finds, in every source file', () => {
     for (const [path, text] of sources()) {
-      const file = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
-      const inComment = new Uint8Array(text.length)
-      const mark = (ranges: ts.CommentRange[] | undefined) => {
-        for (const r of ranges ?? []) inComment.fill(1, r.pos, r.end)
-      }
-      const visit = (node: ts.Node) => {
-        mark(ts.getLeadingCommentRanges(text, node.pos))
-        mark(ts.getTrailingCommentRanges(text, node.end))
-        for (const child of node.getChildren(file)) visit(child)
-      }
-      visit(file)
-      const code = withoutComments(text)
-      for (let k = 0; k < text.length; k++) {
-        if (code[k] !== text[k] && !/\s/.test(text[k]) && !inComment[k]) {
-          throw new Error(`${path}: code blanked at line ${text.slice(0, k).split('\n').length}`)
-        }
-      }
+      const at = blankedOutsideComments(path, text)
+      if (at !== null) throw new Error(`${path}: code blanked at line ${text.slice(0, at).split('\n').length}`)
     }
+  })
+
+  it('finds code blanked behind JSX text that holds a comment\'s start', () => {
+    for (const source of [
+      "export const P = () => <p>// see {window.confirm('x') ? 'a' : 'b'}</p>\n",
+      "export const P = () => <p>/* see {window.confirm('x') ? 'a' : 'b'}</p>\nconst q = '*/'\n",
+    ]) {
+      expect(blankedOutsideComments('probe.tsx', source), source).not.toBeNull()
+    }
+    expect(blankedOutsideComments('probe.tsx', "export const P = () => <p>{/* a note */}see</p> // a comment\n")).toBeNull()
   })
 })
