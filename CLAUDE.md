@@ -1963,8 +1963,11 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
 - A title's My Library writes go to the server one at a time, in the order
   made (`changeLibrary`'s queue, keyed by profile and title; both routes
   are idempotent, so a write is sent whatever became of the one before it),
-  except one whose turn comes while the session acts as another profile:
-  it is not sent (the server would refuse it). Each write's in-flight mark
+  also when its turn comes after a profile switch: it names its profile in
+  the address, so the server takes it from a session acting as an
+  unrestricted profile and refuses it (403) from one acting as a restricted
+  profile, and either way nothing of it reaches the new profile's screen
+  (the owner checks below). Each write's in-flight mark
   (`pendingLibOpsRef`) is its own object, cleared only by that write. A
   refused write takes back its own toast; only the latest write asked for
   a title is taken back on screen and said ("Couldn't …"), and a queue in
@@ -1998,19 +2001,23 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
 - Pinned by `AuthView.test.tsx`, `Toast.test.tsx`, `lib/libraryUndo.test.ts`,
   `lib/devicePairing.test.ts`, `App.cardMenu.test.tsx` (a stub that holds
   and fails library writes), `App.profileSwitch.test.tsx` (a removal's toast
-  and a refusal across a switch, every commit sampled; a queued Undo not
-  sent after one) and
+  and a refusal across a switch, every commit sampled; a queued Undo sent
+  after one, taken or refused) and
   `App.searchRequest.test.tsx` (a sign-out, an expiry, the TV intent).
 - Known gaps: the owner half of `undoMayRestore` is pinned at the function
   only (once toasts go at a switch no press reaches it in the app); a
-  queued write whose turn comes after a profile switch is dropped without a
-  word, so a parent who removed a title on a slow network, pressed Undo and
-  switched to another profile before the removal was answered keeps the
-  removal (the same class as the progress writes a switch refuses, see
-  Profile lock); "acting as" is this tab's own record of the session's
-  profile, so a switch made only in another tab, or one this tab has sent
-  and not yet seen answered, is not seen and that write is sent and
-  refused; when the read at the end of a failed queue fails too, the
+  queued write whose turn comes after a switch to a restricted profile is
+  refused and lost with nothing said, so a parent who removed a title on a
+  slow network, pressed Undo and switched to a kid's profile before the
+  removal was answered keeps the removal, and the title is as the last
+  answered write left it until that profile's list is next read (the same
+  class as the progress writes a switch refuses, see Profile lock); the
+  read at the end of a failed queue replaces the whole list, so if the
+  server answered it before another title's save landed, and that save's
+  mark is cleared before the answer arrives, that title leaves the screen
+  until the next read (a suspicion from reading, not observed; the startup
+  and switch reconcile has the same race); when the read at the end of a
+  failed queue fails too, the
   screen keeps what the queue's last answer left on it until the next
   library read; when a removal and its Undo are both refused, the read
   puts the title back and the Undo's "Couldn't put … back" is still said;

@@ -146,13 +146,18 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     if (p === '/api/media/search') searches.push({ asked, mode: url.searchParams.get('mode') })
     if (p === '/api/profiles') profileLists++
     // A write to a profile's own list: recorded, kept back while
-    // 'library-write' is held, and refused when told to be.
+    // 'library-write' is held, and refused when told to be. As the server
+    // does (resolveRequestProfile), a session acting as a restricted profile
+    // may name only that profile; an unrestricted one may name any.
     if (/^\/api\/profiles\/\d+\/library(\/\d+)?$/.test(p) && init?.method && init.method !== 'GET') {
       libraryWrites.push(`${init.method} ${p}`)
+      const named = Number(p.split('/')[3])
+      const restricted = !!profiles.find(x => x.id === asked)?.max_age_rating && named !== asked
       const fails = libraryWriteFails.n > 0
       if (fails) libraryWriteFails.n--
       const kept = holds.get('library-write')
       if (kept) await kept
+      if (restricted) return json({ error: { code: 403, message: 'profile is restricted', reason: 'profile_restricted' } }, 403)
       return fails ? json({ error: { code: 500, message: 'failed to resolve library' } }, 500) : new Response(null, { status: 204 })
     }
     const held = holds.get(p === '/api/auth/me' ? 'me'
@@ -804,14 +809,15 @@ describe('a profile switch never commits the new name over the previous profileâ
     expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toEqual(['Kidonly Saved'])
   })
 
-  // An Undo's save waits behind the removal it undoes. A switch made while
-  // both are out: the save's turn comes on a session that now acts as the
-  // Kid, naming the Parent's profile, and the server would refuse it. It is
-  // not sent.
-  it('with an Undo waiting behind its removal: the Undo is not sent for the previous profile', async () => {
+  // An Undo's save waits behind the removal it undoes, and a switch is made
+  // while both are out. The save names the Parent's profile in its address,
+  // which a session acting as an unrestricted profile may name: it is sent,
+  // and the server takes it. It is the Parent's list's business: nothing of
+  // it is drawn or said under the Kid.
+  it('with an Undo waiting behind its removal: the Undo is sent for the previous profile, and none of it shows on the new one', async () => {
     vi.unstubAllGlobals()
     server = stubServer({ kidUnrestricted: true })
-    renderApp('/library')
+    const commits = renderApp('/library')
     const release = server.hold('library-write')
     const said = await removeTheSavedTitle()
     await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104']))
@@ -819,9 +825,40 @@ describe('a profile switch never commits the new name over the previous profileâ
     switchToKid()
     await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
     release()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104', 'POST /api/profiles/1/library']))
     await new Promise(done => setTimeout(done, 200))
-    expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104'])
-    expect(screen.queryByText(/Couldn't/)).toBeNull()
+    expect(kidOverParent(commits)).toBe(0)
+    expect(screen.queryByText('Parentonly Saved')).toBeNull()
+    expect(screen.queryByText(/Couldn't|Parentonly/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull()
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toEqual(['Kidonly Saved'])
+  })
+
+  // The same into a restricted profile: a session acting as it may name only
+  // it, so the server refuses the Undo (403). Nothing is said, and nothing on
+  // the Kid's screen changes. (The Parent's removal stands: see CLAUDE.md's
+  // known gaps.)
+  it('with an Undo waiting behind its removal, into a restricted profile: the refused Undo says and changes nothing', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer()
+    const commits = renderApp('/library')
+    const release = server.hold('library-write')
+    const said = await removeTheSavedTitle()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104']))
+    fireEvent.click(within(said.closest('.toast') as HTMLElement).getByRole('button', { name: 'Undo' }))
+    switchToKid()
+    await kidHeroUp()
+    const settled = commits.length
+    const before = pageText()
+    release()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104', 'POST /api/profiles/1/library']))
+    await new Promise(done => setTimeout(done, 200))
+    expect(kidOverParent(commits)).toBe(0)
+    expect(screen.queryByText(/Couldn't|Parentonly/)).toBeNull()
+    expect(document.querySelector('.toast')).toBeNull()
+    // Nothing drawn after the refusal differs from what was up before it.
+    expect(pageText()).toBe(before)
+    expect(commits.slice(settled).every(c => c.label === 'Kid' && !c.parentTitles)).toBe(true)
   })
 
   it('on My Library, into a restricted profile: the page goes with the switch', async () => {

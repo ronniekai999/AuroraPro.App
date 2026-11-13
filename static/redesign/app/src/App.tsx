@@ -2890,8 +2890,10 @@ export default function App() {
   // made in quick succession by hand could pass each other the same way.
   // Both routes are idempotent, so every write is sent, whatever became of
   // the one before it, and the last one sent is the last one made. A write
-  // whose turn comes after a profile switch is not sent: the session no
-  // longer acts as the profile it names, and the server would refuse it.
+  // whose turn comes after a profile switch is still sent: it names its
+  // profile in the address, which an unrestricted session may name (a
+  // restricted one is refused, and the owner checks below keep that off the
+  // new profile's screen).
   const libraryWritesRef = useRef<Map<string, { tail: Promise<unknown>; made: number; failed: boolean }>>(new Map())
   // One change to a profile's My Library: made on screen at once, then sent.
   // `refused(last)`: the server did not take it; `last` says whether it was
@@ -2913,9 +2915,7 @@ export default function App() {
     const queue = libraryWritesRef.current.get(key) ?? { tail: Promise.resolve(), made: 0, failed: false }
     libraryWritesRef.current.set(key, queue)
     const n = ++queue.made
-    const send = () => (actingProfileRef.current !== profileId
-      ? Promise.reject(new Error('the session acts as another profile'))
-      : op === 'add' ? addToLibrary(profileId, m.id) : removeFromLibrary(profileId, m.id))
+    const send = () => (op === 'add' ? addToLibrary(profileId, m.id) : removeFromLibrary(profileId, m.id))
     const sent = queue.tail.then(send, send)
     queue.tail = sent
     const last = () => queue.made === n
