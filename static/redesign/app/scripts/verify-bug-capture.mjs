@@ -43,6 +43,11 @@
 // under the limits; each of the two defects, alone, puts several percent of
 // the picture and its heading over them.
 //
+// What it leans on: the browser hides scrollbars (headless does; a visible
+// one is drawn in the screenshot and not in the copy), and the Bricolage
+// headings pin the font embedding (where Inter is installed on the machine,
+// the copy draws Inter text right with no fonts embedded; CI has none).
+//
 // Run after a build (the audit chain does): node scripts/verify-bug-capture.mjs
 
 import { chromium } from 'playwright'

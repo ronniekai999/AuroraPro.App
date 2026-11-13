@@ -2160,9 +2160,16 @@ and `lib/pageCapture.test.ts`.
   `finally`.
 - A `data-screenshot-exclude` part in the page's flow is copied as an empty
   box drawn as nothing (nothing inside it is copied), so the page does not
-  move into its place; a fixed or absolutely placed one is left out. An
-  excluded field's box is copied, so the form's masking must blank its
-  value before the copy.
+  move into its place; a fixed or absolutely placed one is left out, and so
+  is any excluded canvas, video, svg or iframe, whose copy html-to-image
+  does not make as the element itself (a canvas or video becomes an <img>
+  without the mark, an svg is copied whole). The filter reads the mark as
+  each node is copied, so a part that appears mid-capture is left out. An
+  excluded field's box is copied, so the form blanks its value first, in
+  `beforeCopy`, which runs after the fonts are read (a re-render while the
+  fields waited blank could put a value back). One capture runs at a time
+  from the press (`captureRunningRef`); `keepFontSizes` also holds if two
+  overlap.
 - The copy's body is moved by the scroll with `position: relative` and
   `top`/`left`, and `overflow: visible`, in the copy's own style sheet with
   `!important`: the copied logical insets win over plain `top`/`left`, and
@@ -2174,9 +2181,15 @@ and `lib/pageCapture.test.ts`.
   (`captureFrom: 'top'`; opening it moves a phone's window down to it), the
   dialog from where the window is.
 - Known gaps: an image `fetch` cannot read under the CSP (TMDB posters on
-  the request pages) is drawn as nothing; an inner scroll box is drawn at
-  its top; a backdrop blur picks up a faint tint at its edges; fonts are
-  matched by family only; checked in Chromium only, not Safari or Firefox.
+  the request pages) is drawn as nothing; html-to-image reads every image
+  in the page, those below the window and lazy ones never loaded included,
+  so a capture of a long grid takes seconds (200 titles: about 16 s, as
+  before); an inner scroll box is drawn at its start (a rail scrolled
+  sideways shows its first cards); a backdrop blur picks up a faint tint at
+  its edges; fonts are matched by family only; checked in Chromium only,
+  not Safari or Firefox. The check's font coverage leans on the Bricolage
+  headings: where Inter is installed on the machine, a copy without
+  embedded fonts still draws Inter text right.
 
 ### Nullable database columns
 

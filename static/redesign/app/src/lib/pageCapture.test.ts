@@ -54,6 +54,18 @@ describe('the copy of the page', () => {
     expect(filter(byId('inDialog'))).toBe(false)
   })
 
+  it('leaves out, wherever it is, an excluded part whose copy would be drawn', () => {
+    // html-to-image copies a canvas or a video as a picture of it (an <img>
+    // without the mark that hides an excluded part), and an svg whole.
+    document.body.insertAdjacentHTML('beforeend', `
+      <canvas id="canvas" data-screenshot-exclude="true"></canvas>
+      <video id="video" data-screenshot-exclude="true"></video>
+      <svg id="svg" data-screenshot-exclude="true"><rect id="rect" visibility="visible" width="10" height="10"></rect></svg>
+      <iframe id="frame" data-screenshot-exclude="true"></iframe>`)
+    const { filter } = prepareCopy('window')
+    for (const id of ['canvas', 'video', 'svg', 'rect', 'frame']) expect(filter(byId(id)), id).toBe(false)
+  })
+
   it('leaves out a part that appears during the capture', () => {
     const { filter } = prepareCopy('window')
     // A toast, or a field marked to be left out, that arrives after the
@@ -146,6 +158,15 @@ describe('the fonts written into the copy', () => {
     expect(fetch).toHaveBeenCalledWith('http://aurora.test/v2/assets/display-a.woff2', expect.objectContaining({ cache: 'force-cache' }))
   })
 
+  it('finds faces inside @media, @supports and @layer blocks', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => fontFile()))
+    const doc = fontDocument([{ family: 'Inter', status: 'loaded' }], [{ family: 'Inter', url: '/v2/assets/text-e.woff2' }])
+    const sheet = (doc.styleSheets as unknown as Array<{ cssRules: unknown[] }>)[1]
+    // A grouping rule holding the face, in place of the face itself.
+    sheet.cssRules = [{ cssRules: sheet.cssRules }]
+    expect(await embeddedFontCSS(doc)).toContain('url("data:font/woff2;base64,')
+  })
+
   it('reads a file once', async () => {
     const fetch = vi.fn(async () => fontFile())
     vi.stubGlobal('fetch', fetch)
@@ -222,6 +243,55 @@ describe('a capture', () => {
     expect(during).toBe('17px ')
     expect(window.getComputedStyle).toBe(real)
     expect(window.getComputedStyle(document.body).getPropertyValue('font-size')).toBe('17px')
+  })
+
+  it('blanks the secret fields only once the fonts are read, and fills them in again after', async () => {
+    const order: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async () => { order.push('font read'); return fontFile() }))
+    const fonts = [{ family: 'Inter', status: 'loaded' }]
+    Object.defineProperty(document, 'fonts', { configurable: true, value: { forEach: (fn: (f: unknown) => void) => fonts.forEach(fn) } })
+    const sheet = document.createElement('style')
+    document.head.appendChild(sheet)
+    const rule = Object.create(CSSFontFaceRule.prototype)
+    Object.defineProperty(rule, 'cssText', { value: '@font-face { font-family: Inter; src: url("/v2/assets/text-f.woff2"); }' })
+    Object.defineProperty(rule, 'style', { value: { getPropertyValue: () => 'Inter' } })
+    const sheets = vi.spyOn(document, 'styleSheets', 'get').mockReturnValue([{ href: null, cssRules: [rule] }] as unknown as StyleSheetList)
+    try {
+      const toBlob = vi.fn(async () => { order.push('copy'); return new Blob(['png']) })
+      await capturePage(toBlob as never, {
+        from: 'window',
+        pixelRatio: 1,
+        beforeCopy: () => { order.push('blank'); return () => { order.push('fill in') } },
+      })
+      expect(order).toEqual(['font read', 'blank', 'copy', 'fill in'])
+      order.length = 0
+      await expect(capturePage(vi.fn(async () => { throw new Error('no') }) as never, {
+        from: 'window',
+        pixelRatio: 1,
+        beforeCopy: () => { order.push('blank'); return () => { order.push('fill in') } },
+      })).rejects.toThrow('no')
+      expect(order).toEqual(['blank', 'fill in'])
+    } finally {
+      sheets.mockRestore()
+      sheet.remove()
+      delete (document as unknown as { fonts?: unknown }).fonts
+    }
+  })
+
+  it('puts window.getComputedStyle back when two captures overlap, whichever ends first', async () => {
+    const real = window.getComputedStyle
+    let endFirst!: () => void
+    let endSecond!: () => void
+    const first = capturePage(vi.fn(() => new Promise<Blob>(r => { endFirst = () => r(new Blob(['a'])) })) as never, { from: 'window', pixelRatio: 1 })
+    const second = capturePage(vi.fn(() => new Promise<Blob>(r => { endSecond = () => r(new Blob(['b'])) })) as never, { from: 'window', pixelRatio: 1 })
+    await vi.waitFor(() => { expect(endFirst).toBeDefined(); expect(endSecond).toBeDefined() })
+    endFirst()
+    await first
+    // The second is still drawing: font sizes still reach it as they are.
+    expect(window.getComputedStyle(document.body).getPropertyValue('font-size')).toBe('17px ')
+    endSecond()
+    await second
+    expect(window.getComputedStyle).toBe(real)
   })
 
   it('puts the page back when the capture library fails', async () => {

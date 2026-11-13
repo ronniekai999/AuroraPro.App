@@ -440,7 +440,20 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
   // fork; ~5x smaller chunk). The library's API is single-call:
   // `toBlob(node, options)` returns a Blob directly instead of
   // html2canvas's two-step canvas → toBlob pattern.
+  // One capture at a time, from the press on: `capturing` disables the
+  // button only once the library has loaded, and a second press before
+  // then started a second capture over the first.
+  const captureRunningRef = useRef(false)
   const handleCapture = async () => {
+    if (captureRunningRef.current) return
+    captureRunningRef.current = true
+    try {
+      await captureOnce()
+    } finally {
+      captureRunningRef.current = false
+    }
+  }
+  const captureOnce = async () => {
     clearError()
     // Deep-debug Phase 2 #7 — load the library BEFORE the modal
     // hide. If the chunk fetch fails we want the modal to stay
@@ -495,34 +508,35 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       // as an empty box that keeps its place (lib/pageCapture), and the
       // copy of a field carries its value, so the value has to be gone
       // before the copy is made, even though the box is not drawn.
-      // Restored in the inner finally so a thrown toBlob still leaves
-      // the user's typed values intact.
-      const maskedInputs: Array<{ el: HTMLInputElement | HTMLTextAreaElement; value: string }> = []
-      const sensitiveFields = document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-        'input[type="password"], input[data-screenshot-exclude="true"], textarea[data-screenshot-exclude="true"]',
-      )
-      for (const field of sensitiveFields) {
-        if (field.value) {
-          maskedInputs.push({ el: field, value: field.value })
-          field.value = ''
+      // capturePage calls this once the page's fonts have been read, right
+      // before the copy is made, so the fields are blank for as short a
+      // time as can be (a re-render while they waited could put a value
+      // back), and puts the values back once the picture is drawn, a
+      // thrown toBlob included, so the user's typed values stay intact.
+      const blankSecrets = () => {
+        const maskedInputs: Array<{ el: HTMLInputElement | HTMLTextAreaElement; value: string }> = []
+        const sensitiveFields = document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+          'input[type="password"], input[data-screenshot-exclude="true"], textarea[data-screenshot-exclude="true"]',
+        )
+        for (const field of sensitiveFields) {
+          if (field.value) {
+            maskedInputs.push({ el: field, value: field.value })
+            field.value = ''
+          }
+        }
+        return () => {
+          for (const { el, value } of maskedInputs) {
+            el.value = value
+          }
         }
       }
-      let blob: Blob | null
-      try {
-        // The page's fonts are written into the picture (they were
-        // skipped, on the belief that the browser's font cache would draw
-        // them: it does not, an SVG drawn as an image loads no fonts, and
-        // a large heading set in the fallback wrapped over the text under
-        // it). The files are read once a page load, from the browser's
-        // cache. See lib/pageCapture for this and the rest of what the
-        // picture is given.
-        blob = await capturePage(toBlob, { from: captureFrom, pixelRatio })
-      } finally {
-        // Restore the blanked values regardless of capture outcome.
-        for (const { el, value } of maskedInputs) {
-          el.value = value
-        }
-      }
+      // The page's fonts are written into the picture (they were skipped,
+      // on the belief that the browser's font cache would draw them: it
+      // does not, an SVG drawn as an image loads no fonts, and a large
+      // heading set in the fallback wrapped over the text under it). The
+      // files are read once a page load, from the browser's cache. See
+      // lib/pageCapture for this and the rest of what the picture is given.
+      const blob = await capturePage(toBlob, { from: captureFrom, pixelRatio, beforeCopy: blankSecrets })
       if (!mountedRef.current) return
       if (!blob) {
         refuse('Capture failed: the browser could not encode the screenshot.')

@@ -30,7 +30,8 @@
 //     text moved down into the panel's place. An excluded part in the page's
 //     flow is copied as an empty box with nothing drawn in it (nothing inside
 //     it is copied); one taken out of the flow (fixed or absolutely placed,
-//     like the dialog) changes nothing around it and is left out as before.
+//     like the dialog) changes nothing around it and is left out as before,
+//     and so is an excluded canvas, video, svg or iframe (keepsPlace).
 //   - Scrolling. The copy cannot be scrolled, so it is moved up and left by
 //     the window's scroll. The body is the page's scroller only through the
 //     window; in the copy its `overflow-x: hidden` made it a scroll box of
@@ -114,32 +115,46 @@ export async function embeddedFontCSS(doc: Document = document): Promise<string>
   const loaded = new Set<string>()
   doc.fonts?.forEach(face => { if (face.status === 'loaded') loaded.add(familyKey(face.family)) })
   if (loaded.size === 0) return ''
-  const rules: Promise<string>[] = []
-  for (const sheet of Array.from(doc.styleSheets)) {
-    let list: CSSRuleList
-    try {
-      list = sheet.cssRules
-    } catch {
-      continue // Another origin's sheet: its rules cannot be read.
-    }
-    for (const rule of Array.from(list)) {
-      if (!isFontFaceRule(rule)) continue
-      if (!loaded.has(familyKey(rule.style.getPropertyValue('font-family')))) continue
-      const base = sheet.href ?? doc.baseURI
-      rules.push((async () => {
-        let text = rule.cssText
-        for (const match of Array.from(rule.cssText.matchAll(/url\(\s*(["']?)(.*?)\1\s*\)/g))) {
-          if (match[2].startsWith('data:')) continue
-          text = text.replace(match[0], `url("${await fontFileAsDataURL(new URL(match[2], base).href)}")`)
-        }
-        return text
-      })().catch((err: unknown) => {
-        console.warn('[Aurora] capture: a font could not be read, so the capture draws its text in a fallback', err)
-        return ''
-      }))
+  const faces: Array<{ rule: CSSFontFaceRule; base: string }> = []
+  for (const sheet of Array.from(doc.styleSheets)) collectFontFaces(sheet, doc.baseURI, faces)
+  const rules = faces
+    .filter(({ rule }) => loaded.has(familyKey(rule.style.getPropertyValue('font-family'))))
+    .map(async ({ rule, base }) => {
+      let text = rule.cssText
+      for (const match of Array.from(rule.cssText.matchAll(/url\(\s*(["']?)(.*?)\1\s*\)/g))) {
+        if (match[2].startsWith('data:')) continue
+        text = text.replace(match[0], `url("${await fontFileAsDataURL(new URL(match[2], base).href)}")`)
+      }
+      return text
+    })
+    .map(text => text.catch((err: unknown) => {
+      console.warn('[Aurora] capture: a font could not be read, so the capture draws its text in a fallback', err)
+      return ''
+    }))
+  return (await Promise.all(rules)).filter(Boolean).join('\n')
+}
+
+/** The @font-face rules of a sheet, also those inside @media, @supports and
+ *  @layer blocks and in the sheets it @imports, with the address each one's
+ *  files are relative to. Another origin's sheet cannot be read, and is
+ *  passed over. */
+function collectFontFaces(sheet: CSSStyleSheet, base: string, into: Array<{ rule: CSSFontFaceRule; base: string }>) {
+  const href = sheet.href ?? base
+  let list: CSSRuleList
+  try {
+    list = sheet.cssRules
+  } catch {
+    return
+  }
+  const walk = (rules: CSSRuleList) => {
+    for (const rule of Array.from(rules)) {
+      if (isFontFaceRule(rule)) into.push({ rule, base: href })
+      else if (typeof CSSImportRule !== 'undefined' && rule instanceof CSSImportRule) {
+        if (rule.styleSheet) collectFontFaces(rule.styleSheet, href, into)
+      } else if ('cssRules' in rule) walk((rule as CSSGroupingRule).cssRules)
     }
   }
-  return (await Promise.all(rules)).filter(Boolean).join('\n')
+  walk(list)
 }
 
 const isExcluded = (node: Node): node is Element => node instanceof Element && node.matches(EXCLUDED)
@@ -156,10 +171,14 @@ function insideExcluded(node: Node): boolean {
 
 /** Whether an excluded part is copied as an empty box that keeps its place:
  *  when it is in the page's flow. One placed over the page (fixed or
- *  absolutely) moves nothing when it is left out; an iframe's copy would be
- *  its document's body, not an empty box. */
+ *  absolutely) moves nothing when it is left out. Some elements are not
+ *  copied as themselves, and their copy would be drawn: html-to-image
+ *  replaces a canvas or a video with a picture of it (an <img> without the
+ *  mark that hides an excluded part), copies an svg whole, its insides
+ *  included, and copies an iframe as its document's body. Those are left
+ *  out, wherever they are. */
 function keepsPlace(el: Element): boolean {
-  if (el instanceof HTMLIFrameElement) return false
+  if (el instanceof HTMLIFrameElement || el instanceof HTMLCanvasElement || el instanceof HTMLVideoElement || el instanceof SVGElement) return false
   const position = getComputedStyle(el).position
   return position !== 'fixed' && position !== 'absolute'
 }
@@ -177,46 +196,47 @@ function pageBackground(): string | undefined {
 
 /** For the length of a capture, html-to-image reads every font size in a form
  *  it copies as it is: it shrinks a size that ends in "px". The returned
- *  function puts window.getComputedStyle back. */
+ *  function puts window.getComputedStyle back once every capture that
+ *  wrapped it has ended: with two captures under way, the one that started
+ *  second would otherwise put back the first one's wrapper for good. */
+let wrapped: { real: typeof window.getComputedStyle; holders: number } | null = null
 function keepFontSizes(): () => void {
-  const real = window.getComputedStyle
-  window.getComputedStyle = function (elt: Element, pseudo?: string | null) {
-    const style = real.call(window, elt, pseudo)
-    return new Proxy(style, {
-      get(target, key) {
-        if (key === 'getPropertyValue') {
-          return (name: string) => {
-            const value = target.getPropertyValue(name)
-            // The same length; the trailing space is dropped when it is set.
-            return name === 'font-size' && value.endsWith('px') ? `${value} ` : value
+  if (!wrapped) {
+    const real = window.getComputedStyle
+    wrapped = { real, holders: 0 }
+    window.getComputedStyle = function (elt: Element, pseudo?: string | null) {
+      const style = real.call(window, elt, pseudo)
+      return new Proxy(style, {
+        get(target, key) {
+          if (key === 'getPropertyValue') {
+            return (name: string) => {
+              const value = target.getPropertyValue(name)
+              // The same length; the trailing space is dropped when it is set.
+              return name === 'font-size' && value.endsWith('px') ? `${value} ` : value
+            }
           }
-        }
-        const value = Reflect.get(target, key, target)
-        return typeof value === 'function' ? value.bind(target) : value
-      },
-    })
-  } as typeof window.getComputedStyle
-  return () => { window.getComputedStyle = real }
+          const value = Reflect.get(target, key, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+    } as typeof window.getComputedStyle
+  }
+  wrapped.holders += 1
+  let held = true
+  return () => {
+    if (!held || !wrapped) return
+    held = false
+    wrapped.holders -= 1
+    if (wrapped.holders === 0) {
+      window.getComputedStyle = wrapped.real
+      wrapped = null
+    }
+  }
 }
 
-/** What the copy needs besides the page's elements: the rules of its own
- *  style sheet, which elements are copied, and how to put the page back. */
-export function prepareCopy(from: CaptureFrom): { css: string; filter: (node: Node) => boolean; restore: () => void } {
-  const x = from === 'top' ? 0 : window.scrollX
-  const y = from === 'top' ? 0 : window.scrollY
-  const rules = [
-    // An excluded part: its box keeps its place, nothing of it is drawn.
-    `${EXCLUDED}{visibility:hidden!important}`,
-    `${EXCLUDED}::before,${EXCLUDED}::after{content:none!important}`,
-    `[${CLAMP_ATTR}="block"]{display:-webkit-box!important}`,
-    `[${CLAMP_ATTR}="inline"]{display:-webkit-inline-box!important}`,
-    // Important, because the computed style written onto the copy's body
-    // also holds the logical insets (inset-block, inset-inline), which come
-    // after `top` and `left` and would win over them.
-    `body{overflow:visible!important;position:relative!important;inset:auto!important;left:${-x}px!important;top:${-y}px!important}`,
-  ]
-
-  const tagged: Array<[Element, string]> = []
+/** Marks the elements of the page whose copies need a rule of the copy's own
+ *  (adding the rules to `rules`), and records each mark in `tagged`. */
+function markForCopy(rules: string[], tagged: Array<[Element, string]>) {
   const placeholders = new Map<string, number>()
   for (const el of Array.from(document.body.getElementsByTagName('*'))) {
     if (!(el instanceof HTMLElement) || el.closest(EXCLUDED)) continue
@@ -247,6 +267,33 @@ export function prepareCopy(from: CaptureFrom): { css: string; filter: (node: No
       }
     }
   }
+}
+
+/** What the copy needs besides the page's elements: the rules of its own
+ *  style sheet, which elements are copied, and how to put the page back. */
+export function prepareCopy(from: CaptureFrom): { css: string; filter: (node: Node) => boolean; restore: () => void } {
+  const x = from === 'top' ? 0 : window.scrollX
+  const y = from === 'top' ? 0 : window.scrollY
+  const rules = [
+    // An excluded part: its box keeps its place, nothing of it is drawn.
+    `${EXCLUDED}{visibility:hidden!important}`,
+    `${EXCLUDED}::before,${EXCLUDED}::after{content:none!important}`,
+    `[${CLAMP_ATTR}="block"]{display:-webkit-box!important}`,
+    `[${CLAMP_ATTR}="inline"]{display:-webkit-inline-box!important}`,
+    // Important, because the computed style written onto the copy's body
+    // also holds the logical insets (inset-block, inset-inline), which come
+    // after `top` and `left` and would win over them.
+    `body{overflow:visible!important;position:relative!important;inset:auto!important;left:${-x}px!important;top:${-y}px!important}`,
+  ]
+
+  const tagged: Array<[Element, string]> = []
+  const restore = () => { for (const [el, attr] of tagged) el.removeAttribute(attr) }
+  try {
+    markForCopy(rules, tagged)
+  } catch (err) {
+    restore()
+    throw err
+  }
 
   return {
     css: rules.join('\n'),
@@ -254,24 +301,37 @@ export function prepareCopy(from: CaptureFrom): { css: string; filter: (node: No
     // part in the page's flow is copied (as an empty box), one out of it is
     // not, and nothing inside either is.
     filter: (node: Node) => (isExcluded(node) ? keepsPlace(node) : !insideExcluded(node)),
-    restore: () => { for (const [el, attr] of tagged) el.removeAttribute(attr) },
+    restore,
   }
 }
 
 /** A picture of the page, the window's size, at `pixelRatio`. Rejects when
- *  the capture library does; the page is left as it was either way. */
-export async function capturePage(toBlob: typeof ToBlob, { from, pixelRatio }: { from: CaptureFrom; pixelRatio: number }): Promise<Blob | null> {
+ *  the capture library does; the page is left as it was either way.
+ *  `beforeCopy` is called once the fonts have been read, right before the
+ *  copy is made, and what it returns once the picture is drawn: the form
+ *  blanks secret fields there, so that they are blank for as short a time
+ *  as can be (a re-render while they waited could put a value back). */
+export async function capturePage(
+  toBlob: typeof ToBlob,
+  { from, pixelRatio, beforeCopy }: { from: CaptureFrom; pixelRatio: number; beforeCopy?: () => () => void },
+): Promise<Blob | null> {
   const fontCSS = await embeddedFontCSS()
   const width = window.innerWidth
   const height = window.innerHeight
-  const copy = prepareCopy(from)
-  const putBack = keepFontSizes()
+  let undo: (() => void) | undefined
+  let copy: ReturnType<typeof prepareCopy> | undefined
+  let putBack: (() => void) | undefined
   try {
+    undo = beforeCopy?.()
+    copy = prepareCopy(from)
+    putBack = keepFontSizes()
     const options: CaptureOptions = {
       pixelRatio,
       // The window's size. Without it html-to-image draws the body's whole
       // height (8,000 to 30,000px on a long grid), past the 16,384px a
-      // canvas can be, and reads every image on the page.
+      // canvas can be. (It still reads every image in the page, the ones
+      // below the window and those a lazy image never loaded included: on
+      // a long grid a capture takes seconds.)
       width,
       height,
       canvasWidth: width,
@@ -286,7 +346,8 @@ export async function capturePage(toBlob: typeof ToBlob, { from, pixelRatio }: {
     }
     return await toBlob(document.body, options)
   } finally {
-    putBack()
-    copy.restore()
+    putBack?.()
+    copy?.restore()
+    undo?.()
   }
 }

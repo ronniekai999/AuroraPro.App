@@ -86,10 +86,7 @@ Fix or file each item, and delete it here when it is no longer true.
   write is still out, an age changed to one that sets no limit is refused on
   every Try again once that write lands (Skip works; older than the redesign).
 - Error screen and the bug report form: "A report is sent from that account"
-  does not name the account. (A capture drawn without the app's fonts, and
-  the blank lower part of a capture from the crash screen's panel on a phone
-  or from any scrolled page, are fixed: see "Capture this page" in
-  CLAUDE.md.)
+  does not name the account.
 - Signed out, toasts and My Library writes: a My Library write that comes due
   after a switch to a profile with a content limit is refused by the server
   and lost with nothing said (after a switch to a profile without one it is

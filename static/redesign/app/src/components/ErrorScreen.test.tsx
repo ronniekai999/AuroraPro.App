@@ -207,6 +207,26 @@ describe('the error screen: reporting the problem', () => {
   // On a narrow window the panel is under the page's text, and opening it
   // moves the window down to it: a capture from there was mostly the
   // panel's empty place. The dialog, over the page, captures the window.
+  // The button is disabled only once the capture library has loaded: a
+  // second press before then started a second capture over the first (its
+  // blanking of secret fields and its restore interleaved with the first's).
+  it('takes one capture for two presses made before the capture library has loaded', async () => {
+    toBlob.mockReset()
+    let release!: (blob: Blob | null) => void
+    toBlob.mockImplementation(() => new Promise(r => { release = r }))
+    render(<BugReportModal prefillName="morgan" onClose={() => {}} onSubmitted={() => {}} />)
+    const dialog = screen.getByRole('dialog')
+    const capture = within(dialog).getByRole('button', { name: /Capture this page/ })
+    fireEvent.click(capture)
+    fireEvent.click(capture)
+    await waitFor(() => expect(toBlob).toHaveBeenCalled())
+    // Time for a second capture to reach the library, or fail on its way.
+    await new Promise(r => setTimeout(r, 500))
+    expect(toBlob).toHaveBeenCalledTimes(1)
+    expect(dialog.querySelector('#bug-error')?.textContent ?? '').toBe('')
+    await act(async () => { release(null) })
+  })
+
   it('takes a capture from the top of the page, where the dialog takes the window', async () => {
     const user = userEvent.setup()
     toBlob.mockReset()
