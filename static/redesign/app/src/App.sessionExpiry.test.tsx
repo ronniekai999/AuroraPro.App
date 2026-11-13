@@ -86,6 +86,11 @@ class FakeSocket {
   receive(type: string, payload?: unknown) { this.onmessage?.({ data: JSON.stringify({ type, payload }) }) }
 }
 const PARTY_CODE = 'AVPRTY'
+/** Answers the stub has not given yet. Blake's are delayed, so a test can end
+ *  with some out; they are let land before the page's window goes (see
+ *  afterEach), or a component's handler runs after it and React, setting
+ *  state, finds no window. */
+const inFlight = new Set<Promise<Response>>()
 
 /** Blake's one profile, when `blakeProfile` gives Blake's account one. */
 const BLAKE_PROFILE = { id: 20, user_id: 2, name: 'Blakes', is_default: true, created_at: NOW, updated_at: NOW }
@@ -103,7 +108,7 @@ function stubServer({ signedIn: startAs = 1 as number | null, blakeProfile = fal
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   const refused = () => json({ error: { code: 401, message: 'session ended' } }, 401)
-  vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
+  const answer = async (input: string, init?: RequestInit) => {
     const url = new URL(input, 'http://localhost')
     const p = url.pathname
     if (p === '/api/auth/oauth/providers') return json({ providers: [] })
@@ -172,6 +177,12 @@ function stubServer({ signedIn: startAs = 1 as number | null, blakeProfile = fal
     if (p === '/api/parties/active') return json({ parties: [] })
     if (p === '/api/me/party-invites') return json({ invites: [] })
     return json([])
+  }
+  vi.stubGlobal('fetch', (input: string, init?: RequestInit) => {
+    const answered = answer(input, init)
+    inFlight.add(answered)
+    answered.then(() => inFlight.delete(answered), () => inFlight.delete(answered))
+    return answered
   })
   FakeSocket.all = []
   vi.stubGlobal('WebSocket', partySockets ? FakeSocket : class { readyState = 3; close() {} send() {} addEventListener() {} removeEventListener() {} })
@@ -272,8 +283,12 @@ const PAGES: { path: string; shows: (a: Account) => string }[] = [
   { path: '/requests', shows: a => a.request },
 ]
 
-afterEach(() => {
+afterEach(async () => {
   cleanup()
+  // What was out when the test ended lands now, on the unmounted app, while
+  // there is still a window; the handlers it runs may ask for more.
+  while (inFlight.size) await Promise.allSettled([...inFlight])
+  await new Promise(done => setTimeout(done, 0))
   vi.unstubAllGlobals()
   localStorage.clear()
   window.history.replaceState({}, '', '/')
