@@ -1534,6 +1534,9 @@ type TranscodeManager struct {
 	// drainExtraViewers counts viewers that hold no transcode session
 	// (direct play). Guarded by tm.mu; invoked unlocked. See drainstate.go.
 	drainExtraViewers func() int
+	// drainRestoreRunning reports whether a database restore is running, so
+	// the deploy drain waits for it too. Guarded by tm.mu; invoked unlocked.
+	drainRestoreRunning func() bool
 	// mediaStartProbe replaces probeMediaStartSec in tests; nil in
 	// production. A field rather than a package variable so a swapped probe
 	// can only ever reach the manager a test built.

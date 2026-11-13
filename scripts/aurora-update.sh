@@ -1300,11 +1300,14 @@ ensure_llm_models
 # ── Drain ─────────────────────────────────────────────────────────
 
 # Drain active HLS stream sessions before restarting: systemctl restart
-# sends SIGTERM to the entire cgroup (KillMode=control-group default), which
-# kills FFmpeg children immediately AND destroys the in-memory transcode
-# sessions, breaking playback for anyone watching. Wait up to 300 s for
-# viewers to finish organically; the _DRAIN_LOG_EVERY throttle keeps log
-# noise low.
+# ends every transcode (its FFmpeg children, by systemd's SIGTERM to the whole
+# cgroup under the old KillMode=control-group unit, by the server itself under
+# KillMode=mixed) AND destroys the in-memory transcode sessions, breaking
+# playback for anyone watching. Wait up to 300 s for viewers to finish
+# organically; the _DRAIN_LOG_EVERY throttle keeps log noise low. The server
+# counts a running database restore in the same snapshot (as one), so this
+# waits for that too: a restart kills it, and one killed after its wipe leaves
+# the database empty.
 #
 # The gate used to be `pgrep -u aurora ffmpeg`, which measured the wrong
 # thing. Aurora reaps the encoder for a PAUSED viewer ("reaped idle transcode

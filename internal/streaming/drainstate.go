@@ -73,9 +73,14 @@ type StreamState struct {
 	// transcode session and NO ffmpeg process, so before they were counted
 	// here they were invisible to both halves of the deploy gate.
 	DirectPlay int `json:"direct_play"`
-	// HeldByViewer is TranscodeHeld + DirectPlay — the total number of
-	// viewers a restart would interrupt, and the only field the deploy script
-	// reads. The components are published alongside it for diagnosis.
+	// Restore is 1 while a database restore is running, else 0. A restart
+	// kills it, and one killed after its wipe leaves the database empty.
+	Restore int `json:"restore"`
+	// HeldByViewer is TranscodeHeld + DirectPlay + Restore — what a restart
+	// would interrupt (a running restore counts as one), and the only field
+	// the deploy script reads, so the scripts' drain waits for a restore as
+	// it waits for a viewer, with no change to them. The components are
+	// published alongside it for diagnosis.
 	HeldByViewer int `json:"held_by_viewer"`
 	// WindowSeconds documents the window TranscodeHeld was computed with, so
 	// the file is interpretable without reading this source.
@@ -96,6 +101,22 @@ func (tm *TranscodeManager) SetDrainExtraViewers(fn func() int) {
 	tm.mu.Unlock()
 }
 
+// SetDrainRestoreRunning registers whether a database restore is running, for
+// the deploy drain gate (the api package's RestoreJobs.Running). Passing nil
+// clears it.
+func (tm *TranscodeManager) SetDrainRestoreRunning(fn func() bool) {
+	tm.mu.Lock()
+	tm.drainRestoreRunning = fn
+	tm.mu.Unlock()
+}
+
+// PublishDrainState writes the snapshot now rather than at the next tick, for
+// a change the deploy gate should see at once (a restore starting). A no-op
+// when publishing is off.
+func (tm *TranscodeManager) PublishDrainState() {
+	tm.publishDrainState()
+}
+
 // DrainState snapshots viewer counts for the deploy drain gate.
 func (tm *TranscodeManager) DrainState() StreamState {
 	now := time.Now()
@@ -109,6 +130,7 @@ func (tm *TranscodeManager) DrainState() StreamState {
 		}
 	}
 	extraFn := tm.drainExtraViewers
+	restoreFn := tm.drainRestoreRunning
 	tm.mu.Unlock()
 
 	// Called outside tm.mu: the registry takes its own lock, and holding two
@@ -117,13 +139,18 @@ func (tm *TranscodeManager) DrainState() StreamState {
 	if extraFn != nil {
 		extra = extraFn()
 	}
+	restore := 0
+	if restoreFn != nil && restoreFn() {
+		restore = 1
+	}
 
 	return StreamState{
 		UnixTime:      now.Unix(),
 		Sessions:      total,
 		TranscodeHeld: held,
 		DirectPlay:    extra,
-		HeldByViewer:  held + extra,
+		Restore:       restore,
+		HeldByViewer:  held + extra + restore,
 		WindowSeconds: int(viewerHeldWindow / time.Second),
 	}
 }

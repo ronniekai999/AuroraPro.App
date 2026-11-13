@@ -194,6 +194,11 @@ type RouterDeps struct {
 	// deadline can name what it was waiting on. Optional; nil disables
 	// tracking. See inflight.go.
 	InFlight *InFlightRegistry
+	// RestoreJobs runs database restores as jobs on the server's lifecycle
+	// (admin_restore_job.go). main owns it so it can wait for a running
+	// restore before it cancels RootCtx. Optional; nil makes the admin
+	// handler its own, on context.Background.
+	RestoreJobs *RestoreJobs
 }
 
 func NewRouter(deps RouterDeps) http.Handler {
@@ -474,6 +479,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// endpoint. Empty string is a clean disable (Backup returns 500 with
 	// "not configured" — no panic).
 	adminH.SetDatabaseURL(deps.Cfg.Database.URL)
+	if deps.RestoreJobs != nil {
+		adminH.SetRestoreJobs(deps.RestoreJobs)
+	}
 	if deps.LLMClient != nil {
 		adminH.SetLLMClient(deps.LLMClient)
 	}
@@ -1145,6 +1153,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Use(middleware.Timeout(60 * time.Second))
 				r.Use(requireAdmin)
 				r.Get("/dashboard", adminH.Dashboard)
+				// The restore job's progress and the last restore's outcome
+				// (the restore itself is mounted below, outside the timeout).
+				r.Get("/restore/status", adminH.RestoreStatus)
 				r.Get("/activity", adminH.Activity)
 				// Distinct event types for the Activity tab's filter. Static
 				// subpath, so it can't collide with /activity itself.
@@ -1226,14 +1237,15 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// still admin-only via the wrapping authenticated group +
 			// explicit RequireAdmin.
 			r.With(requireAdmin).Get("/api/admin/backup", adminH.Backup)
-			// 2026-05-18 — admin restore endpoint. Same rationale (long-
-			// running). Streams the uploaded pg_dump custom-format
-			// archive to a temp file via MultipartReader (bounded
-			// memory), then runs pg_restore --single-transaction
-			// against it. Destructive — the handler runs a per-object
-			// wipe that preserves installed extensions before invoking
-			// pg_restore. See admin_backup.go header for the full
-			// pipeline rationale.
+			// 2026-05-18 — admin restore endpoint. Same rationale (the
+			// upload of a large archive is long-running). Streams the
+			// uploaded pg_dump custom-format archive to a temp file via
+			// MultipartReader (bounded memory), then answers 202 and runs
+			// the validation, a per-object wipe that preserves installed
+			// extensions, and pg_restore --single-transaction as a job on
+			// the server's lifecycle, not on this request (see
+			// admin_restore_job.go). Destructive. Its progress is read at
+			// /api/admin/restore/status.
 			r.With(requireAdmin).Post("/api/admin/restore", adminH.Restore)
 
 			// Requests (media request + ARR integration)

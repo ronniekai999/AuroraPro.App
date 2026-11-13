@@ -88,6 +88,29 @@ type AdminHandler struct {
 	// false rather than blocking so the second admin gets a clean
 	// 409 Conflict instead of an inexplicable hang.
 	backupRestoreMu sync.Mutex
+
+	// restoreJobs runs restores as jobs on the server's lifecycle and keeps
+	// their status (admin_restore_job.go). Wired by SetRestoreJobs from the
+	// router (main owns it, to wait for it at shutdown); a handler built
+	// without one makes its own on first use, on context.Background.
+	restoreJobs     *RestoreJobs
+	restoreJobsOnce sync.Once
+}
+
+// SetRestoreJobs wires the restore job registry main waits for at shutdown.
+// Call before the handler serves.
+func (h *AdminHandler) SetRestoreJobs(rj *RestoreJobs) {
+	h.restoreJobs = rj
+}
+
+// restores answers the restore job registry, making one when none was wired.
+func (h *AdminHandler) restores() *RestoreJobs {
+	h.restoreJobsOnce.Do(func() {
+		if h.restoreJobs == nil {
+			h.restoreJobs = NewRestoreJobs(nil)
+		}
+	})
+	return h.restoreJobs
 }
 
 // SetDatabaseURL wires the conninfo string used by the pg_dump-based

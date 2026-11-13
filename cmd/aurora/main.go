@@ -551,6 +551,15 @@ func main() {
 	// picks it up on the next publish.
 	transcode.SetDrainExtraViewers(directPlay.ActiveCount)
 
+	// Database restores run as jobs on the server's lifecycle, not on the
+	// upload's request (internal/api/admin_restore_job.go). A running one
+	// counts in the drain snapshot, published at once when one starts or
+	// ends, so the deploy scripts wait for it as they wait for a viewer; the
+	// shutdown below waits for it too, before it cancels ctx.
+	restoreJobs := api.NewRestoreJobs(ctx)
+	restoreJobs.SetOnChange(transcode.PublishDrainState)
+	transcode.SetDrainRestoreRunning(restoreJobs.Running)
+
 	// embedItem is invoked after each successful enrichment path below. It
 	// regenerates the semantic-search vector so newly-imported content is
 	// findable by natural-language query immediately, not on the next backfill.
@@ -1005,6 +1014,7 @@ func main() {
 		SkipMarkers: skipWorker,
 		RootCtx:     ctx, // server-lifecycle ctx for background goroutines spawned in handlers
 		InFlight:    inFlight,
+		RestoreJobs: restoreJobs,
 	})
 
 	// HTTP Server
@@ -1112,6 +1122,16 @@ func main() {
 	case <-ctx.Done():
 		slog.Info("shutting down due to server error...")
 	}
+
+	// A database restore stopped part way leaves the database empty, so a
+	// running one delays the stop, up to restoreShutdownGrace, before
+	// anything else is torn down: its job runs on ctx, which is cancelled
+	// below. The server keeps serving meanwhile (the Admin page can follow
+	// the restore) and starts no new restore. A restore still running after
+	// the grace is killed by that cancel. On a server error ctx is already
+	// cancelled and the restore with it.
+	restoreJobs.Drain(restoreShutdownGrace)
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
@@ -1174,6 +1194,17 @@ func main() {
 		}
 	}
 }
+
+// restoreShutdownGrace is how long a stop waits for a running database restore
+// before it cancels the server's context, which kills it. scripts/aurora.service
+// gives the stop TimeoutStopSec=5min before systemd's SIGKILL, and sends the
+// SIGTERM to this process alone (KillMode=mixed), so the restore's psql and
+// pg_restore are left running while it waits; four minutes leaves the rest of
+// the shutdown (about 15 seconds) inside that. A unit installed before those
+// two lines keeps systemd's defaults (90 seconds, and the SIGTERM to every
+// process in the unit, pg_restore included), until install.sh or redeploy.sh
+// reinstalls it.
+const restoreShutdownGrace = 4 * time.Minute
 
 // findMigrationsDir looks for the migrations directory relative to the binary or CWD
 func findMigrationsDir() string {

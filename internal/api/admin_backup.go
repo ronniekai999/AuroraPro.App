@@ -53,6 +53,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -342,15 +343,20 @@ func streamWithFlush(dst io.Writer, src io.Reader) error {
 //
 // Companion to Backup. Admin-only.
 //
-// Pipeline:
+// Pipeline (steps 1-2 on the request; 3-5 in a job on the server's
+// lifecycle that outlives it, admin_restore_job.go, which answers its
+// progress at GET /api/admin/restore/status):
 //   1. Validate magic bytes (custom format starts with "PGDMP") before
 //      doing anything destructive.
 //   2. Stream the upload to a temp file. pg_restore needs a seekable
 //      file (custom format has a table of contents it reads first, then
 //      jumps around in). We cap the file size at maxRestoreSizeBytes.
-//   3. Wipe the public schema: per-object DROPs that preserve installed
-//      extensions (see wipeSQL below for the why).
-//   4. Run pg_restore with:
+//      The request answers 202 here, with the job's status.
+//   3. Read the whole archive (`pg_restore -f /dev/null`), which rejects a
+//      truncated or corrupt one before anything is touched.
+//   4. Wipe the public schema: per-object DROPs that preserve installed
+//      extensions (see restoreWipeSQL for the why).
+//   5. Run pg_restore with:
 //        --single-transaction  → BEGIN/COMMIT wrap; any failure rolls back
 //        --no-owner            → skip ALTER OWNER statements
 //        --no-privileges       → skip GRANT/REVOKE statements
@@ -370,11 +376,11 @@ func streamWithFlush(dst io.Writer, src io.Reader) error {
 //
 // CRITICAL: Aurora's own pgxpool connections are still pointed at this DB
 // and may have cached metadata or prepared statements. After a successful
-// restore the operator MUST restart Aurora. The response message + the UI
-// modal both call this out. We do NOT attempt to restart automatically
-// because (a) restarting from within the request you're serving is a
-// guaranteed lost-response, (b) the user may want to verify before
-// restarting, (c) systemd / process supervision handles this externally.
+// restore the operator MUST restart Aurora. The status's message + the UI
+// both call this out. We do NOT attempt to restart automatically because
+// (a) the restart would forget the restore's in-memory status before the
+// admin has read it, (b) the user may want to verify before restarting,
+// (c) systemd / process supervision handles this externally.
 
 // maxRestoreSizeBytes caps the upload to prevent disk exhaustion when we
 // spill the upload to a temp file. 50GB is comfortably above any realistic
@@ -390,11 +396,12 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2026-05-16 audit H1 — extend server-level deadlines. main.go's
-	// 120s WriteTimeout would tear down the connection before psql
-	// finishes ingesting any non-trivial dump, even though the DB
-	// restore itself succeeded. The 65min extension matches the
-	// handler's own 60min ctx timeout with a small buffer for the
-	// final writeJSON response.
+	// 15s ReadTimeout and 120s WriteTimeout would tear down the connection
+	// part way through the upload of a large archive (the write deadline
+	// counts from the request's headers, so a long upload leaves no time
+	// to write the answer). The restore itself no longer runs on this
+	// request (see admin_restore_job.go); these cover the upload, up to
+	// maxRestoreSizeBytes on a slow link.
 	// See the backup handler: write half via the logging helper, read half
 	// hand-rolled.
 	extendWriteDeadline(w, r, 65*time.Minute, "admin restore")
@@ -403,12 +410,19 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2026-05-16 audit H3 — serialize backup/restore operations. See
-	// Backup for the rationale. Same mutex — both endpoints share it.
+	// Backup for the rationale. Same mutex — both endpoints share it. It
+	// is held from here for the restore job's whole life: once the job has
+	// started (handedOff), the job unlocks it when it ends, however it ends.
 	if !h.backupRestoreMu.TryLock() {
 		writeError(w, http.StatusConflict, "another backup or restore is already in progress; please wait for it to complete")
 		return
 	}
-	defer h.backupRestoreMu.Unlock()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			h.backupRestoreMu.Unlock()
+		}
+	}()
 
 	// Use MultipartReader (streaming) rather than ParseMultipartForm
 	// (buffers entire upload to memory/disk). For multi-GB restores
@@ -531,13 +545,16 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tmpPath := tmpFile.Name()
-	// Cleanup on every exit path: Close (idempotent — sentinel
-	// errors after first call) and Remove. defers run LIFO, so Close
-	// happens before Remove. The double-close from later f.Close()
-	// after copy is harmless (returns ErrClosed which we ignore).
+	// Cleanup on every exit path until the job takes the file: Close
+	// (idempotent — sentinel errors after first call) and Remove. defers
+	// run LIFO, so Close happens before Remove. The double-close from later
+	// f.Close() after copy is harmless (returns ErrClosed which we ignore).
+	// Once the job has started it removes the file when it ends.
 	defer tmpFile.Close()
 	defer func() {
-		_ = os.Remove(tmpPath)
+		if !handedOff {
+			_ = os.Remove(tmpPath)
+		}
 	}()
 
 	// Copy the upload to disk, bounded by maxRestoreSizeBytes+1.
@@ -572,246 +589,26 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
-	defer cancel()
-
-	// Validate the upload is FULLY restorable BEFORE the destructive wipe.
-	// The leading-magic + min-size checks above only prove the first bytes
-	// look like a custom dump, and `pg_restore --list` would only parse the
-	// header + table-of-contents — neither reads the compressed DATA blocks,
-	// so a dump truncated mid-data (a realistic interrupted-upload outcome)
-	// would pass and then fail AFTER the wipe, leaving the DB empty.
-	// `pg_restore -f /dev/null` decompresses and reads the ENTIRE archive to a
-	// throwaway script target WITHOUT connecting to the database, so a
-	// truncated / corrupt / version-incompatible archive is rejected with the
-	// DB still intact. Costs one extra full read of the archive — restores are
-	// rare and correctness beats speed here. deep-debug H8.
-	validateCmd := exec.CommandContext(ctx, "pg_restore", "-f", os.DevNull, tmpPath)
-	var validateStderr strings.Builder
-	validateCmd.Stderr = &limitedStringWriter{w: &validateStderr, max: 16 * 1024}
-	if err := validateCmd.Run(); err != nil {
-		stderrTail := strings.TrimSpace(validateStderr.String())
-		slog.Warn("restore rejected: archive is not fully readable by pg_restore (database NOT modified)",
-			"err", err, "stderr", stderrTail)
-		msg := "upload is not a complete, readable pg_dump custom archive (pg_restore validation failed) — the database was NOT modified"
-		if stderrTail != "" {
-			msg += ": " + stderrTail
-		}
-		writeError(w, http.StatusBadRequest, msg)
-		return
-	}
-
-	// Phase 1 — wipe the existing schema. Without this, the restore
-	// would fail on "relation already exists" for every table.
-	//
-	// Audit (production restore 2026-05-18) — the previous wipe used
-	// `DROP SCHEMA public CASCADE` which ALSO drops every extension
-	// installed in `public` (pg_trgm, vector). The dump then tries to
-	// recreate those extensions, but Aurora connects as the unprivileged
-	// `aurora` role which cannot `CREATE EXTENSION vector` (non-trusted).
-	// The whole restore rolled back with "permission denied to create
-	// extension vector. Must be superuser."
-	//
-	// The new wipe loops through objects in the public schema and drops
-	// only those NOT owned by an extension. Extensions stay intact,
-	// the dump's `CREATE EXTENSION IF NOT EXISTS` becomes a no-op
-	// (which doesn't require superuser when the extension is already
-	// present), and the restore proceeds.
-	wipeSQL := `
-DO $do$
-DECLARE r record;
-BEGIN
-    -- Tables: CASCADE drops dependent indexes, constraints, and
-    -- table-owned sequences. We filter out extension-owned tables
-    -- (none today but defense-in-depth for future extensions).
-    FOR r IN
-        SELECT c.relname AS tablename
-        FROM pg_class c
-        JOIN pg_namespace n ON c.relnamespace = n.oid
-        WHERE n.nspname = 'public' AND c.relkind = 'r'
-        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')
-    LOOP
-        EXECUTE format('DROP TABLE IF EXISTS public.%I CASCADE', r.tablename);
-    END LOOP;
-    -- Views.
-    FOR r IN
-        SELECT c.relname AS viewname
-        FROM pg_class c
-        JOIN pg_namespace n ON c.relnamespace = n.oid
-        WHERE n.nspname = 'public' AND c.relkind IN ('v', 'm')
-        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')
-    LOOP
-        EXECUTE format('DROP VIEW IF EXISTS public.%I CASCADE', r.viewname);
-    END LOOP;
-    -- Stand-alone sequences (table-owned ones got dropped by table CASCADE).
-    FOR r IN
-        SELECT c.relname AS seqname
-        FROM pg_class c
-        JOIN pg_namespace n ON c.relnamespace = n.oid
-        WHERE n.nspname = 'public' AND c.relkind = 'S'
-        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')
-    LOOP
-        EXECUTE format('DROP SEQUENCE IF EXISTS public.%I CASCADE', r.seqname);
-    END LOOP;
-    -- User-defined types (enums, composites). Excludes extension-owned
-    -- types like 'vector' itself.
-    FOR r IN
-        SELECT t.typname
-        FROM pg_type t
-        JOIN pg_namespace n ON t.typnamespace = n.oid
-        WHERE n.nspname = 'public' AND t.typtype IN ('e', 'c', 'd')
-        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = t.oid AND d.deptype = 'e')
-    LOOP
-        EXECUTE format('DROP TYPE IF EXISTS public.%I CASCADE', r.typname);
-    END LOOP;
-    -- Routines (functions AND procedures). Aurora has at least
-    -- update_updated_at() used as a trigger; the dump emits a
-    -- CREATE FUNCTION for it. Without dropping it here, the restore
-    -- fails with "function already exists with same argument types."
-    -- Extension-owned routines (most of pg_trgm + vector live here)
-    -- are filtered by deptype='e'.
-    --
-    -- DROP ROUTINE handles both functions and procedures (PG 11+,
-    -- so universally available on Aurora's PG 14+ floor — bumped
-    -- to 14 by pgvector, not by this loop). DROP FUNCTION alone
-    -- would fail on a CREATE PROCEDURE that a future migration
-    -- might add.
-    --
-    -- prokind values: 'f' = function, 'p' = procedure, 'a' = aggregate
-    -- (handled by the separate loop below — DROP AGGREGATE syntax),
-    -- 'w' = window function (only superuser-created, not relevant
-    -- to Aurora's schema).
-    --
-    -- ::regprocedure casts to the full signature including arg types,
-    -- which DROP ROUTINE needs to disambiguate overloads.
-    FOR r IN
-        SELECT p.oid::regprocedure AS sig
-        FROM pg_proc p
-        JOIN pg_namespace n ON p.pronamespace = n.oid
-        WHERE n.nspname = 'public'
-        AND p.prokind IN ('f', 'p')
-        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
-    LOOP
-        EXECUTE format('DROP ROUTINE IF EXISTS %s CASCADE', r.sig);
-    END LOOP;
-    -- Aggregates (prokind='a') — separate loop because DROP ROUTINE
-    -- doesn't work on aggregates; they need DROP AGGREGATE.
-    -- Aurora has no user-defined aggregates today, so this loop is
-    -- a no-op against the current schema. It's here so a future
-    -- migration that ever adds CREATE AGGREGATE will not silently
-    -- break the next restore. The deptype='e' filter still preserves
-    -- extension-owned aggregates (none on pg_trgm or vector either,
-    -- but defensive).
-    FOR r IN
-        SELECT p.oid::regprocedure AS sig
-        FROM pg_proc p
-        JOIN pg_namespace n ON p.pronamespace = n.oid
-        WHERE n.nspname = 'public'
-        AND p.prokind = 'a'
-        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
-    LOOP
-        EXECUTE format('DROP AGGREGATE IF EXISTS %s CASCADE', r.sig);
-    END LOOP;
-END
-$do$;
-`
-	// 2026-05-29 audit (MED): derive a password-free conninfo for both
-	// the wipe (psql) and the restore (pg_restore) below; the password
-	// travels via PGPASSWORD in cmd.Env so it never lands on argv. See
-	// pgConnEnv.
-	connURL, pgEnv := pgConnEnv(h.databaseURL)
-	wipeCmd := exec.CommandContext(ctx, "psql",
-		"--quiet",
-		"--set", "ON_ERROR_STOP=on",
-		"-c", wipeSQL,
-		connURL,
-	)
-	wipeCmd.Env = append(os.Environ(), pgEnv...)
-	var wipeStderr strings.Builder
-	wipeCmd.Stderr = &limitedStringWriter{w: &wipeStderr, max: 16 * 1024}
-	if err := wipeCmd.Run(); err != nil {
-		// Audit M2 — include the actual psql stderr in the error
-		// response. Previously the message only said "is psql
-		// installed?" which is misleading when the real cause is
-		// "connection refused" / "permission denied on schema public"
-		// / "role does not exist". The stderr tail makes the actual
-		// problem visible to the admin.
-		stderrTail := strings.TrimSpace(wipeStderr.String())
-		slog.Error("restore pre-wipe failed", "err", err, "stderr", stderrTail)
-		msg := "pre-restore wipe failed: " + err.Error()
-		if stderrTail != "" {
-			msg += " — psql said: " + stderrTail
-		}
-		writeError(w, http.StatusInternalServerError, msg)
-		return
-	}
-
-	// Phase 2 — pg_restore the upload.
-	//
-	//   --single-transaction → BEGIN/COMMIT wrap; any failure rolls
-	//                          everything back. Schema stays wiped, so
-	//                          the operator can retry with a different
-	//                          file without re-wiping manually.
-	//                          (--single-transaction implies bail-on-
-	//                          first-error, so --exit-on-error is
-	//                          redundant; we omit it for clarity.)
-	//   --no-owner            → skip ALTER OWNER statements. Aurora's
-	//                          DB role probably isn't the dump's owner.
-	//   --no-privileges       → skip GRANT/REVOKE. Same rationale.
-	//   --no-comments         → skip COMMENT ON statements, including
-	//                          COMMENT ON EXTENSION (which requires
-	//                          extension-owner privilege we don't have).
-	//                          This is the flag that obsoletes the old
-	//                          line-filter pipeline.
-	//   --dbname=<conninfo>  → connect via libpq URI; pg_restore knows
-	//                          this form. The URI here is password-free
-	//                          (pgConnEnv strips it); the password is
-	//                          supplied via PGPASSWORD in cmd.Env.
-	//
-	// Note: --no-publications / --no-subscriptions are applied on the
-	// pg_dump side (see Backup) so they never end up in the archive.
-	// Applying them here too would be a no-op for archives produced by
-	// our Backup, but useful defense-in-depth if an operator restores
-	// a dump from a different source — pg_restore doesn't ship those
-	// flags consistently across versions, so we rely on the dump-side
-	// filter instead.
-	//
-	// 2026-05-29 audit (MED): --dbname carries the password-free conninfo
-	// (connURL, derived above); the password is supplied via PGPASSWORD in
-	// cmd.Env so it is not exposed on argv. See pgConnEnv.
-	restoreCmd := exec.CommandContext(ctx, "pg_restore",
-		"--single-transaction",
-		"--no-owner",
-		"--no-privileges",
-		"--no-comments",
-		"--dbname="+connURL,
-		tmpPath,
-	)
-	restoreCmd.Env = append(os.Environ(), pgEnv...)
-	var restoreStderr strings.Builder
-	restoreCmd.Stderr = &limitedStringWriter{w: &restoreStderr, max: 16 * 1024}
-
-	runErr := restoreCmd.Run()
-	if runErr != nil {
-		stderrTail := strings.TrimSpace(restoreStderr.String())
-		slog.Error("restore failed",
-			"err", runErr,
-			"pg_restore_stderr_tail", stderrTail,
-		)
-		// The --single-transaction wrapped the whole thing, so on
-		// failure the DB is back to the wiped (empty) state. Tell the
-		// operator that explicitly so they know to retry.
-		msg := "restore failed; database is in wiped state, retry with a valid backup."
-		if stderrTail != "" {
-			msg += " pg_restore said: " + stderrTail
-		}
-		writeError(w, http.StatusInternalServerError, msg)
-		return
-	}
-
-	slog.Info("restore succeeded — Aurora MUST be restarted to use new data")
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "ok",
-		"message": "Restore complete. RESTART AURORA NOW — current connections will see stale state until you do.",
+	// The destructive part runs as a job on the server's lifecycle, not on
+	// this request: see admin_restore_job.go. From here the job owns the
+	// backup/restore lock and the temp file, and lets both go when it ends.
+	st, err := h.restores().Start(h.databaseURL, tmpPath, restoreFileName(part.FileName()), func() {
+		_ = os.Remove(tmpPath)
+		h.backupRestoreMu.Unlock()
 	})
+	switch {
+	case errors.Is(err, errRestoresClosed):
+		// A reason, so the Admin page can tell this refusal (nothing was
+		// started) from a proxy's 503 (no answer from Aurora at all).
+		writeErrorReason(w, http.StatusServiceUnavailable, "shutting_down", err.Error())
+		return
+	case errors.Is(err, errRestoreRunning):
+		writeError(w, http.StatusConflict, "another backup or restore is already in progress; please wait for it to complete")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "failed to start the restore: "+err.Error())
+		return
+	}
+	handedOff = true
+	writeJSON(w, http.StatusAccepted, st)
 }

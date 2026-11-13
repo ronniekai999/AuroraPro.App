@@ -210,6 +210,18 @@ The viewer drain and any Ollama model pull now run before the first live file
 changes. They used to run after the swap, so for up to five minutes the old
 backend served the new frontend.
 
+A database restore started from the Admin page runs as a job on the server, and
+a restart kills it; one killed after its wipe leaves the database empty. The
+server counts a running restore as one in the drain snapshot's
+`held_by_viewer` (and in its own `restore` field), so the drain waits for it
+like a viewer, up to its five minutes. The restart then waits too:
+`aurora.service` now sets `KillMode=mixed`, so the stop's SIGTERM reaches the
+server alone and not `pg_restore`, and `TimeoutStopSec=5min`; the server waits
+up to four minutes for a running restore before it stops it. A box keeps its
+old unit, whose SIGTERM reaches `pg_restore` directly, until `install.sh` or
+`redeploy.sh` reinstalls the units (`redeploy.sh` does when it sees them
+differ).
+
 Browser tabs left open across a deploy run the build they loaded, and the
 previous build's chunks are deleted. The SPA compares the build id it was loaded
 with (`<meta name="aurora-build">`, a hash of the bundle, `public/` and the page)

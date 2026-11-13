@@ -28,6 +28,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -117,8 +118,9 @@ func seedTestData(t *testing.T, pool *pgxpool.Pool) seedRow {
 	row.embedding = embedding
 
 	// Unique username/email per run so the test is idempotent against
-	// half-cleaned state.
-	suffix := time.Now().UTC().Format("20060102150405")
+	// half-cleaned state. To the nanosecond: several tests seed within the
+	// same second.
+	suffix := time.Now().UTC().Format("20060102150405.000000000")
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO users (username, email, password_hash, role)
 		 VALUES ($1, $2, 'x', 'admin')
@@ -220,11 +222,20 @@ func callRestore(t *testing.T, dbURL string, dump []byte) {
 	rec := httptest.NewRecorder()
 	h.Restore(rec, req)
 
+	// The restore runs as a job: the POST answers 202 once it has started,
+	// and the outcome is read from the status.
 	res := rec.Result()
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
+	if res.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(res.Body)
 		t.Fatalf("Restore returned %d: %s", res.StatusCode, string(body))
+	}
+	var st RestoreStatus
+	if err := json.NewDecoder(res.Body).Decode(&st); err != nil || st.Running == nil {
+		t.Fatalf("Restore's 202 carries no running restore (%v)", err)
+	}
+	if got := waitRestoreEnd(t, h.restores(), st.Running.ID); !got.Succeeded {
+		t.Fatalf("restore failed: %+v", got)
 	}
 }
 
@@ -533,7 +544,7 @@ func TestRestoreRejectsTinyValidPrefix(t *testing.T) {
 	sentinelUsername := "tiny_sentinel_" + suffix
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO users (username, email, password_hash, role)
-		 VALUES ($1, $1 || '@example.com', 'x', 'admin')`,
+		 VALUES ($1::text, $1::text || '@example.com', 'x', 'admin')`,
 		sentinelUsername,
 	); err != nil {
 		t.Fatalf("insert sentinel — DB schema is in an inconsistent state, not this handler's fault: %v", err)
@@ -698,5 +709,162 @@ func TestRestoreRejectsRandomGarbage(t *testing.T) {
 	body, _ := io.ReadAll(res.Body)
 	if !bytes.Contains(body, []byte("PGDMP")) {
 		t.Errorf("expected error body to mention 'PGDMP' magic, got: %s", body)
+	}
+}
+
+// restoreAsJob starts a restore of dump on h and answers the job's id.
+func restoreAsJob(t *testing.T, h *AdminHandler, ctx context.Context, dump []byte) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.Restore(rec, restoreRequest(t, ctx, "roundtrip.dump", dump))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("Restore returned %d: %s", rec.Code, rec.Body.String())
+	}
+	var st RestoreStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil || st.Running == nil {
+		t.Fatalf("Restore's 202 carries no running restore (%v): %s", err, rec.Body.String())
+	}
+	return st.Running.ID
+}
+
+// mediaItemsReadable reports whether a fresh connection can read the
+// media_items table, i.e. whether the wipe has dropped it.
+func mediaItemsReadable(t *testing.T, dbURL string) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	var n int
+	return pool.QueryRow(ctx, `SELECT count(*) FROM media_items`).Scan(&n) == nil
+}
+
+// TestARestoreFinishesWhenItsRequestIsCancelledMidRestore is the hazard the
+// restore job exists for, end to end against PostgreSQL. The restore used to
+// run on the upload's request: a reload, a closed tab or a dropped connection
+// after the wipe killed pg_restore and left the database empty. Here the
+// request's context is cancelled with the wipe committed and pg_restore about
+// to run, and the restore must still finish with the data back.
+func TestARestoreFinishesWhenItsRequestIsCancelledMidRestore(t *testing.T) {
+	pool, dbURL := requireBackupTestDB(t)
+	seed := seedTestData(t, pool)
+	dump := callBackup(t, dbURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `DELETE FROM media_items WHERE id = $1`, seed.mediaID); err != nil {
+		t.Fatalf("perturb media_items: %v", err)
+	}
+	pool.Close()
+
+	h := &AdminHandler{databaseURL: dbURL}
+	rj := NewRestoreJobs(context.Background())
+	h.SetRestoreJobs(rj)
+	atRestore := make(chan struct{})
+	goOn := make(chan struct{})
+	rj.phaseHookForTest = func(p RestorePhase) {
+		if p == RestoreRestoring {
+			close(atRestore)
+			<-goOn
+		}
+	}
+	reqCtx, cancelRequest := context.WithCancel(context.Background())
+	id := restoreAsJob(t, h, reqCtx, dump)
+	select {
+	case <-atRestore:
+	case <-time.After(time.Minute):
+		t.Fatalf("the restore did not reach pg_restore; status %+v", rj.Status())
+	}
+	// Past the wipe: the old tables are gone. This is the moment a cancelled
+	// request used to leave the database empty.
+	if mediaItemsReadable(t, dbURL) {
+		t.Fatal("media_items is still readable at the restoring phase; the wipe did not run first")
+	}
+	cancelRequest()
+	close(goOn)
+
+	got := waitRestoreEnd(t, rj, id)
+	if !got.Succeeded || got.Database != RestoreDBRestored {
+		t.Fatalf("outcome %+v, want succeeded with the database restored", got)
+	}
+	fresh, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("reconnect after restore: %v", err)
+	}
+	defer fresh.Close()
+	var gotTitle, gotEmbedding string
+	if err := fresh.QueryRow(ctx, `SELECT title, embedding::text FROM media_items WHERE id = $1`, seed.mediaID).Scan(&gotTitle, &gotEmbedding); err != nil {
+		t.Fatalf("read restored media_item: %v", err)
+	}
+	if gotTitle != seed.title {
+		t.Errorf("title %q, want %q", gotTitle, seed.title)
+	}
+	assertVectorEqual(t, seed.embedding, gotEmbedding)
+}
+
+// TestATruncatedArchiveIsRefusedInTheJobWithTheDatabaseUntouched: the full
+// read of the archive (deep-debug H8) moved from the request into the job. A
+// dump cut mid-data passes the handler's cheap checks, so the POST answers
+// 202; the job must refuse it before the wipe and say the database is
+// unchanged, and the data must still be there.
+func TestATruncatedArchiveIsRefusedInTheJobWithTheDatabaseUntouched(t *testing.T) {
+	pool, dbURL := requireBackupTestDB(t)
+	seed := seedTestData(t, pool)
+	dump := callBackup(t, dbURL)
+	cut := dump[:len(dump)*2/3]
+
+	h := &AdminHandler{databaseURL: dbURL}
+	h.SetRestoreJobs(NewRestoreJobs(context.Background()))
+	id := restoreAsJob(t, h, context.Background(), cut)
+	got := waitRestoreEnd(t, h.restores(), id)
+	if got.Succeeded || got.Phase != RestoreValidating || got.Database != RestoreDBUnchanged || got.Stderr == "" {
+		t.Fatalf("outcome %+v, want refused while validating, database unchanged, with pg_restore's words", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM media_items WHERE id = $1`, seed.mediaID).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("the seeded row after a refused archive: count %d, err %v; the database was touched", n, err)
+	}
+}
+
+// TestARestoreStoppedByShutdownAfterTheWipeSaysTheDatabaseMayBeEmpty: what the
+// job does NOT protect against. A shutdown whose wait runs out cancels the
+// lifecycle context; a restore stopped past the wipe leaves the database
+// empty, and the outcome must say so rather than "unchanged". The database is
+// restored again afterwards for the tests that follow.
+func TestARestoreStoppedByShutdownAfterTheWipeSaysTheDatabaseMayBeEmpty(t *testing.T) {
+	pool, dbURL := requireBackupTestDB(t)
+	seedTestData(t, pool)
+	dump := callBackup(t, dbURL)
+	pool.Close()
+	t.Cleanup(func() { callRestore(t, dbURL, dump) })
+
+	base, stopServer := context.WithCancel(context.Background())
+	defer stopServer()
+	h := &AdminHandler{databaseURL: dbURL}
+	rj := NewRestoreJobs(base)
+	h.SetRestoreJobs(rj)
+	atRestore := make(chan struct{})
+	rj.phaseHookForTest = func(p RestorePhase) {
+		if p == RestoreRestoring {
+			close(atRestore)
+			<-base.Done()
+		}
+	}
+	id := restoreAsJob(t, h, context.Background(), dump)
+	<-atRestore
+	if rj.Drain(50 * time.Millisecond) {
+		t.Fatal("Drain reported nothing running")
+	}
+	stopServer()
+	got := waitRestoreEnd(t, rj, id)
+	if got.Succeeded || got.Stopped != "shutdown" || got.Phase != RestoreRestoring || got.Database != RestoreDBMayBeEmpty {
+		t.Fatalf("outcome %+v, want stopped by shutdown in restoring, database may be empty", got)
+	}
+	if mediaItemsReadable(t, dbURL) {
+		t.Fatal("media_items is readable after a restore stopped past the wipe; the outcome's 'may be empty' was not exercised")
 	}
 }

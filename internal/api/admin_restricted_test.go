@@ -198,6 +198,7 @@ func TestAdminRoutesRefuseARestrictedSession(t *testing.T) {
 		{http.MethodGet, "/api/admin/dashboard"},
 		{http.MethodGet, "/api/admin/backup"},
 		{http.MethodPost, "/api/admin/restore"},
+		{http.MethodGet, "/api/admin/restore/status"},
 	}
 	// A user's token is refused every one of them, unrestricted session or not.
 	role = "user"
