@@ -14,6 +14,10 @@ import {
   formatPartyTime,
   inviteCodeFromLink,
   localDateKey,
+  plannedStartLabel,
+  plannedStartLine,
+  startHasPassed,
+  todayOrTonight,
   matchMembers,
   memberQueryReady,
   normalizeMemberQuery,
@@ -90,6 +94,67 @@ describe('formatPartyTime', () => {
     expect(label).not.toContain('Tonight')
     expect(label).not.toContain('Tomorrow')
     expect(label).toContain('·')
+  })
+})
+
+// A time today is "Tonight" only from five in the afternoon. It used to be
+// "Tonight" at any hour, so a party planned for eight in the morning read
+// "Tonight · 8:00 AM".
+describe('today or tonight', () => {
+  const day = (h: number, m = 0) => new Date(2026, 7, 6, h, m)
+  it('turns at five in the afternoon, local, to the minute', () => {
+    expect(todayOrTonight(day(16, 59))).toBe('Today')
+    expect(todayOrTonight(day(17, 0))).toBe('Tonight')
+    expect(todayOrTonight(day(0, 0))).toBe('Today')
+    expect(todayOrTonight(day(8, 0))).toBe('Today')
+    expect(todayOrTonight(day(12, 0))).toBe('Today')
+    expect(todayOrTonight(day(23, 59))).toBe('Tonight')
+  })
+  it('is the word formatPartyTime gives a time today', () => {
+    const now = day(7, 0)
+    expect(formatPartyTime(day(8, 0).toISOString(), now)).toBe('Today · 8:00 AM')
+    expect(formatPartyTime(day(16, 59).toISOString(), now)).toBe('Today · 4:59 PM')
+    expect(formatPartyTime(day(17, 0).toISOString(), now)).toBe('Tonight · 5:00 PM')
+    expect(formatPartyTime(day(20, 0).toISOString(), now)).toBe('Tonight · 8:00 PM')
+    // Whatever the hour it is asked at: the word is the time's own.
+    expect(formatPartyTime(day(8, 0).toISOString(), day(22, 0))).toBe('Today · 8:00 AM')
+    expect(formatPartyTime(day(20, 0).toISOString(), day(22, 0))).toBe('Tonight · 8:00 PM')
+  })
+  it('leaves other days as they were', () => {
+    const now = day(7, 0)
+    expect(formatPartyTime(new Date(2026, 7, 7, 8, 0).toISOString(), now)).toBe('Tomorrow · 8:00 AM')
+    expect(formatPartyTime(new Date(2026, 7, 8, 8, 0).toISOString(), now)).toBe('Sat, Aug 8 · 8:00 AM')
+  })
+  it('is the word on the quick picks, which are for the evening', () => {
+    const labels = buildQuickChips(day(9, 0)).map(c => c.label)
+    expect(labels).toEqual(['Tonight · 8:00 PM', 'Tonight · 9:00 PM', 'Tomorrow · 8:00 PM'])
+  })
+})
+
+// A party can sit unstarted past its planned time: its start was blocked,
+// or nobody came. The server keeps it for a while, longer while someone is
+// in its lobby, and a line that went on saying "Starts" promised something
+// already missed.
+describe('a planned start that has passed', () => {
+  const now = new Date(2026, 7, 6, 14, 0)
+  const at = (h: number, m = 0, d = 6) => new Date(2026, 7, d, h, m).toISOString()
+  it('has passed from its own minute on', () => {
+    expect(startHasPassed(at(14, 1), now)).toBe(false)
+    expect(startHasPassed(at(14, 0), now)).toBe(true)
+    expect(startHasPassed(at(13, 59), now)).toBe(true)
+  })
+  it('reads "Starts" while it is to come, and "Was planned for" after', () => {
+    expect(plannedStartLine(at(20), now)).toBe('Starts Tonight · 8:00 PM')
+    expect(plannedStartLine(at(15), now)).toBe('Starts Today · 3:00 PM')
+    expect(plannedStartLine(at(10), now)).toBe('Was planned for Today · 10:00 AM')
+    expect(plannedStartLine(at(20, 0, 5), now)).toBe('Was planned for Wed, Aug 5 · 8:00 PM')
+    // An evening time that has gone by is still that evening's.
+    expect(plannedStartLine(at(18), new Date(2026, 7, 6, 21, 0))).toBe('Was planned for Tonight · 6:00 PM')
+  })
+  it('stands alone as the time while it is to come, and says so once it is not', () => {
+    expect(plannedStartLabel(at(20), now)).toBe('Tonight · 8:00 PM')
+    expect(plannedStartLabel(at(20, 0, 7), now)).toBe('Tomorrow · 8:00 PM')
+    expect(plannedStartLabel(at(10), now)).toBe('Was planned for Today · 10:00 AM')
   })
 })
 

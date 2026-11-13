@@ -485,6 +485,52 @@ describe('the ways into a party', () => {
   })
 })
 
+// A party can sit unstarted past its planned time (its start was blocked, or
+// nobody came): the server keeps it for a while, longer while someone is in
+// its lobby, and lists its invitations for as long. Nothing on the page then
+// says it is still to come.
+describe('a planned start that has passed', () => {
+  const ago = new Date(Date.now() - 4 * 60_000).toISOString()
+  const ahead = new Date(Date.now() + 7 * 86_400_000).toISOString()
+
+  it('is not given as "Starts" under Coming up', () => {
+    const late = party({ code: 'LATE01', party_name: 'Late', scheduled_start_at: ago, started_at: null })
+    const later = party({ code: 'LATER1', party_name: 'Later', scheduled_start_at: ahead, started_at: null })
+    const answered: MyPartyInvite = { invite_id: 3, party_code: 'LATE01', media_title: 'Night Train', host_username: 'priya', rsvp: 'going', scheduled_start_at: ago, created_at: '' }
+    render(<TogetherView {...props({ activeParties: [late, later], invites: [answered] })} />)
+    const coming = screen.getByRole('region', { name: 'Coming up' })
+    expect(coming.contains(partyRowOf('LATE01'))).toBe(true)
+    expect(partyRowOf('LATE01').textContent).toMatch(/Was planned for .+ · \d+:\d\d [AP]M · you’re in/)
+    expect(partyRowOf('LATE01').textContent).not.toMatch(/Starts/)
+    // One still to come reads as it did.
+    expect(partyRowOf('LATER1').textContent).toMatch(/Starts .+ · \d+:\d\d [AP]M/)
+    expect(partyRowOf('LATER1').textContent).not.toMatch(/planned/)
+  })
+
+  it('nor on a party the viewer is hosting', () => {
+    const late = party({ code: 'MINE01', host_user_id: 1, party_name: 'My night', scheduled_start_at: ago, started_at: null })
+    const later = party({ code: 'MINE02', host_user_id: 1, party_name: 'My next', scheduled_start_at: ahead, started_at: null })
+    render(<TogetherView {...props({ activeParties: [late, later] })} />)
+    expect(screen.getByRole('region', { name: 'You are hosting' }).contains(partyRowOf('MINE01'))).toBe(true)
+    expect(partyRowOf('MINE01').textContent).toMatch(/Was planned for .+ · \d+:\d\d [AP]M · code MINE01/)
+    expect(partyRowOf('MINE01').textContent).not.toMatch(/Starts/)
+    expect(partyRowOf('MINE02').textContent).toMatch(/Starts .+ · \d+:\d\d [AP]M · code MINE02/)
+    expect(partyRowOf('MINE02').textContent).not.toMatch(/planned/)
+  })
+
+  it('nor under an invitation still waiting for a reply', () => {
+    const invite = (id: number, title: string, at: string): MyPartyInvite => ({
+      invite_id: id, party_code: `INV00${id}`, media_title: title, host_username: 'jonah', rsvp: 'pending', scheduled_start_at: at, started_at: null, created_at: '',
+    })
+    render(<TogetherView {...props({ invites: [invite(1, 'Kestrel', ago), invite(2, 'Orchard', ahead)] })} />)
+    const row = (title: string) => screen.getByText(`jonah invited you to watch ${title}`).closest('li')!
+    expect(row('Kestrel').textContent).toMatch(/Was planned for .+ · \d+:\d\d [AP]M/)
+    // To come: the time alone.
+    expect(row('Orchard').textContent).toMatch(/ · \d+:\d\d [AP]M/)
+    expect(row('Orchard').textContent).not.toMatch(/planned|Starts/)
+  })
+})
+
 describe('the parties the viewer is part of', () => {
   it('lists the viewer\'s own parties apart, with their code, and opens the one they are in', async () => {
     const onJoinParty = vi.fn(async () => ({ ok: true })), onOpenPartyPanel = vi.fn()
@@ -555,7 +601,9 @@ describe('the parties the viewer is part of', () => {
   })
 
   it('puts running parties before the ones still to start, which have a heading of their own', () => {
-    const later = party({ code: 'LATER1', party_name: 'Later', scheduled_start_at: '2026-11-20T20:00:00Z', started_at: null })
+    // A week from whenever this runs: the line reads "Starts" only while
+    // the time is still to come.
+    const later = party({ code: 'LATER1', party_name: 'Later', scheduled_start_at: new Date(Date.now() + 7 * 86_400_000).toISOString(), started_at: null })
     render(<TogetherView {...props({ activeParties: [later, party()] })} />)
     expect([...document.querySelectorAll('[data-party]')].map(li => li.getAttribute('data-party'))).toEqual(['MOON42', 'LATER1'])
     const coming = screen.getByRole('region', { name: 'Coming up' })

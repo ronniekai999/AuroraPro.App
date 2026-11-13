@@ -17,7 +17,8 @@ import { QUICK_REACTIONS, drawnReaction } from './reactions'
 function serverReactions(source: string): string[] {
   const block = /var allowedReactions = map\[string\]bool\{([\s\S]*?)\n\}/.exec(source)
   if (!block) throw new Error('allowedReactions not found in internal/watchparty/manager.go: this test is out of date, not passing')
-  const live = block[1].split('\n').filter(line => !line.trim().startsWith('//')).join('\n')
+  // Block comments first, then comment lines.
+  const live = block[1].replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter(line => !line.trim().startsWith('//')).join('\n')
   return [...live.matchAll(/"((?:\\U[0-9A-Fa-f]{8})+)":\s*true/g)].map(m =>
     [...m[1].matchAll(/\\U([0-9A-Fa-f]{8})/g)].map(c => String.fromCodePoint(parseInt(c[1], 16))).join(''))
 }
@@ -26,7 +27,7 @@ describe('the reactions a party offers', () => {
   const accepted = serverReactions(managerGo)
 
   it('does not count an entry the server has commented out', () => {
-    const source = 'var allowedReactions = map[string]bool{\n\t"\\U0001F525": true, // fire\n\t// "\\U0001F480": true, // skull\n}\n'
+    const source = 'var allowedReactions = map[string]bool{\n\t"\\U0001F525": true, // fire\n\t// "\\U0001F480": true, // skull\n\t/* "\\U0001F92F": true,\n\t   "\\U0001F60E": true, */\n}\n'
     expect(serverReactions(source)).toEqual(['🔥'])
   })
 

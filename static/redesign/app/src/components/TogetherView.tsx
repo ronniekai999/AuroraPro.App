@@ -16,7 +16,7 @@ import {
   type ActiveParty, type FollowedWatch, type MemberSummary, type MyPartyInvite, type Room,
 } from '@/lib/api'
 import { clearLastParty, isLastPartyKey, readLastParty, type LastPartyEntry } from '@/lib/lastParty'
-import { formatPartyTime } from '@/lib/partyInvites'
+import { plannedStartLabel, plannedStartLine } from '@/lib/partyInvites'
 import { isScheduledLobby, partyPresence } from '@/hooks/useActiveParties'
 import { PageHeader } from '@/components/PageHeader'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
@@ -321,7 +321,7 @@ export default function TogetherView({
                       <div className={rowLine}>
                         {/* The invitation's own word on whether the party
                             has started: the party list may not have it yet. */}
-                        {i.started_at ? 'Live now' : i.scheduled_start_at ? formatPartyTime(i.scheduled_start_at, now) : 'In the lobby'}
+                        {i.started_at ? 'Live now' : i.scheduled_start_at ? plannedStartLabel(i.scheduled_start_at, now) : 'In the lobby'}
                         {i.note?.trim() ? ` · “${i.note.trim()}”` : ''}
                       </div>
                     </div>
@@ -344,7 +344,7 @@ export default function TogetherView({
                   const answer = inviteFor(p.code)?.rsvp
                   return partyRow(
                     p,
-                    `Starts ${formatPartyTime(p.scheduled_start_at!, now)}${answer === 'going' ? ' · you’re in' : answer === 'maybe' ? ' · you said maybe' : ''}`,
+                    `${plannedStartLine(p.scheduled_start_at!, now)}${answer === 'going' ? ' · you’re in' : answer === 'maybe' ? ' · you said maybe' : ''}`,
                     'Open lobby',
                     false,
                   )
@@ -367,7 +367,7 @@ export default function TogetherView({
                         <div className={rowTitle}>{partyName(p)}</div>
                         <div className={rowLine}>
                           {booked
-                            ? `Starts ${formatPartyTime(p.scheduled_start_at!, now)}`
+                            ? plannedStartLine(p.scheduled_start_at!, now)
                             : p.participant_count > 0 ? `Live now · ${p.participant_count} watching` : 'Live now'}
                           {' · code '}<span className="font-mono tabular-nums text-ink">{p.code}</span>
                         </div>

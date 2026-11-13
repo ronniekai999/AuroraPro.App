@@ -7,7 +7,7 @@
 // (parties undefined) for a session that is not offered Together, so a
 // restricted profile never sees a party or an invitation here.
 import { posterURL, type ActiveParty, type MyPartyInvite } from '@/lib/api'
-import { formatPartyTime } from '@/lib/partyInvites'
+import { plannedStartLabel } from '@/lib/partyInvites'
 import { partyPresence } from '@/hooks/useActiveParties'
 
 export interface TonightLiveProps {
@@ -70,7 +70,7 @@ export function TonightLive({ parties, invites, currentUserId, inPartyCode, onJo
         const started = !!i.started_at
         const when = started
           ? 'Live now'
-          : i.scheduled_start_at ? formatPartyTime(i.scheduled_start_at, at) : 'In the lobby'
+          : i.scheduled_start_at ? plannedStartLabel(i.scheduled_start_at, at) : 'In the lobby'
         return (
           <div key={`invite-${i.invite_id}`} className="tonight-live-row" data-live-invite={i.invite_id}>
             {/* A party's poster is stored as the bare image path (App strips

@@ -78,7 +78,7 @@ import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer
 import { PartyPanel } from '@/components/PartyPanel'
 import { PartyInvite } from '@/components/PartyInvite'
 import { PartyComposerModal, type PartyComposerLaunch } from '@/components/PartyComposerModal'
-import { formatPartyTime, skipReasonCopy, inviteCodeFromLink } from '@/lib/partyInvites'
+import { formatPartyTime, plannedStartLabel, skipReasonCopy, inviteCodeFromLink } from '@/lib/partyInvites'
 import { firstEpisodeToPlay, regularSeasonsFirst, resolvePartyEpisodeId, startsLaterNotice } from '@/lib/partyEpisode'
 import { buildSlate, resumeLead, shownSlateIndex, whereYouAre, type SlateEntry } from '@/lib/tonightSlate'
 import { TonightLive } from '@/components/TonightLive'
@@ -1388,7 +1388,10 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                   <>
                     {(invite.scheduled_start_at || invite.note) && (
                       <p className="text-white/50 text-xs mt-1 truncate">
-                        {invite.scheduled_start_at ? formatPartyTime(invite.scheduled_start_at, new Date()) : ''}
+                        {/* A party that has started keeps its planned
+                            time as it is; one that has not, and whose time
+                            has passed, does not read as still to come. */}
+                        {invite.scheduled_start_at ? (invite.started_at ? formatPartyTime(invite.scheduled_start_at, new Date()) : plannedStartLabel(invite.scheduled_start_at, new Date())) : ''}
                         {invite.scheduled_start_at && invite.note ? ' · ' : ''}
                         {invite.note ? `“${invite.note}”` : ''}
                       </p>

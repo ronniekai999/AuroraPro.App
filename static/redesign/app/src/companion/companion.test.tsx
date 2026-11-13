@@ -30,6 +30,7 @@ const companion = vi.hoisted(() => ({ current: null as unknown }))
 vi.mock('@/hooks/useCompanion', () => ({ useCompanion: () => companion.current }))
 
 import { JoinScreen, plannedStartPhrase } from './JoinScreen'
+import { formatPartyTime, plannedStartLine } from '@/lib/partyInvites'
 import { CompanionRoom, type CompanionRoomProps } from './CompanionRoom'
 import { CompanionApp } from './CompanionApp'
 
@@ -85,6 +86,20 @@ function room(over: Partial<CompanionRoomProps> = {}) {
 /** The companion's own alerts and statuses hold text only when there is
  *  something to say. */
 const said = (role: 'alert' | 'status') => screen.getAllByRole(role).map(el => el.textContent ?? '').filter(Boolean)
+
+/** The party card's lines, as they read. A line is drawn in parts, so that a
+ *  long name can be cut short without cutting what follows it. */
+const cardLines = () => Array.from(document.querySelectorAll('[data-party-card] [data-party-line], [data-party-card] [data-party-when]')).map(el => el.textContent)
+/** The classes on an element of the card, or on anything between it and the
+ *  card, that would cut its text short or keep it from wrapping. */
+const cutBy = (el: Element) => {
+  const cuts: string[] = []
+  for (let n: Element | null = el; n; n = n.parentElement) {
+    cuts.push(...n.className.split(/\s+/).filter(c => /^(truncate|overflow-hidden|overflow-x-hidden|text-ellipsis|whitespace-nowrap|line-clamp-.+)$/.test(c)))
+    if (n.matches('[data-party-card]')) break
+  }
+  return cuts
+}
 
 beforeEach(() => {
   api.getCompanionPartyPreview.mockReset().mockResolvedValue(null)
@@ -167,14 +182,14 @@ describe('the companion’s join screen', () => {
     await new Promise(r => setTimeout(r, 400))
     expect(api.getCompanionPartyPreview).not.toHaveBeenCalled()
     await user.type(code, 'c')
-    expect(await screen.findByText('Friday crew is live')).toBeInTheDocument()
     // Everyone in the room, phones included: "here", not "watching".
-    expect(screen.getByText('Night Train to Meridian · 3 here')).toBeInTheDocument()
+    await waitFor(() => expect(cardLines()).toEqual(['Friday crew is live', 'Night Train to Meridian · 3 here']))
     expect(api.getCompanionPartyPreview).toHaveBeenCalledTimes(1)
     expect(api.getCompanionPartyPreview.mock.calls[0][0]).toBe('FRD4YC')
     // The card goes with the code it was for.
     await user.type(code, '{Backspace}')
-    expect(screen.queryByText('Friday crew is live')).toBeNull()
+    expect(cardLines()).toEqual([])
+    expect(document.querySelector('[data-party-card]')).toBeNull()
   })
 
   it('names a party that has no name by what it is', async () => {
@@ -214,33 +229,110 @@ describe('the companion’s join screen', () => {
     at.setMinutes(0, 0, 0)
     api.getCompanionPartyPreview.mockResolvedValue({ code: 'LATER7', partyName: 'Sunday film', mediaTitle: 'The Orchard', participantCount: 0, startedAt: null, scheduledStartAt: at.toISOString() })
     render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} initialCode="LATER7" />)
-    expect(await screen.findByText('Sunday film has not started')).toBeInTheDocument()
-    expect(screen.queryByText(/is live/)).toBeNull()
-    expect(screen.queryByText(/0 (here|watching)/)).toBeNull()
-    expect(screen.getByText(/^The Orchard, starts (tomorrow|[A-Z][a-z]{2}, [A-Z][a-z]{2} \d+) at \d/)).toBeInTheDocument()
+    await waitFor(() => expect(cardLines()).toHaveLength(3))
+    const [state, title, when] = cardLines()
+    expect(state).toBe('Sunday film has not started')
+    expect(title).toBe('The Orchard')
+    expect(when).toMatch(/^Starts (tomorrow|[A-Z][a-z]{2}, [A-Z][a-z]{2} \d+) at \d+:00 [AP]M$/)
+    const card = document.querySelector('[data-party-card]')!
+    expect(card.textContent).not.toMatch(/is live/)
+    expect(card.textContent).not.toMatch(/0 (here|watching)/)
+  })
+
+  // The card is as narrow as the phone, and a name or a title can be any
+  // length. They are what gives way: whether the party is live, how many are
+  // here and when it starts are whole at any width. The time has a line of
+  // its own, which wraps; the others are parts that do not shrink, beside a
+  // part that does.
+  it('cuts a long name or title short, and never what the card says about the party', async () => {
+    const LONG_NAME = 'The second Sunday of the month film club, autumn season'
+    const LONG_TITLE = 'The Long and Winding Road to the Very Edge of the Orchard: Director’s Cut'
+    const at = new Date(Date.now() + 26 * 3600e3)
+    at.setMinutes(30, 0, 0)
+    api.getCompanionPartyPreview.mockResolvedValue({ code: 'LATER7', partyName: LONG_NAME, mediaTitle: LONG_TITLE, participantCount: 0, startedAt: null, scheduledStartAt: at.toISOString() })
+    const view = render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} initialCode="LATER7" />)
+    await waitFor(() => expect(cardLines()).toHaveLength(3))
+    const q = (sel: string) => document.querySelector(`[data-party-card] ${sel}`)!
+    // The whole phrase, in an element that nothing cuts and that may wrap.
+    const when = q('[data-party-when]')
+    expect(when.textContent).toBe(plannedStartPhrase(at.toISOString(), new Date()))
+    expect(when.textContent).toMatch(/^Starts .+ at \d+:30 [AP]M$/)
+    expect(cutBy(when)).toEqual([])
+    expect(when.className.split(/\s+/)).toContain('block')
+    // Where the line wraps, it is not inside the time of day.
+    const clock = q('[data-party-when] [data-party-clock]')
+    expect(clock.textContent).toMatch(/^\d+:30 [AP]M$/)
+    expect(clock.className.split(/\s+/)).toContain('whitespace-nowrap')
+    expect(when.lastElementChild).toBe(clock)
+    // It is not in the title's line, which is cut.
+    expect(when.closest('[data-party-line]')).toBeNull()
+    const titleLine = Array.from(document.querySelectorAll('[data-party-card] [data-party-line]'))[1]
+    expect(titleLine.textContent).toBe(LONG_TITLE)
+    expect(cutBy(titleLine.firstElementChild!)).toEqual(['truncate'])
+    // "has not started" stays whole beside a name that is cut.
+    const state = q('[data-party-state]')
+    expect(state.textContent).toBe(' has not started')
+    expect(cutBy(state)).toEqual([])
+    expect(state.className.split(/\s+/)).toContain('flex-none')
+    expect(cutBy(state.previousElementSibling!)).toEqual(['truncate'])
+    expect(state.previousElementSibling!.textContent).toBe(LONG_NAME)
+    view.unmount()
+
+    // Live (a planned party that has started: its planned time is no longer
+    // said): the count stays whole beside a title that is cut.
+    api.getCompanionPartyPreview.mockResolvedValue({ code: 'FRD4YC', partyName: LONG_NAME, mediaTitle: LONG_TITLE, participantCount: 12, startedAt: '2026-10-01T19:00:00Z', scheduledStartAt: '2026-10-01T19:00:00Z' })
+    render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} initialCode="FRD4YC" />)
+    await waitFor(() => expect(cardLines()).toEqual([`${LONG_NAME} is live`, `${LONG_TITLE} · 12 here`]))
+    const here = q('[data-party-here]')
+    expect(cutBy(here)).toEqual([])
+    expect(here.className.split(/\s+/)).toContain('flex-none')
+    expect(cutBy(here.previousElementSibling!)).toEqual(['truncate'])
+    expect(cutBy(q('[data-party-state]'))).toEqual([])
+    expect(document.querySelector('[data-party-when]')).toBeNull()
   })
 
   // A planned party whose start failed stays unstarted on the server.
   it('does not go on saying "starts" once the planned time has passed', async () => {
     api.getCompanionPartyPreview.mockResolvedValue({ code: 'LATER7', partyName: 'Sunday film', mediaTitle: 'The Orchard', participantCount: 0, startedAt: null, scheduledStartAt: new Date(Date.now() - 3 * 24 * 3600e3).toISOString() })
     render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} initialCode="LATER7" />)
-    expect(await screen.findByText('Sunday film has not started')).toBeInTheDocument()
-    expect(screen.getByText(/^The Orchard, was planned for /)).toBeInTheDocument()
-    expect(screen.queryByText(/starts/)).toBeNull()
+    await waitFor(() => expect(cardLines()).toHaveLength(3))
+    expect(cardLines().slice(0, 2)).toEqual(['Sunday film has not started', 'The Orchard'])
+    expect(cardLines()[2]).toMatch(/^Was planned for [A-Z][a-z]{2}, [A-Z][a-z]{2} \d+ at \d+:\d\d [AP]M$/)
+    expect(document.querySelector('[data-party-card]')!.textContent).not.toMatch(/starts/i)
   })
 
-  it('words a planned time by the day it falls on, and "tonight" only from the late afternoon', () => {
+  it('words a planned time by the day it falls on, and "tonight" only from five in the afternoon', () => {
     const now = new Date(2026, 9, 1, 15, 0)
     const at = (d: number, h: number, m = 0) => new Date(2026, 9, d, h, m).toISOString()
-    expect(plannedStartPhrase(at(1, 20), now)).toBe('starts tonight at 8:00 PM')
-    expect(plannedStartPhrase(at(1, 16, 30), now)).toBe('starts today at 4:30 PM')
-    expect(plannedStartPhrase(at(2, 8), now)).toBe('starts tomorrow at 8:00 AM')
-    expect(plannedStartPhrase(at(9, 20), now)).toMatch(/^starts Fri, Oct 9 at 8:00 PM$/)
+    expect(plannedStartPhrase(at(1, 20), now)).toBe('Starts tonight at 8:00 PM')
+    expect(plannedStartPhrase(at(1, 16, 30), now)).toBe('Starts today at 4:30 PM')
+    // The turn, to the minute: the one the rest of the app makes.
+    expect(plannedStartPhrase(at(1, 16, 59), now)).toBe('Starts today at 4:59 PM')
+    expect(plannedStartPhrase(at(1, 17), now)).toBe('Starts tonight at 5:00 PM')
+    expect(plannedStartPhrase(at(2, 8), now)).toBe('Starts tomorrow at 8:00 AM')
+    expect(plannedStartPhrase(at(9, 20), now)).toMatch(/^Starts Fri, Oct 9 at 8:00 PM$/)
     // Passed, the party still not started.
-    expect(plannedStartPhrase(at(1, 8), now)).toBe('was planned for today at 8:00 AM')
-    expect(plannedStartPhrase(new Date(2026, 8, 30, 20).toISOString(), now)).toBe('was planned for yesterday at 8:00 PM')
-    // A planned time of this evening that has passed is not "tonight" to come.
-    expect(plannedStartPhrase(at(1, 18), new Date(2026, 9, 1, 21, 0))).toBe('was planned for today at 6:00 PM')
+    expect(plannedStartPhrase(at(1, 8), now)).toBe('Was planned for today at 8:00 AM')
+    expect(plannedStartPhrase(at(1, 15), now)).toBe('Was planned for today at 3:00 PM')
+    expect(plannedStartPhrase(new Date(2026, 8, 30, 20).toISOString(), now)).toBe('Was planned for yesterday at 8:00 PM')
+    // An evening time is "tonight" whether it is to come or has gone by:
+    // the word is the time's, and "was planned for" says which.
+    expect(plannedStartPhrase(at(1, 18), new Date(2026, 9, 1, 21, 0))).toBe('Was planned for tonight at 6:00 PM')
+  })
+
+  // The companion's line and the app's own (the bell, Together, Tonight)
+  // name the same time with the same word, at every hour of the day.
+  it('never says "tonight" where the rest of the app says "Today", nor the other way', () => {
+    const now = new Date(2026, 9, 1, 0, 0)
+    for (let h = 0; h < 24; h++) {
+      for (const m of [0, 59]) {
+        const iso = new Date(2026, 9, 1, h, m).toISOString()
+        const word = formatPartyTime(iso, now).split(' · ')[0]
+        expect(['Today', 'Tonight']).toContain(word)
+        expect(plannedStartPhrase(iso, now)).toContain(` ${word.toLowerCase()} at `)
+        expect(plannedStartPhrase(iso, now).startsWith('Was planned for')).toBe(plannedStartLine(iso, now).startsWith('Was planned for'))
+      }
+    }
   })
 
   // A character typed into the middle of a complete code would push its
@@ -254,10 +346,68 @@ describe('the companion’s join screen', () => {
     await user.keyboard('X')
     expect(code).toHaveValue('FRD4YC')
     expect(code.selectionStart).toBe(3)
+    expect(code.selectionEnd).toBe(3)
+    // At its end too.
+    code.setSelectionRange(6, 6)
+    await user.keyboard('X')
+    expect(code).toHaveValue('FRD4YC')
     // Typing over a selection replaces it, as anywhere.
     code.setSelectionRange(0, 3)
     await user.keyboard('M')
     expect(code).toHaveValue('M4YC')
+  })
+
+  // A phone's keyboard does not always type: it composes, or replaces a
+  // word, and those cannot be refused before they happen. The field judges
+  // the change itself, whatever made it: the value as the browser leaves it,
+  // the caret after what came in, then the input event.
+  it.each(['insertCompositionText', 'insertReplacementText', 'insertFromDrop'])('refuses an insert into a complete code however it arrives (%s)', (inputType) => {
+    render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: true })} initialCode="FRD4YC" />)
+    const code = screen.getByLabelText('Party code') as HTMLInputElement
+    const arrive = (value: string, caret: number) => fireEvent.input(code, { inputType, target: { value, selectionStart: caret, selectionEnd: caret } })
+    arrive('FRDX4YC', 4)
+    expect(code).toHaveValue('FRD4YC')
+    expect([code.selectionStart, code.selectionEnd]).toEqual([3, 3])
+    // Several characters at once, and ones a code cannot hold.
+    arrive('Fab-RD4YC', 4)
+    expect(code).toHaveValue('FRD4YC')
+    expect([code.selectionStart, code.selectionEnd]).toEqual([1, 1])
+    arrive('FRD4YCZ', 7)
+    expect(code).toHaveValue('FRD4YC')
+    expect([code.selectionStart, code.selectionEnd]).toEqual([6, 6])
+    // A change that is not an insert beside the whole old code is taken as
+    // any change is: here the keyboard replaced the last three characters.
+    arrive('FRDMOON', 7)
+    expect(code).toHaveValue('FRDMOO')
+  })
+
+  it('lets a pasted code or join link replace a complete code, wherever the caret is', async () => {
+    const user = userEvent.setup()
+    render(<JoinScreen user={MORGAN} onJoin={() => ({ ok: false, error: 'That party has ended.' })} initialCode="FRD4YC" />)
+    const code = screen.getByLabelText('Party code') as HTMLInputElement
+    await user.click(code)
+    code.setSelectionRange(3, 3)
+    await user.paste('https://aurora.example.test/join/moon42')
+    expect(code).toHaveValue('MOON42')
+    code.setSelectionRange(0, 0)
+    await user.paste('lat-er7')
+    expect(code).toHaveValue('LATER7')
+    // Less than a code, pasted into a complete one, is refused like typing.
+    code.setSelectionRange(2, 2)
+    await user.paste('ab')
+    expect(code).toHaveValue('LATER7')
+    expect(code.selectionStart).toBe(2)
+    // What was said about the old code goes when a new one replaces it,
+    // and stays when the change was refused.
+    await user.click(screen.getByRole('button', { name: 'Join' }))
+    expect(said('alert')).toEqual(['That party has ended.'])
+    await user.click(code)
+    code.setSelectionRange(6, 6)
+    await user.keyboard('x')
+    expect(said('alert')).toEqual(['That party has ended.'])
+    await user.paste('frd4yc')
+    expect(code).toHaveValue('FRD4YC')
+    expect(said('alert')).toEqual([])
   })
 
   it('says only that a party has not started when it has no planned time', async () => {
@@ -594,18 +744,56 @@ describe('the companion’s room', () => {
     expect(log.scrollTop).toBe(420)
   })
 
+  // The room is on screen from the moment a join is asked for, so it is
+  // drawn not connected first: the states below are the ones a join really
+  // goes through (useCompanion.test.tsx pins their order). The connection
+  // that ends them is the first, not a return.
+  it('does not call the first connection a return, however it is reached', async () => {
+    const joining = { ...ROOM, chat: [], participants: [], connected: false, joining: true, status: 'joining' as const, synced: false }
+    const { rerender, props } = room({ state: joining })
+    expect(said('status')).toEqual(['Connecting…'])
+    // The socket opens, with nothing arrived; then the room's state.
+    rerender(<CompanionRoom {...props} state={{ ...joining, connected: true, joining: false, status: 'connected' }} />)
+    expect(said('status')).toEqual([])
+    rerender(<CompanionRoom {...props} state={ROOM} />)
+    expect(said('status')).toEqual([])
+    await new Promise(done => setTimeout(done, 50))
+    expect(said('status')).toEqual([])
+    expect(document.body.textContent).not.toContain('Connected again')
+  })
+
+  it('nor when the first try fails and a later one connects', () => {
+    const joining = { ...ROOM, chat: [], participants: [], connected: false, joining: true, status: 'joining' as const, synced: false }
+    const { rerender, props } = room({ state: joining })
+    // The socket closed before it ever opened: the hook tries again.
+    rerender(<CompanionRoom {...props} state={{ ...joining, reconnecting: true, status: 'reconnecting' }} />)
+    expect(said('status')).toEqual(['Reconnecting…'])
+    rerender(<CompanionRoom {...props} state={{ ...joining, joining: false, reconnecting: false, connected: true, status: 'connected' }} />)
+    rerender(<CompanionRoom {...props} state={ROOM} />)
+    expect(said('status')).toEqual([])
+  })
+
   it('says when the connection is back, and that the message is still there', async () => {
     const user = userEvent.setup()
+    const joining = { ...ROOM, chat: [], participants: [], connected: false, joining: true, status: 'joining' as const, synced: false }
     const down = { ...ROOM, connected: false, reconnecting: true, status: 'reconnecting' as const, synced: false }
-    const { rerender, props } = room()
-    // The first connection is not a return.
+    // From the join, as a visit begins: the first connection is not a return.
+    const { rerender, props } = room({ state: joining })
+    rerender(<CompanionRoom {...props} state={{ ...joining, connected: true, joining: false, status: 'connected' }} />)
+    rerender(<CompanionRoom {...props} state={ROOM} />)
     expect(said('status')).toEqual([])
     rerender(<CompanionRoom {...props} state={down} />)
+    expect(said('status')).toEqual(['Reconnecting…'])
     await user.type(screen.getByLabelText('Message the party'), 'still here')
+    // The socket reopens (the hook says connected then, before the room's
+    // state has come again).
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, synced: false }} />)
+    expect(said('status')).toEqual(['Connected again. Your message is still in the field.'])
     rerender(<CompanionRoom {...props} state={ROOM} />)
     expect(said('status')).toEqual(['Connected again. Your message is still in the field.'])
     rerender(<CompanionRoom {...props} state={down} />)
     await user.clear(screen.getByLabelText('Message the party'))
+    rerender(<CompanionRoom {...props} state={{ ...ROOM, synced: false }} />)
     rerender(<CompanionRoom {...props} state={ROOM} />)
     expect(said('status')).toEqual(['Connected again.'])
   })

@@ -96,6 +96,23 @@ describe('the strip', () => {
     expect(onJoin).toHaveBeenCalledWith('KEST88')
   })
 
+  // An invitation is listed while its party is held, and a party is held for
+  // a while past a planned time it did not start at.
+  it('does not give a planned time that has passed as one still to come', () => {
+    const line = (id: number) => document.querySelector(`[data-live-invite="${id}"] .tonight-live-sub`)!.textContent
+    render(<TonightLive {...props} parties={[]} invites={[
+      invite({ invite_id: 1, scheduled_start_at: '2026-11-11T10:00:00' }),
+      invite({ invite_id: 2, party_code: 'OTHR22', scheduled_start_at: '2026-11-11T17:59:00', party_name: 'Film club' }),
+      invite({ invite_id: 3, party_code: 'SOON33', scheduled_start_at: '2026-11-11T20:00:00' }),
+      invite({ invite_id: 4, party_code: 'NOON44', scheduled_start_at: '2026-11-12T09:00:00' }),
+    ]} />)
+    expect(line(1)).toBe('Was planned for Today · 10:00 AM')
+    expect(line(2)).toBe('Was planned for Tonight · 5:59 PM · Film club')
+    // To come: the time alone, and a morning is not "Tonight".
+    expect(line(3)).toBe('Tonight · 8:00 PM')
+    expect(line(4)).toBe('Tomorrow · 9:00 AM')
+  })
+
   // A party's poster is stored as a bare image path ("abc.jpg"), not an
   // address: used as the picture's source it asked the app's own origin for
   // a page that is no picture, and the box stayed empty.

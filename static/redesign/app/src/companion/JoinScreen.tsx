@@ -10,7 +10,7 @@
 // It holds no session and joins nothing itself: it hands a complete code to
 // the companion's root, which owns the sign-in and the connection.
 
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useState } from 'react'
 import {
   getCompanionPartyPreview,
   posterURL,
@@ -19,7 +19,7 @@ import {
 } from '@/lib/api'
 import { Icon } from '@/components/Icon'
 import { PersonDisc } from '@/components/PersonDisc'
-import { localDateKey } from '@/lib/partyInvites'
+import { localDateKey, startHasPassed, todayOrTonight } from '@/lib/partyInvites'
 import { CompanionHeader } from './companionUi'
 
 const CODE_LEN = 6
@@ -88,20 +88,35 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
     return () => { ac.abort(); clearTimeout(t) }
   }, [code])
 
-  // A complete code takes no more typing: a character typed into the middle
-  // of one would push its last character out and send the caret to the end.
-  // Refused before it happens, as the field's length limit used to; a paste
-  // is not typing, and is cut after it has been cleaned (above).
-  const fieldRef = useRef<HTMLInputElement | null>(null)
-  useEffect(() => {
-    const el = fieldRef.current
-    if (!el) return
-    const refuseOverfill = (e: InputEvent) => {
-      if (e.inputType === 'insertText' && el.value.length >= CODE_LEN && el.selectionStart === el.selectionEnd) e.preventDefault()
+  // A complete code takes no more: something inserted into one, with no
+  // selection replaced, would push its last character out and send the caret
+  // to the end. Judged where the value changes, whatever produced the change
+  // (a key, a phone keyboard's composition or replacement, a paste): the old
+  // code and the caret are put back. Unless what was inserted is itself a
+  // code or a link to a party, which replaces what was there.
+  const onCodeChange = (el: HTMLInputElement) => {
+    const raw = el.value
+    const caret = el.selectionStart ?? raw.length
+    const grew = raw.length - code.length
+    const at = caret - grew
+    // Taking what came in back out leaves the old code, whole.
+    const inserted = grew > 0 && at >= 0 && raw.slice(0, at) + raw.slice(caret) === code
+    if (code.length === CODE_LEN && inserted) {
+      const held = normalize(raw.slice(at, caret))
+      if (held.length < CODE_LEN) {
+        // Set on the element too: the state does not change, so nothing
+        // else would take the stray characters back out.
+        el.value = code
+        el.setSelectionRange(at, at)
+        return
+      }
+      setError(null)
+      setCode(held)
+      return
     }
-    el.addEventListener('beforeinput', refuseOverfill)
-    return () => el.removeEventListener('beforeinput', refuseOverfill)
-  }, [])
+    setError(null)
+    setCode(normalize(raw))
+  }
 
   const attempt = useCallback(() => {
     if (!CODE_RE.test(code)) {
@@ -122,6 +137,8 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
   // A party the server holds for a planned start is not live yet.
   const started = !!preview?.startedAt
   const here = typeof preview?.participantCount === 'number' ? preview.participantCount : null
+  // When it is planned for, while it has not started.
+  const plan = !started && preview?.scheduledStartAt ? plannedStartParts(preview.scheduledStartAt, new Date()) : null
 
   return (
     // The column scrolls inside the companion's fixed shell, so a small
@@ -140,10 +157,9 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
         <form className="flex flex-col" onSubmit={e => { e.preventDefault(); attempt() }} noValidate>
           <label htmlFor={`${ids}-code`} className="text-[13px] font-semibold text-ink-2">Party code</label>
           <input
-            ref={fieldRef}
             id={`${ids}-code`}
             value={code}
-            onChange={e => { setError(null); setCode(normalize(e.target.value)) }}
+            onChange={e => onCodeChange(e.target)}
             // Enter answers also when there is nothing to submit with (an
             // incomplete code disables Join; a signed-out phone has none):
             // it says what is missing.
@@ -184,23 +200,39 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
         {preview && (
           <div className="flex min-h-[72px] items-center gap-3 rounded-control bg-surface-raised px-4 py-3">
             <CompanionPoster poster={preview.mediaPoster} className="h-[60px] w-10 rounded-chip" />
-            <p className="min-w-0 flex-1">
+            {/* A long name or title gives way (it is cut with an ellipsis).
+                What the card is there to say does not: whether the party is
+                live, how many are here, and when it starts are never cut.
+                The words kept whole carry their own leading space, so each
+                line still reads, and copies, as one sentence. */}
+            <p className="min-w-0 flex-1" data-party-card="">
               <span className="flex items-center gap-2 text-[15px] font-semibold leading-snug text-ink">
                 {/* The mark of live presence, for a party that has started. */}
                 {started && <span aria-hidden="true" className="h-2 w-2 flex-none rounded-full" style={{ background: 'var(--aurora)' }} />}
-                <span className="min-w-0 truncate">
-                  {started
-                    ? (preview.partyName ? `${preview.partyName} is live` : 'This party is live')
-                    : (preview.partyName ? `${preview.partyName} has not started` : 'This party has not started')}
-                </span>
+                {preview.partyName
+                  ? (
+                      <span className="flex min-w-0" data-party-line="">
+                        <span className="min-w-0 truncate">{preview.partyName}</span>
+                        <span className="flex-none whitespace-pre" data-party-state="">{started ? ' is live' : ' has not started'}</span>
+                      </span>
+                    )
+                  : <span data-party-line=""><span data-party-state="">{started ? 'This party is live' : 'This party has not started'}</span></span>}
               </span>{' '}
-              <span className="block truncate text-[13px] leading-snug text-ink-2">
-                {preview.mediaTitle || 'Watch party'}
+              <span className="flex text-[13px] leading-snug text-ink-2" data-party-line="">
+                <span className="min-w-0 truncate">{preview.mediaTitle || 'Watch party'}</span>
                 {/* Everyone in the room, phones included: "here", not "watching". */}
-                {started
-                  ? (here !== null ? ` · ${here} here` : '')
-                  : preview.scheduledStartAt ? `, ${plannedStartPhrase(preview.scheduledStartAt, new Date())}` : ''}
+                {started && here !== null && <span className="flex-none whitespace-pre" data-party-here="">{` · ${here} here`}</span>}
               </span>
+              {/* On a line of its own, which wraps: the time is the fact.
+                  Where it wraps, it is not between the hour and its "PM". */}
+              {plan && (
+                <>
+                  {' '}
+                  <span className="block text-[13px] leading-snug text-ink-2" data-party-when="">
+                    {plan.lead}{' '}<span className="whitespace-nowrap" data-party-clock="">{plan.clock}</span>
+                  </span>
+                </>
+              )}
             </p>
           </div>
         )}
@@ -223,23 +255,29 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
   )
 }
 
-/** When a party that has not started is planned for, for the middle of a
- *  sentence: "starts tonight at 8:00 PM", "starts tomorrow at 9:30 AM",
- *  "starts Fri, Aug 7 at 8:00 PM". Once the time has passed with the party
- *  still not started (its start failed, or nobody came) it does not go on
- *  saying "starts": "was planned for today at 6:00 PM". A time today is
- *  "tonight" only from five in the afternoon. */
+/** When a party that has not started is planned for, as a line of its
+ *  own: "Starts tonight at 8:00 PM", "Starts tomorrow at 9:30 AM", "Starts
+ *  Fri, Aug 7 at 8:00 PM". Once the time has passed with the party still not
+ *  started (its start was blocked, or nobody came) it does not go on saying
+ *  "Starts": "Was planned for today at 10:00 AM". "Today" or "tonight", and
+ *  whether the time has passed, are judged where the rest of the app judges
+ *  them (lib/partyInvites). */
 export function plannedStartPhrase(iso: string, now: Date): string {
+  const { lead, clock } = plannedStartParts(iso, now)
+  return `${lead} ${clock}`
+}
+
+/** The same in two parts: the words, and the time of day they end on. */
+export function plannedStartParts(iso: string, now: Date): { lead: string; clock: string } {
   const at = new Date(iso)
   const clock = at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
   const day = localDateKey(iso)
   const dayOf = (offsetDays: number) => localDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays, 12).toISOString())
-  const past = at.getTime() <= now.getTime()
-  const when = day === dayOf(0) ? (!past && at.getHours() >= 17 ? 'tonight' : 'today')
+  const when = day === dayOf(0) ? todayOrTonight(at).toLowerCase()
     : day === dayOf(1) ? 'tomorrow'
     : day === dayOf(-1) ? 'yesterday'
     : at.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
-  return `${past ? 'was planned for' : 'starts'} ${when} at ${clock}`
+  return { lead: `${startHasPassed(iso, now) ? 'Was planned for' : 'Starts'} ${when} at`, clock }
 }
 
 // The title's poster, small, on the join and room screens. Where there is

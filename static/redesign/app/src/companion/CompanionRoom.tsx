@@ -197,13 +197,15 @@ export function CompanionRoom({
   // The connection has come back: said for a few seconds, since the note
   // about being disconnected otherwise just goes.
   const [backAgain, setBackAgain] = useState(false)
-  const wasLive = useRef<boolean | null>(null)
+  // The room is on screen from the moment a join is asked for, before the
+  // socket has opened: it starts out not live, and its first connection is
+  // not a return. Only a connection that follows one counts.
+  const hasBeenLive = useRef(false)
   useEffect(() => {
-    const before = wasLive.current
-    wasLive.current = live
     if (!live) { setBackAgain(false); return }
-    // Only a return: the first connection is not one.
-    if (before !== false) return
+    const returned = hasBeenLive.current
+    hasBeenLive.current = true
+    if (!returned) return
     setBackAgain(true)
     const t = window.setTimeout(() => setBackAgain(false), 6000)
     return () => window.clearTimeout(t)
