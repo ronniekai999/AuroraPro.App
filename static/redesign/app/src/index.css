@@ -4041,15 +4041,58 @@ html:has(.player-cast-widget) .stage-shell {
   to { opacity: 1; transform: none; }
 }
 
-/* 6px, not 10px (Stage refresh, T1): on the emphasized curve the shorter rise
-   reads as arrival rather than travel. The END state is deliberately unchanged —
-   `translateY(0)` held by `forwards` is what keeps every .animate-fade-in root a
-   stacking context, which rules have been written against before (the halo
-   of the search bar that used to sit on Home painted at z-index -1 inside
-   one). Do not "tidy" it to `transform: none`. */
+/* Reveal: content arriving in place fades in without moving. (Every page
+   used to rise six pixels as it came, which was the app's one move; things
+   that travel are now the things that go somewhere, see "Travel" below.)
+   Both frames keep `translateY(0)`, and deliberately: held by `forwards` it
+   is what keeps every .animate-fade-in root a stacking context, which rules
+   have been written against before (the halo of the search bar that used to
+   sit on Home painted at z-index -1 inside one). Do not "tidy" it to
+   `transform: none`, and do not drop it from the first frame either: the
+   element must be a stacking context for the whole of the fade. */
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(6px); }
+  from { opacity: 0; transform: translateY(0); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+/* Travel: the poster that was pressed moves to the title page's poster
+   (lib/posterTravel.ts gives the pressed card's picture this name for the
+   length of a view transition; the title page's poster has it here). The
+   browser draws one growing into the other. The root is NOT captured: while
+   a captured root's transition runs, Chromium sends every press to <html>
+   whatever pointer-events says, so Play, Back or a tab pressed in that time
+   did nothing. Uncaptured, the page under the poster is the live one, and
+   the title page fades in by its own entrance (.animate-fade-in). */
+:root { view-transition-name: none; }
+.stage-detail-poster { view-transition-name: title-poster; }
+::view-transition-group(*),
+::view-transition-old(*),
+::view-transition-new(*) {
+  animation-duration: var(--dur-enter);
+}
+/* Clipped to the poster's corners: a captured picture is drawn without its
+   card's clip and radius. */
+::view-transition-group(title-poster) {
+  animation-timing-function: var(--ease-emphasized);
+  border-radius: var(--radius-art);
+  overflow: clip;
+}
+/* The two posters are the same picture at two sizes: each is stretched to
+   the moving box, so the swap between them is not seen as a jump. */
+::view-transition-old(title-poster),
+::view-transition-new(title-poster) {
+  height: 100%;
+  object-fit: cover;
+}
+/* The overlay that holds the travelling poster takes no press either. */
+::view-transition { pointer-events: none; }
+/* The app's own Reduce effects (no transition is started under it either,
+   lib/posterTravel.ts): stilled, so the page is simply replaced. The same
+   under the system's setting, in the reduced-motion block below. */
+html[data-effects="reduced"]::view-transition-group(*),
+html[data-effects="reduced"]::view-transition-old(*),
+html[data-effects="reduced"]::view-transition-new(*) {
+  animation: none !important;
 }
 
 /* Removed with the dead CSS (UI polish pass): .animate-chromatic,
@@ -5731,7 +5774,8 @@ input.stage-minidock-field:not([type="range"]) {
   .stage-skel::before,
   /* 2026-07-25 (Aurora Stage Phase 2) — fadeIn/slideIn (now toastIn) include a
      translateY/translateX, i.e. real motion, and were missed by the sweep
-     above. The gap is old; the blast radius is new, because the nav now
+     above. (fadeIn has since stopped moving and only fades; it is still
+     nulled here, as a fade is motion the setting asks to remove.) The gap is old; the blast radius is new, because the nav now
      applies .animate-fade-in to the avatar dropdown and the mobile menu
      sheet — the primary navigation of every phone session.
 
@@ -5745,6 +5789,16 @@ input.stage-minidock-field:not([type="range"]) {
      leaves them at their author style (visible, untransformed). */
   .animate-fade-in,
   .toast {
+    animation: none !important;
+  }
+  /* A view transition is not started at all under reduced motion
+     (lib/posterTravel.ts asks first). This is for one that is running when
+     the setting changes, and for any caller that forgets to ask: the
+     pseudo-elements the browser animates are stilled, so the page is simply
+     replaced. audit-reduced-motion Check 5 requires both halves. */
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
     animation: none !important;
   }
   /* Watch-party reactions (Stage refresh, A1). ReactionOverlay sets each

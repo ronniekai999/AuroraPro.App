@@ -98,6 +98,7 @@ import { ScanProgressBar } from '@/components/ScanProgressBar'
 import { searchField } from '@/lib/searchKeys'
 import AuthView from '@/components/AuthView'
 import { hasInAppEntryBehind } from '@/lib/historyBack'
+import { dropWaitingOpen, travelToTitle, watchCardPresses } from '@/lib/posterTravel'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
@@ -156,6 +157,8 @@ import ManualMatchModal from '@/components/admin/ManualMatchModal'
 // version of what `startTransition` cannot do here: each view mounts its
 // own <ViewSuspense>, and React shows a NEWLY mounted boundary's fallback
 // immediately, transition or not.
+// The title page's module, once its chunk has arrived (see DetailView, below).
+let detailModule: typeof import('@/components/DetailView') | null = null
 const VIEW_LOADERS = {
   admin: () => import('@/components/admin/AdminView'),
   collections: () => import('@/components/CollectionsView'),
@@ -163,7 +166,7 @@ const VIEW_LOADERS = {
   settings: () => import('@/components/SettingsView'),
   requests: () => import('@/components/RequestsView'),
   browse: () => import('@/components/BrowseView'),
-  detail: () => import('@/components/DetailView'),
+  detail: () => import('@/components/DetailView').then(m => { detailModule = m; return m }),
   library: () => import('@/components/LibraryView'),
   search: () => import('@/components/SearchView'),
   member: () => import('@/components/UserProfileView'),
@@ -174,15 +177,17 @@ const VIEW_LOADERS = {
   me: () => import('@/components/MeView'),
 } as const
 // Destination or view id → chunk. Home is eager (no entry); movies and shows
-// share the browse chunk; detail/member are never reached from the nav. The
+// share the browse chunk; member is never reached from the nav. The
 // Library destination ('catalog') warms the browse chunk, where it lands by
-// default; 'library' is the My Library scope's own view.
+// default; 'library' is the My Library scope's own view. 'detail' is not a
+// nav destination either: it is warmed when the pointer or the focus first
+// reaches a card (App, below), since a card is what opens it.
 const PREFETCH_BY_VIEW: Record<string, keyof typeof VIEW_LOADERS> = {
   admin: 'admin', collections: 'collections', calendar: 'calendar',
   settings: 'settings', requests: 'requests', movies: 'browse', shows: 'browse',
   [LIBRARY_DESTINATION]: 'browse',
   library: 'library', search: 'search', members: 'members',
-  together: 'together', profile: 'profile', me: 'me',
+  together: 'together', profile: 'profile', me: 'me', detail: 'detail',
 }
 const prefetched = new Set<keyof typeof VIEW_LOADERS>()
 function prefetchView(view: string): void {
@@ -235,7 +240,19 @@ const BrowseView = lazy(VIEW_LOADERS.browse)
 // lazy <DetailView> keeps key={selectedMedia.id} so it remounts per title
 // and nothing the page keeps for one title is carried to the next (the one
 // check the build can't catch). Loads on first card→detail nav.
-const DetailView = lazy(VIEW_LOADERS.detail)
+// The title page, lazy like the other views, with one difference: when its
+// chunk is already here (warmed when a card was first reached), the first
+// render gets it AT ONCE. A lazy component otherwise suspends on its first
+// render even for a module that has loaded, because a promise answers a
+// turn later: the page a card opens was a skeleton for that turn, and the
+// poster a press sends travelling (lib/posterTravel) had nothing to arrive
+// at. A thenable that answers synchronously is read by React.lazy without
+// suspending.
+const DetailView = lazy(() => {
+  const loaded = detailModule
+  if (!loaded) return VIEW_LOADERS.detail()
+  return { then: (resolve: (m: typeof loaded) => void) => { resolve(loaded) } } as unknown as Promise<typeof loaded>
+})
 // 2.6 — My Library (saved titles + Continue Watching). Shares isResumable,
 // MediaCardCinema, Icon, and the app-side Media type with the other views.
 // App owns the saved `library` state + `continueItems` and passes them as
@@ -1354,6 +1371,11 @@ export default function App() {
     setPlayerTarget(null)
   }, [user])
   const [partyPanelOpen, setPartyPanelOpen] = useState(false)
+  // Whether something is over the page that a title's open must not animate
+  // under: a player (minimized too: the open closes it) or a party's panel.
+  // A ref, so handleSelect keeps its identity (every card holds it).
+  const travelBlockedRef = useRef(false)
+  useLayoutEffect(() => { travelBlockedRef.current = playerTarget !== null || playerLoading || partyPanelOpen }, [playerTarget, playerLoading, partyPanelOpen])
   // 2026-05-30 — Cinematic Overlay (Feature 2). Which face the on-screen
   // party surface shows: 'rail' (the full floating glass panel) or
   // 'minimal' (lower-third chat ticker + corner voice pill + mini dock).
@@ -2535,6 +2557,9 @@ export default function App() {
   // collection it listed, to My requests), so the words stay, and Back
   // returns to the results they were for. Any other navigation drops them.
   const handleNavigate = useCallback((dest: string, { keepSearch = false }: { keepSearch?: boolean } = {}) => {
+    // A title's open still waiting for the browser's next frame is not made
+    // over the place the viewer has gone to since (lib/posterTravel).
+    dropWaitingOpen()
     if (dest === 'search') {
       searchFieldFocusRef.current = true
       setSearchFocusNonce(n => n + 1)
@@ -2705,22 +2730,57 @@ export default function App() {
   const forgetCollectionAsk = useCallback(() => setCollectionAsk(null), [])
 
   const handleSelect = useCallback((m: Media) => {
-    setSelectedMedia(m)
-    setView('detail')
-    // Real URL per title: refresh keeps the page, browser Back returns to
-    // the grid this was opened from, and the address bar is shareable.
-    // selectedMedia is already set above so the deep-link hydration
-    // effect no-ops for in-app opens. Record where the grid was first, so
-    // Back lands on the card that was clicked (see scrollMemory).
-    rememberScroll(location.key)
-    navigate(`/title/${m.id}`)
-    // Issue #261 — clicking into a movie/show must open the detail page
-    // at the top; the window otherwise keeps whatever scroll offset the
-    // user had on the previous page (e.g. scrolled-down home).
-    // Instant (not smooth) because the page content is being replaced —
-    // a smooth scroll would animate over swapped-in content and look off.
-    window.scrollTo({ top: 0, behavior: 'auto' })
+    // The open itself: what this function has always done, in the order it
+    // did it.
+    const open = () => {
+      setSelectedMedia(m)
+      setView('detail')
+      // Real URL per title: refresh keeps the page, browser Back returns to
+      // the grid this was opened from, and the address bar is shareable.
+      // selectedMedia is already set above so the deep-link hydration
+      // effect no-ops for in-app opens. Record where the grid was first, so
+      // Back lands on the card that was clicked (see scrollMemory).
+      rememberScroll(location.key)
+      navigate(`/title/${m.id}`)
+      // Issue #261 — clicking into a movie/show must open the detail page
+      // at the top; the window otherwise keeps whatever scroll offset the
+      // user had on the previous page (e.g. scrolled-down home).
+      // Instant (not smooth) because the page content is being replaced —
+      // a smooth scroll would animate over swapped-in content and look off.
+      window.scrollTo({ top: 0, behavior: 'auto' })
+    }
+    // Made by lib/posterTravel, which runs it exactly once: at once, as it
+    // always was, unless a plain press on this title's card is behind it and
+    // the browser can draw that card's poster travelling to the title
+    // page's. Then it runs one frame later, inside the browser's
+    // transition. Never while a player or a party's panel is over the page,
+    // and only when the title page can draw its poster at once (its code is
+    // here and the title has one).
+    travelToTitle(m.id, open, { blocked: travelBlockedRef.current, arrives: detailModule !== null && !!m.poster })
   }, [navigate, location.key])
+  // Which card a press landed on, for the travel above.
+  useEffect(() => watchCardPresses(), [])
+  // The title page's code is fetched when the pointer or the focus first
+  // reaches a card, ahead of the press that needs it: the page a card opens
+  // is then drawn at once, not as a skeleton first, and its poster is there
+  // for the pressed one to travel to. From something the viewer did, until
+  // the code has arrived (a failed fetch is tried again at the next card
+  // reached); nothing is fetched on a timer or in a tab nobody is looking at.
+  useEffect(() => {
+    if (!user) return
+    const warm = (e: Event) => {
+      if (detailModule) { stop(); return }
+      if (!(e.target as Element | null)?.closest?.('[data-media-id]')) return
+      prefetchView('detail')
+    }
+    const stop = () => {
+      document.removeEventListener('pointerover', warm, true)
+      document.removeEventListener('focusin', warm, true)
+    }
+    document.addEventListener('pointerover', warm, true)
+    document.addEventListener('focusin', warm, true)
+    return stop
+  }, [user])
 
   // Play resolution. The UI Media type doesn't carry server file
   // IDs, so we resolve them here:
@@ -2728,6 +2788,7 @@ export default function App() {
   //   - Shows: play the first episode of season 1 (TODO: port the
   //     V1 next-episode smart-resume).
   const handlePlay = useCallback(async (m: Media) => {
+    dropWaitingOpen()
     // Don't start a new playback while a cast/AirPlay session is active: it
     // would tear down the cast's stream and leave the widget driving a
     // different title than the TV. The cast persists across navigation by
@@ -3014,6 +3075,7 @@ export default function App() {
   }, [library, activeProfileId, addToast, removeToast, changeLibrary])
 
   const handleBack = useCallback(() => {
+    dropWaitingOpen()
     // In-app opens pushed /title/:id onto the history stack, so real
     // history-back returns to the exact view (and scroll restoration)
     // the user came from — and the browser's own Back button now does
