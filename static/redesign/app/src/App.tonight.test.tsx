@@ -110,7 +110,7 @@ function stubServer({ bound = 1, unfinished = [LEFT_RECORD], picks = [PICK_A, PI
     if (/^\/api\/media\/\d+\/files$/.test(p)) return json([{ id: 9001, media_item_id: Number(p.split('/')[3]), resolution: '1080p' }])
     const byId = p.match(/^\/api\/media\/(\d+)$/)
     if (byId) {
-      const it = [LEFT, PICK_A, PICK_B, PICK_C, CATALOG].find(x => x.id === Number(byId[1]))
+      const it = [LEFT, PICK_A, PICK_B, PICK_C, CATALOG, DESCRIBED].find(x => x.id === Number(byId[1]))
       return it ? json(it) : json({ error: { code: 404, message: 'not found' } }, 404)
     }
     if (p === '/api/parties' && init?.method === 'POST') {

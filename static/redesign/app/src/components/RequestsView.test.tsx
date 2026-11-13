@@ -401,7 +401,7 @@ describe('what a refusal says on the requests page', () => {
   // A pending request is with the downloader within seconds, and the server
   // deletes only a pending or a failed one.
   it('says a pending request has moved on when its delete is refused for that, and puts the row right', async () => {
-    api.deleteRequest.mockRejectedValueOnce(new Error('can only delete pending or failed requests'))
+    api.deleteRequest.mockRejectedValueOnce(new APIError(400, 'can only delete pending or failed requests', { error: { code: 400, message: 'can only delete pending or failed requests' } }))
     render(<Kept start={[request(1, { title: 'First' }), request(2, { title: 'Second', status: 'failed' })]} userId={1} />)
     fireEvent.click(screen.getByRole('button', { name: 'Delete request for First' }))
     fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
@@ -416,10 +416,22 @@ describe('what a refusal says on the requests page', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Ask for Second again' }))
   })
 
+  // Read from the status, not the server's words: a reworded refusal is
+  // the same refusal.
+  it('knows that refusal by its status, whatever the server\'s words', async () => {
+    api.deleteRequest.mockRejectedValueOnce(new APIError(400, 'request is no longer deletable', { error: { code: 400, message: 'request is no longer deletable' } }))
+    render(<Kept start={[request(1, { title: 'First' }), request(2, { title: 'Second', status: 'failed' })]} userId={1} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete request for First' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
+    await flush()
+    expect(calls.moved).toHaveBeenCalledWith(1, 'processing')
+    expect(within(row(1)).getByRole('alert').textContent).toBe('It is with the downloader now and can no longer be deleted.')
+  })
+
   // With the Pending filter on, the row that is put right is no longer in
   // the list shown, and what it says would go with it.
   it('says it above the list, with the title, when the row it is about has left the list shown', async () => {
-    api.deleteRequest.mockRejectedValueOnce(new Error('can only delete pending or failed requests'))
+    api.deleteRequest.mockRejectedValueOnce(new APIError(400, 'can only delete pending or failed requests', { error: { code: 400, message: 'can only delete pending or failed requests' } }))
     render(<Kept start={[request(1, { title: 'First' }), request(2, { title: 'Second' }), request(3, { title: 'Third', status: 'failed' })]} userId={1} />)
     fireEvent.click(screen.getByRole('button', { name: 'Pending · 2' }))
     expect(document.querySelector('[data-requests-wrong]')).toBeNull()
@@ -448,7 +460,7 @@ describe('what a refusal says on the requests page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
     // Pressed under All; Pending is chosen before the server answers.
     fireEvent.click(screen.getByRole('button', { name: 'Pending · 2' }))
-    refuse(new Error('can only delete pending or failed requests'))
+    refuse(new APIError(400, 'can only delete pending or failed requests', { error: { code: 400, message: 'can only delete pending or failed requests' } }))
     await flush()
     expect(names()).toEqual(['Second'])
     expect(screen.getAllByRole('alert')).toHaveLength(1)
@@ -461,7 +473,7 @@ describe('what a refusal says on the requests page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete request for First' }))
     fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
     fireEvent.click(screen.getByRole('button', { name: 'All · 2' }))
-    refuse(new Error('can only delete pending or failed requests'))
+    refuse(new APIError(400, 'can only delete pending or failed requests', { error: { code: 400, message: 'can only delete pending or failed requests' } }))
     await flush()
     expect(screen.getAllByRole('alert')).toHaveLength(1)
     expect(within(row(1)).getByRole('alert').textContent).toBe('It is with the downloader now and can no longer be deleted.')
@@ -470,7 +482,7 @@ describe('what a refusal says on the requests page', () => {
   // The other way round: said on the row first, then the viewer filters the
   // row out. The words move above the list, and are not announced again.
   it('announces it once when it was said on the row first and the row is then filtered out', async () => {
-    api.deleteRequest.mockRejectedValueOnce(new Error('can only delete pending or failed requests'))
+    api.deleteRequest.mockRejectedValueOnce(new APIError(400, 'can only delete pending or failed requests', { error: { code: 400, message: 'can only delete pending or failed requests' } }))
     render(<Kept start={[request(1, { title: 'First' }), request(2, { title: 'Second' })]} userId={1} />)
     fireEvent.click(screen.getByRole('button', { name: 'Delete request for First' }))
     fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
@@ -511,13 +523,24 @@ describe('what a refusal says on the requests page', () => {
   })
 
   it('says only "could not be deleted" for any other failure, and for that refusal on a row that was not pending', async () => {
-    api.deleteRequest.mockRejectedValueOnce(new Error('can only delete pending or failed requests'))
+    api.deleteRequest.mockRejectedValueOnce(new APIError(400, 'can only delete pending or failed requests', { error: { code: 400, message: 'can only delete pending or failed requests' } }))
+    render(page(SIX))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete request for Paper Lanterns' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for Paper Lanterns' }))
+    await flush()
+    // A refusal is the same next time: nothing invites a retry.
+    expect(within(row(6)).getByRole('alert').textContent).toBe('It could not be deleted.')
+    expect(calls.moved).not.toHaveBeenCalled()
+  })
+
+  it('invites a retry only when the server failed, never with its words', async () => {
+    api.deleteRequest.mockRejectedValueOnce(new APIError(500, 'pq: deadlock detected', { error: { code: 500, message: 'pq: deadlock detected' } }))
     render(page(SIX))
     fireEvent.click(screen.getByRole('button', { name: 'Delete request for Paper Lanterns' }))
     fireEvent.click(screen.getByRole('button', { name: 'Delete the request for Paper Lanterns' }))
     await flush()
     expect(within(row(6)).getByRole('alert').textContent).toBe('It could not be deleted. Try again in a moment.')
-    expect(calls.moved).not.toHaveBeenCalled()
+    expect(document.body.textContent).not.toContain('deadlock')
   })
 })
 

@@ -240,6 +240,8 @@ describe('TV device approval', () => {
     [refused(403, 'authorize this device from your Aurora server'), 'The server refused this because of how it is reached: the address it sees is not this page’s. Whoever runs the server can put that right.'],
     [refused(500, 'could not check the active profile'), 'The server did not confirm the approval, so the TV may or may not have been approved. If it does not sign in, find it again here.'],
     [refused(502, 'Bad Gateway'), 'The server did not confirm the approval, so the TV may or may not have been approved. If it does not sign in, find it again here.'],
+    // A refusal with no sentence of its own: the app's words, not the server's.
+    [refused(400, 'pq: invalid input syntax for type uuid'), 'This TV could not be approved.'],
     [new TypeError('Failed to fetch'), 'No answer came back from the server, so the TV may or may not have been approved. If it does not sign in, check the connection and find it again here.'],
   ])('says a refused approval in plain words and keeps Approve for another try (%#)', async (failure, shown) => {
     const user = userEvent.setup()

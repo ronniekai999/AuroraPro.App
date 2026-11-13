@@ -51,7 +51,7 @@ function pairingRefusal(e: unknown, phase: Phase): string {
     case 409: return 'The account signed in on this device has changed. Find the TV again before approving it.'
     case 429: return `Too many tries. Try again ${waitPhrase(e.retryAfterSec, 'in a minute')}.`
     default:
-      if (e.status < 500) return e.message || (approving ? 'This TV could not be approved.' : 'This TV could not be found.')
+      if (e.status < 500) return approving ? 'This TV could not be approved.' : 'This TV could not be found.'
       return approving
         ? 'The server did not confirm the approval, so the TV may or may not have been approved. If it does not sign in, find it again here.'
         : 'The server could not look the code up just now. Try again.'

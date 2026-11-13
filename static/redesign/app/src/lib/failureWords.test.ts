@@ -29,6 +29,7 @@ describe('failureWords: the app\'s sentence by the kind of failure', () => {
     ['a 429 with a wait of an hour and a second', refused(429, undefined, 3601), 'Too many tries. Wait a while and try again.'],
     ['a 429 with an absurd wait', refused(429, undefined, 999999999), 'Too many tries. Wait a while and try again.'],
     ['a 429 with a wait of 0', refused(429, undefined, 0), 'Too many tries. Wait a moment and try again.'],
+    ['a 429 with an endless wait', refused(429, undefined, Infinity), 'Too many tries. Wait a while and try again.'],
     ['a 500', refused(500), 'Could not play this title just now.'],
     ['a 502', refused(502), 'Could not play this title just now.'],
     ['an unlisted 4xx', refused(418), 'Could not play this title.'],
@@ -94,6 +95,12 @@ describe('serverSaidForAdmin: the server\'s own text, for the Admin page only', 
     expect(serverSaidForAdmin(new APIError(500, 'file \u202ecod.exe\u202c and \u2066x\u2069 a\u200bb\ufeff', null))).toBe('The server said: file cod.exe and x ab')
   })
 
+  it('drops directional marks and invisible operators, and a joiner except inside an emoji sequence', () => {
+    expect(serverSaidForAdmin(new APIError(500, 'a\u200eb\u200fc\u061cd e\u2060f\u2064g h\u200di', null))).toBe('The server said: abcd efg hi')
+    // A family emoji keeps its joiners.
+    expect(serverSaidForAdmin(new APIError(500, 'it is 👩\u200d👩\u200d👧', null))).toBe('The server said: it is 👩\u200d👩\u200d👧')
+  })
+
   it('is cut on whole characters', () => {
     const said = serverSaidForAdmin(new APIError(500, '😀'.repeat(300), null))!
     const text = said.slice('The server said: '.length)
@@ -149,6 +156,15 @@ describe('lib/api: a request that got no answer', () => {
     expect(err).toBeInstanceOf(TypeError)
     expect((err as Error).message).toBe('Failed to fetch')
     expect(failureWords(err, 'load this page')).toBe('Could not reach the server. Check the connection and try again.')
+  })
+
+  it('leaves an abort with a reason of its own as it was', async () => {
+    const ac = new AbortController()
+    ac.abort('superseded')
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => { throw init.signal?.reason }))
+    const err = await apiFetch('/api/media', { signal: ac.signal }).catch((e: unknown) => e)
+    expect(err).toBe('superseded')
+    expect(err).not.toBeInstanceOf(NetworkError)
   })
 
   it('leaves an abort and a timeout as they were', async () => {

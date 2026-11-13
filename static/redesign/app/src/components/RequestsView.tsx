@@ -18,6 +18,7 @@
 // raw text kept as a tooltip for whoever debugs it) is module-private:
 // this page is its only reader.
 
+import { failureWords } from '@/lib/failureWords'
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
 import { formatRequestDay } from '@/lib/format'
@@ -214,12 +215,14 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
       // A pending request is handed to the downloader within seconds, and
       // the server deletes only a pending or a failed one. That refusal is
       // not something to try again: the row is put right and says why.
-      const raw = err instanceof Error ? err.message.toLowerCase() : ''
       if (alreadyGone(err)) {
         setConfirming(null)
         setFocusTo({ kind: 'after', ids: after })
         onRequestDeleted(req.id)
-      } else if (req.status === 'pending' && raw.includes('can only delete')) {
+      } else if (req.status === 'pending' && err instanceof APIError && err.status === 400) {
+        // The server refuses a delete with a 400 for a request that is no
+        // longer pending or failed (the id it was given is a number, so its
+        // other 400 cannot happen here).
         setConfirming(null)
         setFocusTo({ kind: 'after', ids: [req.id, ...after] })
         onRequestMoved?.(req.id, 'processing')
@@ -229,7 +232,10 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
         const shown = filterRef.current
         setWrong({ id: req.id, says: 'It is with the downloader now and can no longer be deleted.', above: shown !== 'all' && shown !== 'processing' })
       } else {
-        setWrong({ id: req.id, says: 'It could not be deleted. Try again in a moment.' })
+        // A refusal is the same next time; a failure of the server or the
+        // connection may not be.
+        const refused = 'It could not be deleted.'
+        setWrong({ id: req.id, says: err instanceof APIError && err.status < 500 ? (failureWords(err, 'delete it', { status: { 400: refused, 409: refused, 422: refused } }) ?? refused) : 'It could not be deleted. Try again in a moment.' })
       }
     } finally {
       busyRef.current = null

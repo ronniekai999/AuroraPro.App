@@ -8,6 +8,7 @@
 // Admins additionally see an "Make public" toggle (admin-only;
 // server enforces).
 
+import { failureWords } from '@/lib/failureWords'
 import { useState } from 'react'
 import { createCollection, type Collection } from '@/lib/api'
 
@@ -49,7 +50,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
       onCreated(c)
       onClose()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Create failed')
+      setError(failureWords(err, 'make the collection'))
     } finally {
       setSubmitting(false)
     }
@@ -176,7 +177,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
           )}
 
           {error && (
-            <div className="px-3 py-2 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
+            <div role="alert" className="px-3 py-2 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
               {error}
             </div>
           )}

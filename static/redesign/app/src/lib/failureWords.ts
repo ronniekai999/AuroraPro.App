@@ -61,8 +61,8 @@ function own(table: Record<string | number, string | undefined> | undefined, key
 const WAIT_SAID_UP_TO = 60 * 60
 
 function waitWords(seconds: number | undefined): string {
+  if (seconds === Infinity || (seconds !== undefined && seconds > WAIT_SAID_UP_TO)) return 'Wait a while and try again.'
   if (!seconds || !Number.isFinite(seconds) || seconds <= 0) return 'Wait a moment and try again.'
-  if (seconds > WAIT_SAID_UP_TO) return 'Wait a while and try again.'
   if (seconds < 60) return `Try again in ${seconds} second${seconds === 1 ? '' : 's'}.`
   const minutes = Math.ceil(seconds / 60)
   return `Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`
@@ -117,7 +117,11 @@ export const SERVER_SAID_MAX = 200
 export function serverSaidForAdmin(err: unknown): string | null {
   if (!(err instanceof APIError) || typeof err.message !== 'string') return null
   const text = err.message
-    .replace(/[\u200b-\u200d\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    // Directional marks, overrides and isolates, invisible operators and
+    // zero-width spaces: dropped. The zero-width joiner too, except between
+    // two pictographs, where it holds an emoji sequence together.
+    .replace(/(?<!\p{Extended_Pictographic})\u200d|\u200d(?!\p{Extended_Pictographic})/gu, '')
+    .replace(/[\u061c\u200b\u200c\u200e\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, '')
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(/\s+/g, ' ')

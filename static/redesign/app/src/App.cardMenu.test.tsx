@@ -91,9 +91,11 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
   /** The titles in the profile's library, as the server has them. */
   const saved = new Set([SAVED.id])
   const libraryReads = { n: 0 }
-  /** How the title page's own read of a title fails, when it does: with a
-   *  status and the server's words, or with the connection lost. */
-  const detail = { fails: null as null | { status: number; words: string } | 'network' }
+  /** Requests the server fails, by path: with a status and the server's own
+   *  words, or with the connection lost (fetch rejects). */
+  /** Each removal of a title from the library, by its path. */
+  const mediaDeletes: string[] = []
+  const failing: { path: RegExp; how: { status: number; words: string } | 'network' }[] = []
   const parties: unknown[] = []
   const holds = new Map<string, Promise<void>>()
   const json = (body: unknown, status = 200) =>
@@ -102,6 +104,13 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
     const url = new URL(input, 'http://localhost')
     const p = url.pathname
     asks.push(p)
+    // An admin's removal of a title from the library.
+    if (init?.method === 'DELETE' && /^\/api\/media\/\d+$/.test(p)) { mediaDeletes.push(p); return json({ message: 'media deleted' }) }
+    const failed = failing.find(f => f.path.test(p))?.how
+    if (failed === 'network') throw new TypeError('Failed to fetch')
+    if (failed) return json({ error: { code: failed.status, message: failed.words } }, failed.status)
+    // The profile's lists, for the add-to-list sheet.
+    if (/^\/api\/profiles\/\d+\/watchlists$/.test(p)) return json([{ id: 5, profile_id: 1, name: 'Weekend', created_at: NOW }])
     if (/^\/api\/profiles\/\d+\/library(\/\d+)?$/.test(p) && init?.method && init.method !== 'GET') {
       writes.push(`${init.method} ${p}`)
       const fails = libraryWrites.failing > 0
@@ -156,13 +165,8 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
     if (p === `/api/media/${PRUNED.id}/seasons/0/episodes`) return json([{ id: 3060, season_id: 60, media_item_id: PRUNED.id, episode_number: 1, files: [{ id: 8060, resolution: '1080p' }] }])
     // The title page's own record of a title.
     const byId = p.match(/^\/api\/media\/(\d+)$/)
-    const fails = detail.fails
-    if (byId && fails) {
-      if (fails === 'network') throw new TypeError('Failed to fetch')
-      return json({ error: { code: fails.status, message: fails.words } }, fails.status)
-    }
     if (byId) {
-      const it = [HALF, FRESH, SHOW, TWO, SPECIALS, PRUNED, AHEAD].find(x => x.id === Number(byId[1]))
+      const it = [HALF, FRESH, SHOW, TWO, SPECIALS, PRUNED, AHEAD, FOUND].find(x => x.id === Number(byId[1]))
       return it ? json(it) : json({ error: { code: 404, message: 'not found' } }, 404)
     }
     // Season 0 is listed first, as the lowest number.
@@ -194,7 +198,7 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal('scrollTo', () => {})
   return {
-    asks, parties, writes,
+    asks, parties, writes, mediaDeletes,
     /** Keeps the answer to every library write back until the returned
      *  function is called; writes asked after that are answered at once. */
     holdLibraryWrites() {
@@ -210,8 +214,10 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
     releaseOneLibraryWrite() { libraryWrites.waiting.shift()?.() },
     /** How often the profile's library has been read. */
     get libraryReads() { return libraryReads.n },
-    /** The title page's read of a title fails from now on (see `detail`). */
-    failDetail(how: { status: number; words: string } | 'network') { detail.fails = how },
+    /** The title page's read of a title fails from now on (see `failing`). */
+    failDetail(how: { status: number; words: string } | 'network') { failing.push({ path: /^\/api\/media\/\d+$/, how }) },
+    /** Requests to `path` fail from now on (see `failing`). */
+    failAt(path: RegExp, how: { status: number; words: string } | 'network') { failing.push({ path, how }) },
     hold(path: string) {
       let release!: () => void
       holds.set(path, new Promise<void>(done => { release = done }))
@@ -220,11 +226,12 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
   }
 }
 
-function renderAt(path: string, opts: { bound?: number; role?: string; prefs?: Record<string, unknown> } = {}) {
+function renderAt(path: string, opts: { bound?: number; role?: string; prefs?: Record<string, unknown>; before?: (server: ReturnType<typeof stubServer>) => void } = {}) {
   localStorage.clear()
   localStorage.setItem('aurora_user', JSON.stringify({ id: 1, username: 'ronnie', email: 'r@example.test', role: opts.role ?? 'user' }))
   localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true, ...opts.prefs }))
   const server = stubServer(opts)
+  opts.before?.(server)
   render(<MemoryRouter initialEntries={[path]}><GoBack /><App /></MemoryRouter>)
   return server
 }
@@ -482,13 +489,11 @@ describe('every page that draws a card gives it the menu', () => {
 
   // The title page's read of a title failed, and the page printed the
   // server's own words under the stars ("not found", a 5xx's text, "Failed
-  // to fetch"). It says it in its own: a 404 the same way whether the title
-  // is gone or above the profile's limit, anything else as a failure to load.
+  // to fetch"). Anything but a 404 keeps the page, said in its own words.
   it.each([
-    ['a 404', { status: 404, words: 'not found' }, 'This title is not available.', /not found/],
     ['a 500', { status: 500, words: 'pq: connection refused' }, 'Could not load this title\'s details just now.', /pq: connection refused/],
-    ['a lost connection', 'network' as const, 'Could not load this title\'s details just now.', /Failed to fetch/],
-  ])('the title page says %s in its own words', async (_how, how, says, raw) => {
+    ['a lost connection', 'network' as const, 'Could not reach the server. Check the connection and try again.', /Failed to fetch/],
+  ])('the title page says %s in its own words, and stays', async (_how, how, says, raw) => {
     const server = renderAt('/movies')
     await screen.findAllByRole('button', { name: 'More actions for Never Started' }, find)
     server.failDetail(how)
@@ -496,6 +501,112 @@ describe('every page that draws a card gives it the menu', () => {
     await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: FRESH.title })).toBeInTheDocument(), find)
     await screen.findByText(says, {}, find)
     expect(screen.queryByText(raw)).toBeNull()
+  })
+
+  // A 404 (the title is gone, or above the profile's limit: the server
+  // answers both alike) leaves the page: kept up, it offered Play, saving
+  // and a party for a title none of them could reach, beside the card's
+  // description. Back to where the viewer was, and said there.
+  it('the title page is left on a 404: Back to the grid, said there, nothing of the title on screen', async () => {
+    const server = renderAt('/movies')
+    await screen.findAllByRole('button', { name: 'More actions for Never Started' }, find)
+    server.failDetail({ status: 404, words: 'not found' })
+    fireEvent.click(document.querySelector(`[data-media-id="${FRESH.id}"] .card-open`)!)
+    await screen.findByText('This title is not available.', {}, find)
+    await waitFor(() => expect(screen.queryByRole('heading', { level: 1, name: FRESH.title })).toBeNull(), find)
+    // Back on the grid it was opened from.
+    expect(await screen.findAllByRole('button', { name: 'More actions for Never Started' }, find)).not.toHaveLength(0)
+    expect(screen.queryByText(`${FRESH.title}.`)).toBeNull()
+    expect(screen.queryByText(/not found/)).toBeNull()
+  })
+
+  it('the title page is left on a 404 for a title opened from a search: Back to the results, the words still in the bar', async () => {
+    const server = renderAt('/')
+    await rail('Recently Added')
+    const input = document.querySelector<HTMLInputElement>('.stage-navsearch input')!
+    fireEvent.change(input, { target: { value: 'found' } })
+    const result = await screen.findByRole('button', { name: /^Found By Search/ }, find)
+    server.failDetail({ status: 404, words: 'not found' })
+    fireEvent.click(result)
+    await screen.findByText('This title is not available.', {}, find)
+    await waitFor(() => expect(document.querySelector('[data-search-results]')).not.toBeNull(), find)
+    expect(screen.queryByRole('heading', { level: 1, name: FOUND.title })).toBeNull()
+    expect(input.value).toBe('found')
+    expect(screen.queryByText(`${FOUND.title}.`)).toBeNull()
+  })
+
+  // Play's failure was a toast of the server's own words.
+  it('Play that fails says so in the app\'s words', async () => {
+    const server = renderAt('/movies')
+    await screen.findAllByRole('button', { name: 'More actions for Never Started' }, find)
+    server.failAt(/^\/api\/media\/\d+\/files$/, { status: 500, words: 'pq: connection refused' })
+    fireEvent.click(await screen.findByRole('button', { name: 'Play Never Started' }, find))
+    await screen.findByText('Could not play this title just now.', {}, find)
+    expect(screen.queryByText(/pq: connection refused/)).toBeNull()
+    expect(document.querySelector('[data-test-player]')).toBeNull()
+  })
+
+  // A card menu's action that failed opened the browser's own box with the
+  // server's words ("Failed: …"). It is a toast in the app's words.
+  it('a card menu\'s action that fails is a toast in the app\'s words, not a native box', async () => {
+    const native = vi.spyOn(window, 'alert').mockImplementation(() => {})
+    try {
+      const server = renderAt('/movies')
+      server.failAt(/^\/api\/progress\/\d+\/watched$/, { status: 500, words: 'pq: connection refused' })
+      fireEvent.click(within((await openMenu('Never Started')).menu).getByRole('menuitem', { name: 'Mark as watched' }))
+      await screen.findByText('Could not mark it as watched just now.', {}, find)
+      expect(screen.queryByText(/pq: connection refused/)).toBeNull()
+      expect(native).not.toHaveBeenCalled()
+    } finally {
+      native.mockRestore()
+    }
+  })
+
+  // Tonight's cold load that failed showed the server's words under
+  // "Couldn't load your library".
+  it('Tonight\'s cold load that fails says so in the app\'s words', async () => {
+    renderAt('/', { before: server => server.failAt(/^\/api\/media\/recent$/, { status: 500, words: 'pq: connection refused' }) })
+    expect((await screen.findByText('Could not load Tonight just now.', {}, find)).closest('[role="alert"]')).not.toBeNull()
+    expect(screen.queryByText(/pq: connection refused/)).toBeNull()
+  })
+
+  // The add-to-list sheet's failure was the browser's own box with the
+  // server's words. It is said in the sheet.
+  it('the add-to-list sheet says a failed add in the sheet, in the app\'s words', async () => {
+    const native = vi.spyOn(window, 'alert').mockImplementation(() => {})
+    try {
+      renderAt('/movies', { before: server => server.failAt(/^\/api\/profiles\/\d+\/watchlists\/\d+\/items$/, { status: 500, words: 'pq: connection refused' }) })
+      fireEvent.click(within((await openMenu('Never Started')).menu).getByRole('menuitem', { name: 'Add to a list…' }))
+      const sheet = await screen.findByRole('dialog', { name: /Add "Never Started" to a watchlist/ }, find)
+      fireEvent.click(await within(sheet).findByRole('button', { name: 'Weekend' }, find))
+      expect((await within(sheet).findByRole('alert', {}, find)).textContent).toBe('Could not add it to "Weekend" just now.')
+      expect(screen.queryByText(/pq: connection refused/)).toBeNull()
+      expect(native).not.toHaveBeenCalled()
+    } finally {
+      native.mockRestore()
+    }
+  })
+
+  // An admin's "Remove from library" asked with the browser's own box. It
+  // asks with the app's dialog; one press sends one request.
+  it('an admin\'s remove from library asks with the app\'s dialog, not a native box, and sends one request', async () => {
+    const native = vi.spyOn(window, 'confirm').mockImplementation(() => true)
+    try {
+      const server = renderAt(`/title/${FRESH.id}`, { role: 'admin' })
+      await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: FRESH.title })).toBeInTheDocument(), find)
+      fireEvent.click(await screen.findByRole('button', { name: /^Manage/ }, find))
+      fireEvent.click(await screen.findByRole('button', { name: 'Remove from library' }, find))
+      const dialog = await screen.findByRole('alertdialog', {}, find)
+      expect(dialog.textContent).toContain(`Remove "${FRESH.title}" from Aurora?`)
+      const remove = within(dialog).getByRole('button', { name: 'Remove' })
+      fireEvent.click(remove)
+      fireEvent.click(remove)
+      await screen.findByText(`Removed "${FRESH.title}" from the library`, {}, find)
+      expect(server.mediaDeletes).toEqual([`/api/media/${FRESH.id}`])
+      expect(native).not.toHaveBeenCalled()
+    } finally {
+      native.mockRestore()
+    }
   })
 
   // Saved again by hand while "Removed … Undo" was still up, the title was

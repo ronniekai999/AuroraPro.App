@@ -358,6 +358,9 @@ async function fetchOrLost(input: string, init: RequestInit): Promise<Response> 
   try {
     return await fetch(input, init)
   } catch (err) {
+    // An abort, whatever it was given as its reason (`abort('superseded')`
+    // rejects with that value, which has no name).
+    if (init.signal?.aborted) throw err
     const name = err && typeof err === 'object' ? (err as { name?: unknown }).name : undefined
     if (name === 'AbortError' || name === 'TimeoutError') throw err
     throw new NetworkError(err instanceof Error ? err.message : 'Failed to fetch', { cause: err })

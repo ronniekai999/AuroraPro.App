@@ -211,7 +211,8 @@ export default function CalendarView({ onOpenMedia, currentUserId, onJoinParty }
       .then((eps) => { if (!cancelled) setEpisodes(eps) })
       .catch((e) => {
         if (!cancelled && e.name !== 'AbortError') {
-          setError(e instanceof Error ? e.message : 'Failed to load calendar')
+          // The page says it in words of its own (below); kept as a flag.
+          setError('failed')
         }
       })
     return () => { cancelled = true; ac.abort() }

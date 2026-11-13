@@ -12,13 +12,16 @@ import type { Collection, ServerMediaItem } from '@/lib/api'
 const api = vi.hoisted(() => ({
   listCollections: vi.fn<() => Promise<unknown[]>>(),
   getCollection: vi.fn<(id: number) => Promise<{ items: unknown[] | null }>>(),
+  deleteCollection: vi.fn<(id: number) => Promise<void>>(),
 }))
 vi.mock('@/lib/api', async (original) => ({
   ...(await original<typeof import('@/lib/api')>()),
   listCollections: api.listCollections,
   getCollection: api.getCollection,
+  deleteCollection: api.deleteCollection,
 }))
 
+import { APIError } from '@/lib/api'
 import CollectionsView from './CollectionsView'
 import { LibraryHeader, LibraryToolsProvider } from './LibraryHeader'
 
@@ -221,5 +224,19 @@ describe('opened on a collection picked elsewhere', () => {
     render(<Page open={null} />)
     expect(await screen.findByText('Best of 2026')).toBeInTheDocument()
     expect(api.getCollection).not.toHaveBeenCalled()
+  })
+})
+
+// A delete the server refused said "Delete failed: " and the server's own
+// words in the dialog. It says it in the app's.
+describe('a collection\'s delete that fails', () => {
+  it('is said in the dialog in the app\'s words, not the server\'s', async () => {
+    api.deleteCollection.mockRejectedValue(new APIError(500, 'pq: deadlock detected', { error: { code: 500, message: 'pq: deadlock detected' } }))
+    render(<Page isAdmin />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete collection Best of 2026' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+    const said = await screen.findByRole('alert')
+    expect(said.textContent).toBe('Could not delete the collection just now.')
+    expect(document.body.textContent).not.toContain('deadlock')
   })
 })

@@ -100,6 +100,8 @@ import { searchField } from '@/lib/searchKeys'
 import AuthView from '@/components/AuthView'
 import { hasInAppEntryBehind } from '@/lib/historyBack'
 import { dropWaitingOpen, travelToTitle, watchCardPresses } from '@/lib/posterTravel'
+import { failureWords } from '@/lib/failureWords'
+import { ConfirmDialog } from '@/components/settings/ConfirmDialog'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
@@ -190,6 +192,9 @@ const PREFETCH_BY_VIEW: Record<string, keyof typeof VIEW_LOADERS> = {
   library: 'library', search: 'search', members: 'members',
   together: 'together', profile: 'profile', me: 'me', detail: 'detail',
 }
+// Play found nothing it can play for a title (no season, no episode with a
+// file, no file): said as such, not as a failure to reach anything.
+const NO_FILE_TO_PLAY = new Error('no file to play')
 const prefetched = new Set<keyof typeof VIEW_LOADERS>()
 function prefetchView(view: string): void {
   const key = PREFETCH_BY_VIEW[view]
@@ -575,11 +580,8 @@ function HomeView({
           banner, a step below the hero's edge. */}
       <div className="stage-gutter pt-5">
       {error && (
-        <div className="mb-6 px-5 py-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center justify-between gap-4">
-          <div>
-            <p className="font-medium">Couldn't load your library</p>
-            <p className="text-red-300/70 text-xs mt-1">{error}</p>
-          </div>
+        <div role="alert" className="mb-6 px-5 py-4 rounded-control bg-surface-raised border border-line text-sm flex items-center justify-between gap-4">
+          <p className="text-ink">{error}</p>
           {onRetry && (
             <button
               onClick={onRetry}
@@ -1508,6 +1510,13 @@ export default function App() {
   const [collectionsModalOpen, setCollectionsModalOpen] = useState(false)
   const [addToListLists, setAddToListLists] = useState<Watchlist[] | null>(null)
   const [addToListBusy, setAddToListBusy] = useState(false)
+  // A list the sheet could not add the title to, said in the sheet (for the
+  // title it was said about: another opening of the sheet starts clean).
+  const [addToListFailed, setAddToListFailed] = useState<{ mediaId: number; says: string } | null>(null)
+  // A question asked before something that cannot be taken back (the app's
+  // own dialog, components/settings/ConfirmDialog; the browser's native box
+  // was used before). `run` is what the confirm button does, once.
+  const [confirmAsk, setConfirmAsk] = useState<{ title: string; body: string; confirmLabel: string; destructive?: boolean; run: () => void } | null>(null)
   useEffect(() => {
     if (!addToListMedia || !activeProfileId) { setAddToListLists(null); return }
     let cancelled = false
@@ -1833,19 +1842,27 @@ export default function App() {
       setPartyPanelOpen(true)
       return
     }
-    if (party.state.code && !window.confirm(`Leave your current party and join ${code}?`)) return
-    if (party.state.code) party.leave()
-    const r = await party.join(code)
-    if (r.ok) {
-      setNotifOpen(false)
-      setPartyPanelOpen(true)
-    } else {
-      setToasts(prev => [...prev, {
-        id: nextToastId(),
-        message: r.error || 'Failed to join the party',
-        type: 'error',
-      }])
+    const join = async () => {
+      if (party.state.code) party.leave()
+      const r = await party.join(code)
+      if (r.ok) {
+        setNotifOpen(false)
+        setPartyPanelOpen(true)
+      } else {
+        setToasts(prev => [...prev, {
+          id: nextToastId(),
+          message: r.error || 'Failed to join the party',
+          type: 'error',
+        }])
+      }
     }
+    if (!party.state.code) { void join(); return }
+    setConfirmAsk({
+      title: `Leave your party and join ${code}?`,
+      body: 'You leave the party you are in now, and its room is told you left.',
+      confirmLabel: 'Leave and join',
+      run: () => { void join() },
+    })
   }, [party, nextToastId])
 
   // M10 Phase 2 — Browse views. Lists fetch lazily on first visit
@@ -2339,7 +2356,7 @@ export default function App() {
         refreshMyPartyInvites()
         setToasts(prev => [...prev, {
           id: nextToastId(),
-          message: err instanceof Error ? err.message : 'Failed to save RSVP',
+          message: failureWords(err, 'save your answer') ?? 'Could not save your answer just now.',
           type: 'error',
         }])
       })
@@ -2372,9 +2389,10 @@ export default function App() {
       try {
         const detail = await getMedia(id)
         if (!cancelled) setSelectedMedia(mapMedia(detail))
-      } catch {
+      } catch (err) {
         if (cancelled) return
-        addToast('Title not found', 'error')
+        const says = failureWords(err, 'open this title', { status: { 404: 'This title is not available.' } })
+        if (says) addToast(says, 'error')
         navigate('/', { replace: true })
       }
     })()
@@ -2828,7 +2846,7 @@ export default function App() {
         // applied to episodes for the same reason.
         const seasonsRaw = await getSeasons(m.id, ac.signal)
         if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
-        if (seasonsRaw.length === 0) throw new Error('No seasons available')
+        if (seasonsRaw.length === 0) throw NO_FILE_TO_PLAY
         // Where the show starts (lib/partyEpisode): the earliest episode
         // with a file, the regular seasons in order and Specials last.
         // Season 0 has the lowest number and is not where a show starts; it
@@ -2838,10 +2856,10 @@ export default function App() {
         // to start on.
         const first = await firstEpisodeToPlay(m.id, ac.signal, seasonsRaw)
         if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
-        if (!first) throw new Error('Episode has no files')
+        if (!first) throw NO_FILE_TO_PLAY
         const ep = first.episode
         const file = pickFile(ep.files, preferQuality)
-        if (!file) throw new Error('Episode has no files')
+        if (!file) throw NO_FILE_TO_PLAY
         // Not the first episode: say so, or the viewer is dropped into the
         // middle of a show with no word of why.
         const later = startsLaterNotice(m.title, first)
@@ -2861,7 +2879,7 @@ export default function App() {
         const files = await getMediaFiles(m.id, ac.signal)
         if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
         const file = pickFile(files, preferQuality)
-        if (!file) throw new Error('No file available to play')
+        if (!file) throw NO_FILE_TO_PLAY
         setPlayerTarget({
           mediaItemId: m.id,
           fileId: file.id,
@@ -2873,7 +2891,8 @@ export default function App() {
     } catch (err) {
       if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted) ||
           (err && (err as Error).name === 'AbortError')) return
-      const msg = err instanceof Error ? err.message : 'Failed to start playback'
+      const msg = err === NO_FILE_TO_PLAY ? 'There is no file to play for this title.' : failureWords(err, 'play this title')
+      if (!msg) return
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
     } finally {
@@ -3094,6 +3113,17 @@ export default function App() {
       navigate('/', { replace: true })
     }
   }, [location.key, navigate])
+
+  // The title page's way out when its title cannot be read (the detail read
+  // below): Back, with the reason said where it lands. A ref, so that read
+  // does not run again whenever the address changes.
+  const leaveMissingTitleRef = useRef(() => {})
+  useLayoutEffect(() => {
+    leaveMissingTitleRef.current = () => {
+      addToast('This title is not available.', 'info')
+      handleBack()
+    }
+  }, [addToast, handleBack])
 
   // Handle keyboard shortcuts
   useEffect(() => {
@@ -3529,16 +3559,7 @@ export default function App() {
     // the join (which would error "already in party" if still
     // active, or no-op if not).
     window.history.replaceState({}, '', import.meta.env.BASE_URL)
-    void (async () => {
-      // If already in a party, confirm before clobbering — otherwise
-      // an accidental magic-link click silently disconnects the user
-      // and notifies everyone else with participant-left.
-      if (party.state.code && party.state.code !== code) {
-        const ok = window.confirm(
-          `You're in party ${party.state.code}. Leave it and join ${code}?`
-        )
-        if (!ok) return
-      }
+    const join = async () => {
       const result = await party.join(code)
       if (result.ok) {
         setPartyPanelOpen(true)
@@ -3555,7 +3576,20 @@ export default function App() {
           type: isOfflineRoom ? 'info' : 'error',
         }])
       }
-    })()
+    }
+    // If already in a party, ask before clobbering — otherwise an
+    // accidental magic-link click silently disconnects the user and
+    // notifies everyone else with participant-left.
+    if (party.state.code && party.state.code !== code) {
+      setConfirmAsk({
+        title: `Leave party ${party.state.code} and join ${code}?`,
+        body: 'You leave the party you are in now, and its room is told you left.',
+        confirmLabel: 'Leave and join',
+        run: () => { void join() },
+      })
+      return
+    }
+    void join()
   // We intentionally run once when user becomes available, not on
   // every party state change.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4118,7 +4152,7 @@ export default function App() {
         // Only surface an error when there is nothing on screen. A background
         // refresh that blips would otherwise paint "Couldn't load your library"
         // above a perfectly good Home.
-        if (cold) setHomeError(err instanceof Error ? err.message : 'Unknown error')
+        if (cold) setHomeError(failureWords(err, 'load Tonight'))
         else console.warn('[Aurora] background home refresh failed', err)
       } finally {
         // Note: setHomeLoading(false) for the success path now runs
@@ -4853,13 +4887,17 @@ export default function App() {
         }
       } catch (err) {
         if (cancelled || (err && (err as Error).name === 'AbortError')) return
-        // Said in the page's own words, never the server's. A 404 does not
-        // say whether the title exists: under a rating ceiling a missing id
-        // and one above the ceiling get the same answer, and the page must
-        // not tell them apart either.
-        setDetailError(err instanceof APIError && err.status === 404
-          ? 'This title is not available.'
-          : 'Could not load this title\'s details just now.')
+        // A 404: the title is gone, or above the profile's limit (the server
+        // answers both alike, and so does this). The page is left, the step
+        // Back takes, and that is said where the viewer lands: kept up, it
+        // offered Play, saving and a party for a title none of them could
+        // reach, beside a stale card's description.
+        if (err instanceof APIError && err.status === 404) {
+          leaveMissingTitleRef.current()
+          return
+        }
+        // Anything else keeps the page, with the reason in the app's words.
+        setDetailError(failureWords(err, 'load this title\'s details'))
       } finally {
         if (!cancelled) setDetailLoading(false)
       }
@@ -5327,8 +5365,8 @@ export default function App() {
       } catch { /* non-fatal */ }
     } catch (err) {
       const id = nextToastId()
-      const msg = err instanceof Error ? err.message : 'Failed to refresh'
-      setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
+      const msg = failureWords(err, 'refresh this title\'s details')
+      if (msg) setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
     }
   }, [nextToastId])
 
@@ -5421,23 +5459,30 @@ export default function App() {
   // ghost left behind after the title was deleted on the server. Confirms
   // first (destructive + irreversible), then navigates back off the now-gone
   // detail page and purges the local caches.
-  const handleDeleteMedia = useCallback(async (m: Media) => {
-    const ok = window.confirm(
-      `Remove "${m.title}" from Aurora?\n\n` +
-      `This deletes the library entry and all of its episodes, watch history, ` +
-      `and metadata. Files on your server's disk are NOT deleted. ` +
-      `If the files are still there, the next scan will re-add the title.`,
-    )
-    if (!ok) return
-    try {
-      await deleteMedia(m.id)
-      purgeMediaFromCaches(m.id)
-      handleBack()
-      addToast(`Removed "${m.title}" from the library`, 'success')
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to remove from library'
-      addToast(msg, 'error')
+  const handleDeleteMedia = useCallback((m: Media) => {
+    const remove = async () => {
+      try {
+        await deleteMedia(m.id)
+        purgeMediaFromCaches(m.id)
+        handleBack()
+        addToast(`Removed "${m.title}" from the library`, 'success')
+      } catch (err) {
+        // A 404: it was gone already (removed meanwhile, or by a scan).
+        const msg = failureWords(err, `remove "${m.title}" from the library`, { status: { 404: `"${m.title}" is no longer in the library.` } })
+        if (msg) addToast(msg, 'error')
+      }
     }
+    // What the server's delete does: the title's row goes, and with it
+    // everything Aurora keeps about it (its files' records, seasons,
+    // episodes, artwork and cast, and every profile's progress, ratings,
+    // lists and recap questions for it). Files on disk are not touched.
+    setConfirmAsk({
+      title: `Remove "${m.title}" from Aurora?`,
+      body: 'This removes the title from the library for everyone on this server, with everything Aurora keeps about it, every profile\'s watch progress and ratings included. The files on the server\'s disk are not deleted: if they are still in a library folder, the next scan adds the title back, without that history.',
+      confirmLabel: 'Remove',
+      destructive: true,
+      run: () => { void remove() },
+    })
   }, [purgeMediaFromCaches, handleBack, addToast])
 
   // Start a watch party with this media. Creates a quick-party
@@ -5533,7 +5578,11 @@ export default function App() {
   // the first one found for the title.
   const buildCardMenu = (e: React.MouseEvent, m: Media, own?: ContinueWatchingItem) => {
     e.preventDefault()
-    const failed = (err: unknown) => window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
+    // Said as a toast, in the app's words, for the action it was about.
+    const failedTo = (doing: string) => (err: unknown) => {
+      const says = failureWords(err, doing)
+      if (says) addToast(says, 'error')
+    }
     const resume = own && own.media_item_id === m.id && isResumable(own)
       ? own
       : continueItems.find(c => c.media_item_id === m.id && isResumable(c))
@@ -5569,14 +5618,14 @@ export default function App() {
             }
           }
           setRetryNonce(n => n + 1)
-        }).catch(failed)
+        }).catch(failedTo('mark it as watched'))
       }},
       { label: 'Clear my progress', tone: 'danger', onClick: () => {
         void clearProgress(m.id, activeProfileId ?? undefined).then(() => {
           const id = nextToastId()
           setToasts(prev => [...prev, { id, message: `Cleared progress for "${m.title}"`, type: 'info' }])
           setRetryNonce(n => n + 1)
-        }).catch(failed)
+        }).catch(failedTo('clear the progress'))
       }},
       // Feedback to the recommender (the thumbs).
       { label: 'More like this', group: true, ai: true, onClick: () => {
@@ -5587,7 +5636,7 @@ export default function App() {
           // A thumbs-up undoes an earlier thumbs-down (one row per title).
           removed.delete(m.id)
           setToasts(prev => [...prev, { id: nextToastId(), message: `More like "${m.title}" — got it`, type: 'success' }])
-        }).catch(failed)
+        }).catch(failedTo('save that'))
       }},
       { label: 'Not interested', ai: true, onClick: () => {
         const removed = removedFromHomeRef.current
@@ -5597,7 +5646,7 @@ export default function App() {
           // refresh anyway) and keep it out of later rail recomposes.
           removed.add(m.id)
           setHomeRails(rails => rails ? rails.map(rl => ({ ...rl, items: rl.items.filter(it => it.id !== m.id) })) : rails)
-        }).catch(failed)
+        }).catch(failedTo('save that'))
       }},
     )
     if (adminUI) {
@@ -5649,6 +5698,8 @@ export default function App() {
 
       let sentCount = 0
       let skippedMsg = ''
+      // The invitations as a whole failed: said in the app's words.
+      let inviteFailure: string | null = null
       if (launch.usernames.length > 0) {
         // Invite failures don't abort the launch — the party exists and
         // the host is about to land in it; report and carry on.
@@ -5661,7 +5712,7 @@ export default function App() {
               .join(', ')
           }
         } catch (err) {
-          skippedMsg = err instanceof Error ? err.message : 'invites failed to send'
+          inviteFailure = failureWords(err, 'send the invitations')
         }
       }
 
@@ -5684,6 +5735,7 @@ export default function App() {
             type: 'info',
           }])
         }
+        if (inviteFailure) setToasts(prev => [...prev, { id: nextToastId(), message: inviteFailure, type: 'error' }])
         return { ok: true, code: resp.code }
       }
       // Server created the party but we couldn't join it. Surface
@@ -5694,25 +5746,23 @@ export default function App() {
       console.error('[Aurora WatchParty] join failed after create', { code: resp.code, joinResult })
       return {
         ok: false,
-        error: `Party ${resp.code} created but join failed: ${joinResult.error || 'no error message returned (check console)'}`,
+        error: `The party was made (code ${resp.code}), but joining it did not work. Open it from Together.`,
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to start party'
       // eslint-disable-next-line no-console
       console.error('[Aurora WatchParty] launchComposerParty threw', { createdCode, err })
-      // One-active-party-per-host guard (2026-08 review): the raw server
-      // message dead-ends the host with no pointer to the party they
-      // already have — which, for a scheduled booking they're not
-      // connected to, is invisible from this modal. Name the recovery.
-      if (!createdCode && /already have an active party/i.test(msg)) {
-        return {
-          ok: false,
-          error: 'You already have a party (it may be a scheduled one). Open it from the home "Watch together" card, your Calendar, or the bell — end it there first to book a new one.',
-        }
+      if (createdCode) {
+        return { ok: false, error: `The party was made (code ${createdCode}), but joining it did not work. Open it from Together.` }
       }
+      // The server answers every refused creation 409, the one-party-per-host
+      // rule's included, with no reason to tell them apart; that rule is
+      // the one a host can act on, so the sentence names it without saying
+      // it is the cause. Before, the server's own words were matched.
       return {
         ok: false,
-        error: createdCode ? `Party ${createdCode} created but couldn't join: ${msg}` : msg,
+        error: failureWords(err, 'start the party', {
+          status: { 409: 'Could not start the party. If you already have one, a scheduled one included, end it from Together first.' },
+        }) ?? undefined,
       }
     }
   }, [party, nextToastId])
@@ -7461,7 +7511,7 @@ export default function App() {
               .catch(err => {
                 setToasts(prev => [...prev, {
                   id: nextToastId(),
-                  message: err instanceof Error ? err.message : 'Failed to reschedule',
+                  message: failureWords(err, 'move the party') ?? 'Could not move the party just now.',
                   type: 'error',
                 }])
               })
@@ -7565,13 +7615,15 @@ export default function App() {
                 disabled={addToListBusy}
                 onClick={async () => {
                   setAddToListBusy(true)
+                  setAddToListFailed(null)
                   try {
                     await addToWatchlist(activeProfileId, l.id, addToListMedia.id)
                     const tId = nextToastId()
                     setToasts(prev => [...prev, { id: tId, message: `Added to "${l.name}"`, type: 'success' }])
                     closeAddToList()
                   } catch (err) {
-                    window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
+                    const says = failureWords(err, `add it to "${l.name}"`)
+                    if (says) setAddToListFailed({ mediaId: addToListMedia.id, says })
                   } finally {
                     setAddToListBusy(false)
                   }
@@ -7581,6 +7633,9 @@ export default function App() {
                 {l.name}
               </button>
             ))}
+            {addToListFailed?.mediaId === addToListMedia.id && (
+              <p role="alert" className="mt-2 text-sm text-danger-ink">{addToListFailed.says}</p>
+            )}
             <button
               onClick={closeAddToList}
               className="w-full mt-3 py-2 text-white/60 hover:text-white text-sm transition-colors"
@@ -7590,6 +7645,18 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmAsk !== null}
+        title={confirmAsk?.title ?? ''}
+        confirmLabel={confirmAsk?.confirmLabel ?? ''}
+        destructive={confirmAsk?.destructive ?? false}
+        safeFirst={confirmAsk?.destructive ?? false}
+        onConfirm={() => { const run = confirmAsk?.run; setConfirmAsk(null); run?.() }}
+        onCancel={() => setConfirmAsk(null)}
+      >
+        {confirmAsk?.body ?? ''}
+      </ConfirmDialog>
 
       {/* Watch-party invite composer — "Plan a Watch Party" (now or
           scheduled + people picker). Opened by the detail page's Party

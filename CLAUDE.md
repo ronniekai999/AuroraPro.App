@@ -2016,6 +2016,18 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   `--castcard-h` is checked in `scripts/verify-player-lane.mjs`. A toast in the window can lie over the
   party's chat ticker for its few seconds; the renders put the card's
   markup on a page, and no real cast session was rendered.
+- A failure is said in the app's own words, chosen by its kind, never the
+  server's or the browser's text (`lib/failureWords`: lib/api's
+  `NetworkError` for a request that got no answer, `APIError`'s status and
+  `error.reason`; an abort says nothing). "Just now" is said only of a 5xx,
+  a lost connection and the app's own failure; a 404 says the same whether
+  or not the thing exists. The server's text is for the Admin page only, as
+  a secondary line (`serverSaidForAdmin`); views not yet moved onto the
+  helper still show it (known gap until they are). The browser's own alert,
+  confirm and prompt boxes are not used: `noNativeDialogs.test.ts` reads
+  every source file, with a list of files still being moved off them. A
+  title page whose title answers 404 is left (the step Back takes) and
+  "This title is not available." is said where the viewer lands.
 - Pinned by `AuthView.test.tsx`, `Toast.test.tsx`, `lib/libraryUndo.test.ts`,
   `lib/devicePairing.test.ts`, `App.cardMenu.test.tsx` (a stub that holds
   and fails library writes), `App.profileSwitch.test.tsx` (a removal's toast

@@ -3,6 +3,7 @@
 // Two states: list (all visible collections) and detail (one
 // collection's items). Click a collection card → detail.
 
+import { failureWords } from '@/lib/failureWords'
 import { useEffect, useRef, useState, type MouseEvent } from 'react'
 import {
   listCollections,
@@ -133,7 +134,8 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
       .then((c) => { if (!cancelled) setCollections(c) })
       .catch((e) => {
         if (!cancelled && e.name !== 'AbortError') {
-          setError(e instanceof Error ? e.message : 'Failed to load')
+          // The page says it in words of its own (below); kept as a flag.
+          setError('failed')
         }
       })
     return () => { cancelled = true; ac.abort() }
@@ -229,10 +231,7 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
                 setConfirm(null)
                 setDialogError(null)
               } catch (err) {
-                setDialogError(
-                  (confirm.kind === 'remove' ? 'Remove failed: ' : 'Delete failed: ') +
-                  (err instanceof Error ? err.message : 'unknown'),
-                )
+                setDialogError(failureWords(err, confirm.kind === 'remove' ? 'remove it from the collection' : 'delete the collection'))
               }
             }}
           >
