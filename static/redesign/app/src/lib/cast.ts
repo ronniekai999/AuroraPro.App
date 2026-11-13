@@ -47,7 +47,19 @@ const SELF_TEST_TIMEOUT_MS = 5000
 // Only a receiver LOAD rejection can produce an IDLE event for a failed
 // replacement. Token minting and SDK/session setup fail before disturbing
 // receiver media, so callers must not treat those errors as media outcomes.
-export class CastMediaLoadError extends Error {
+/** A Cast failure whose message is describeCastError's: the app's sentence
+ *  for a known Cast SDK code (or, for a code it does not know, the SDK's
+ *  code, kept on purpose: see describeCastError). Every other error a cast
+ *  start can reject with carries a developer's words ("cast SDK not
+ *  ready"), which a page must not show. */
+export class CastSaidError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CastSaidError'
+  }
+}
+
+export class CastMediaLoadError extends CastSaidError {
   readonly contentId: string
   // SDK watermark captured at rejection, before React can publish a status
   // update that was received earlier in the same turn.
@@ -1177,7 +1189,7 @@ export function useCast(
       // on some Chrome builds (issue #311: rawErr === "session_error"),
       // mapping known codes to actionable, human-readable messages
       // instead of collapsing them to "unknown".
-      throw new Error(describeCastError(rawErr))
+      throw new CastSaidError(describeCastError(rawErr))
     }
     const session = ctx.getCurrentSession()
     if (!session) throw new Error('cast session not established')

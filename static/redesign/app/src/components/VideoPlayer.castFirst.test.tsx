@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
 import { createSession, getStreamInfo, keepalive, createCastToken, deleteSession } from '@/lib/streaming'
 import { markWatched, reportProgress } from '@/lib/api'
-import { CastMediaLoadError, type CastLoadArgs } from '@/lib/cast'
+import { CastMediaLoadError, CastSaidError, type CastLoadArgs } from '@/lib/cast'
 import { pushEscapeLayer } from '@/lib/escapeLayers'
 const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
@@ -820,6 +820,23 @@ describe('Successful ACK and receiver status association', () => {
     view.rerender(element()); await settle(); await advanceLoadWindow()
     fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' })); await settle()
     expect(fake.cast.loadCurrent).not.toHaveBeenCalled(); expect(fake.cast.seek).not.toHaveBeenCalled()
+  })
+
+  // A start that fails says so in the app's words: a Cast refusal in the
+  // sentence describeCastError gave it, anything else (lib/cast's own "cast
+  // SDK not ready") by its kind.
+  it('says a cast that could not start in the app\'s words', async () => {
+    const onToast = vi.fn()
+    fake.cast.start.mockRejectedValueOnce(new Error('cast SDK not ready'))
+    const element = () => <VideoPlayer target={movie} onClose={() => {}} onToast={onToast} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
+    expect(onToast).toHaveBeenCalledWith('Could not start casting just now.', 'error')
+    expect(onToast.mock.calls.flat().join(' ')).not.toMatch(/SDK/)
+    onToast.mockClear()
+    fake.cast.start.mockRejectedValueOnce(new CastSaidError('No Cast devices were found. Check that your Chromecast is on and on the same Wi-Fi network.'))
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
+    expect(onToast).toHaveBeenCalledWith('Cast failed: No Cast devices were found. Check that your Chromecast is on and on the same Wi-Fi network.', 'error')
   })
 
   it('also declines an existing TV clock discovered during the initial device picker', async () => {

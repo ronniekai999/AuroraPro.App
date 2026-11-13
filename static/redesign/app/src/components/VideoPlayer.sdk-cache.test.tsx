@@ -366,6 +366,21 @@ function installFakeSdk() {
 }
 
 
+// A device picker the SDK rejects ("receiver_unavailable") is said in the
+// sentence describeCastError gives it; the toast does not swap it for the
+// general one kept for lib/cast's own developer-worded errors.
+describe('a cast start the SDK refuses', () => {
+  it('says the SDK\'s refusal in its own sentence', async () => {
+    const sdk = installFakeSdk()
+    sdk.setRequestSessionImpl(async () => { throw 'receiver_unavailable' })
+    const onToast = vi.fn()
+    render(<VideoPlayer target={movie} onClose={() => {}} onToast={onToast} />); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle()
+    await act(async () => { vi.advanceTimersByTime(3000) }); await settle()
+    expect(onToast).toHaveBeenCalledWith('Cast failed: No Cast devices were found. Check that your Chromecast is on and on the same Wi-Fi network.', 'error')
+  })
+})
+
 describe('Sixth independent actual SDK cached Media after a rejected LOAD', () => {
   const token = 'eyJhbGciOiJub25lIn0.eyJzY29wZSI6InN0cmVhbTpjYXN0In0.x'
   const oldURL = 'http://localhost:3000/api/stream/hls/cached-old/master.m3u8?token=cast'

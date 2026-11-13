@@ -27,6 +27,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react'
 import Hls from 'hls.js'
+import { failureWords } from '@/lib/failureWords'
 import {
   Airplay, Cast, ChevronLeft, Expand, Maximize2, MoreHorizontal, PanelRight, Pause, Play, RefreshCw,
   RotateCcw, RotateCw, Scissors, StopCircle, VolumeX, X,
@@ -97,6 +98,7 @@ import {
   CAST_NO_MEDIA_ERROR,
   CAST_UNSUPPORTED_DIRECT_FORMAT,
   CastMediaLoadError,
+  CastSaidError,
   RECONNECT_SETTLE_MS,
   absoluteUrl,
   assertCastScopedToken,
@@ -4565,14 +4567,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               failPlayback('Playback failed — network error', 'network')
             }
           } else {
-            failPlayback('Playback failed — ' + (data.details ?? 'unknown'))
+            // hls.js's detail ("fragParsingError") is for a developer.
+            failPlayback('Playback failed — this title could not be played.')
           }
         })
       } catch (err) {
         if (cancelled) return
         if (err && (err as Error).name === 'AbortError') return
         deliveryModeRef.current = 'idle'
-        const msg = err instanceof Error ? err.message : 'Failed to start playback'
+        // The server's words for a stream-info or session failure are for
+        // whoever runs it: the page says what kind of failure it was.
+        const msg = failureWords(err, 'start playback') ?? 'Could not start playback.'
         // A stream-info or session-create failure is an OUTAGE — a session cap,
         // an ffprobe failure, a full disk — and it never reaches hls.js or the
         // element, so nothing else classifies it. Left unclassified the admin
@@ -7280,7 +7285,14 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // opacity-0, inert and aria-hidden. The inline banner is for the
         // pre-flight refusal above, which always runs against a visible
         // player.
-        onToast?.(`Cast failed: ${msg}`, 'error')
+        // Said in the app's words: describeCastError's sentence for a Cast
+        // SDK refusal (CastSaidError), the sentinel's own above, and for
+        // anything else (lib/cast's "cast SDK not ready" and the like) the
+        // kind of failure.
+        const said = raw === CAST_NO_MEDIA_ERROR || err instanceof CastSaidError
+          ? `Cast failed: ${msg}`
+          : failureWords(err, 'start casting') ?? 'Could not start casting.'
+        onToast?.(said, 'error')
       }
     })
   }

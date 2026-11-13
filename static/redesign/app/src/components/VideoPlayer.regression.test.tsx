@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
 import { createCastToken, createDirectCastToken, createSession, deleteSession, getStreamInfo, keepalive } from '@/lib/streaming'
-import { markWatched, reportProgress } from '@/lib/api'
+import { APIError, markWatched, reportProgress } from '@/lib/api'
 import { CastMediaLoadError } from '@/lib/cast'
 const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
@@ -124,9 +124,11 @@ describe('WEB regressions through the real VideoPlayer', () => {
     expect(audio.mock.calls).toEqual([[1, 35000], [0, 35000]])
   })
   it.each(['close then open', 'replace target while error visible'])('binds listeners after an error: %s', async mode => {
-    vi.mocked(getStreamInfo).mockRejectedValueOnce(new Error('session cap'))
+    vi.mocked(getStreamInfo).mockRejectedValueOnce(new APIError(503, 'session cap', null))
     const ended = vi.fn(); const element = (target: PlayTarget | null) => <VideoPlayer target={target} onClose={() => {}} onEnded={ended} />
-    const view = render(element(movie)); await settle(); expect(screen.getByText('session cap')).toBeInTheDocument()
+    // The server's words are for whoever runs it: the screen says the kind of failure.
+    const view = render(element(movie)); await settle(); expect(screen.getByText('Could not start playback just now.')).toBeInTheDocument()
+    expect(screen.queryByText('session cap')).toBeNull()
     if (mode === 'close then open') { view.rerender(element(null)); await settle() }
     localStorage.setItem('aurora_prefs', JSON.stringify({ player_volume: 0.4 }))
     view.rerender(element({ ...movie, mediaItemId: 2, fileId: 20, title: 'Next' })); await bootHls()
@@ -340,11 +342,11 @@ describe('Independent adversarial timing checks', () => {
     expect(audio.mock.calls).toEqual([[1, 80000], [0, 80000]])
   })
   it('rebinds party broadcasts after a direct target replacement while an error is visible', async () => {
-    vi.mocked(getStreamInfo).mockRejectedValueOnce(new Error('session cap'))
+    vi.mocked(getStreamInfo).mockRejectedValueOnce(new APIError(503, 'session cap', null))
     const requestPause = vi.fn()
     const baseParty: PartySync = { isHost: true, currentUserId: 1, partyMediaItemId: 1, partyEpisodeId: null, isPlaying: true, rev: 1, hlsStartSec: 0, tickRef: { current: null }, seekRef: { current: null }, helloAbsMsRef: { current: 0 }, requestPlay: vi.fn(), requestPause, requestSeek: vi.fn() }
     const view = render(<VideoPlayer target={movie} party={baseParty} onClose={() => {}} />); await settle()
-    expect(screen.getByText('session cap')).toBeInTheDocument()
+    expect(screen.getByText('Could not start playback just now.')).toBeInTheDocument()
     const next = { ...movie, mediaItemId: 2, fileId: 20, title: 'Next' }
     const nextParty = { ...baseParty, partyMediaItemId: 2 }
     view.rerender(<VideoPlayer target={next} party={nextParty} onClose={() => {}} />); await bootHls()
@@ -420,7 +422,7 @@ describe('Independent missing cast anchor', () => {
 })
 
 it('binds the guest mirror to the replacement element after an error', async () => {
-  vi.mocked(getStreamInfo).mockRejectedValueOnce(new Error('session cap'))
+  vi.mocked(getStreamInfo).mockRejectedValueOnce(new APIError(503, 'session cap', null))
   const party: PartySync = { isHost: false, currentUserId: 2, partyMediaItemId: 1, partyEpisodeId: null, isPlaying: true, rev: 1, hlsStartSec: 0, tickRef: { current: null }, seekRef: { current: null }, helloAbsMsRef: { current: 0 }, requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn() }
   const view = render(<VideoPlayer target={movie} party={party} onClose={() => {}} />); await settle()
   const next = { ...movie, mediaItemId: 2, fileId: 20, title: 'Next' }

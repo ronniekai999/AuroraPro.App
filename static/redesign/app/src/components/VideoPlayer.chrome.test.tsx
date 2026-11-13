@@ -962,7 +962,9 @@ describe('menus and the things around the player', () => {
       fireEvent.click(screen.getByRole('button', { name: open }))
       expect(document.documentElement.hasAttribute('data-player-menu'), open).toBe(true)
       await act(async () => { fake.hls.at(-1)!.emit('ERROR', { fatal: true, type: 'otherError', details: 'internalException' }) }); await settle()
-      expect(screen.getByText(/Playback failed/)).toBeInTheDocument()
+      // hls.js's own detail ("internalException") is for a developer.
+      expect(screen.getByText('Playback failed — this title could not be played.')).toBeInTheDocument()
+      expect(screen.queryByText(/internalException/)).toBeNull()
       expect(document.documentElement.hasAttribute('data-player-menu'), open).toBe(false)
       const reachedApp = vi.fn()
       window.addEventListener('keydown', reachedApp)
