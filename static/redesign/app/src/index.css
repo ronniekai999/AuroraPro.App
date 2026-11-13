@@ -2988,7 +2988,10 @@ input.profile-unlock-field[aria-invalid="true"]:not([type="range"]):not([type="c
    of the real `inert` attribute (plus a scroll lock) the call site adds, which
    is what removes the app from the tab order and the accessibility tree.
    No opacity and no filter: a filter would make <main> the containing block of
-   every `position: fixed` descendant, for an effect nobody can see. */
+   every `position: fixed` descendant, for an effect nobody can see. An opacity
+   held on <main> for the page to fade back from was measured under a playing
+   video and not kept: one more compositor layer, and on a phone at 4x CPU
+   throttling about 40% more compositor draw time and more long frames. */
 .stage-dim-app {
   pointer-events: none;
 }

@@ -6525,13 +6525,14 @@ export default function App() {
       {/* Main Content. No left offset any more — the sidebar is gone, so
           pages run the full width of the viewport (Aurora Stage M2).
 
-          Aurora Stage Phase 7b — dimmed and inert behind the theater (D6).
+          Aurora Stage Phase 7b — inert behind the theater (D6), not dimmed.
           `inert` is doing the load-bearing work: it blocks pointer events,
           removes every descendant from the tab order, AND hides the subtree from
           assistive tech, which is all three halves of "inert" in one attribute.
           React 19 supports it as a real prop (PlayerControls already relies on
-          that). `.stage-dim-app` carries the opacity/saturate and repeats
-          pointer-events: none — redundant where inert is supported, and a
+          that). `.stage-dim-app` only repeats pointer-events: none (it does
+          not dim: the player covers the page; see its rule) — redundant
+          where inert is supported, and a
           PARTIAL fallback where it isn't (Safari < 15.5): it stops the mouse and
           nothing else. On those browsers the app behind stays tabbable and
           screen-reader reachable. An earlier version of this comment called it
