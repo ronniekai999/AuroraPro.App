@@ -147,11 +147,12 @@ be back on Movies where you were, with the dialog open, and the issue's
 The same form is also offered on the screen the app shows when a page
 stops ("That did not load."), as "Report a problem", to a signed-in
 session on a server that takes reports. A report sent from there carries,
-at the end of its description, what that screen shows under "What the
-app saw", each of its lines as an inline code span (so the tracker links
-and mentions nothing in them): the kind of failure; the error's message,
-when it has one; and the page's address (path and query), with the time
-and the build when they are known, together on the last line. These
+at the end of its description, the line "What the app saw:" and, under
+it, what that screen shows there, each of its lines as an inline code
+span (so the tracker links and mentions nothing in them): the kind of
+failure; the error's message, when it has one; and the page's address
+(path and query), with the time and the build when they are known,
+together on the last line. These
 lines never hold the stack; the console log every report carries does
 hold the error, with the first lines of its stack (five at most). The
 description and these lines share the server's limit of 10,000 bytes,

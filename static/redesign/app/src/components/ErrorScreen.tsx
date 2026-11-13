@@ -87,6 +87,18 @@ function moveFrom(then: Session, now: Session): Move | null {
   return now.profileId !== then.profileId ? 'profile' : null
 }
 
+/** Why an open report closed by itself, said in the past: the line stays on
+ *  the page while the browser may move back. One entry per reason, so a new
+ *  reason cannot be worded as another one. ('signed-in' cannot close a
+ *  report today: one is opened only while someone is signed in.) */
+const CLOSED_BECAUSE: Record<Move | 'refused', string> = {
+  refused: 'the server stopped taking reports',
+  'signed-out': 'this browser signed out',
+  'signed-in': 'someone signed in on this browser',
+  account: 'this browser moved to another account',
+  profile: 'this browser moved to another profile',
+}
+
 interface ReportAccess {
   /** The session the rest is about. */
   session: Session
@@ -329,15 +341,9 @@ export function ErrorScreen({ error }: { error: unknown }) {
               onClose={() => setOpenedFor(null)}
               onSubmitted={(result) => { sentRef.current = result }}
               onDismissed={(unsent) => {
-                // Said in the past: the browser may move back while the
-                // line is still on the page.
-                const because = why === 'refused'
-                  ? 'the server stopped taking reports'
-                  : why === 'signed-out'
-                    ? 'this browser signed out'
-                    : `this browser moved to another ${why === 'account' ? 'account' : 'profile'}`
+                // Dismissed only while there is a reason (`dismissed`).
                 const sent = sentRef.current
-                const line = `The report was closed because ${because}`
+                const line = why === null ? 'The report was closed' : `The report was closed because ${CLOSED_BECAUSE[why]}`
                 setSaid(sent
                   ? `${line}. It had been sent, as issue #${sent.issue_number}.`
                   : unsent ? `${line}, and it was not sent: ${unsent}` : `${line}.`)
@@ -392,7 +398,7 @@ function ErrorReportPanel({ saw, access, switched, dismissed, onClose, onSubmitt
     onDismissed,
     // What the page shows under "What the app saw", as it shows it.
     evidence: { text: saw.text, url: saw.page },
-    captureShows: 'A capture shows the part of this page that is on screen now, without this panel.',
+    captureShows: 'A capture leaves this panel out. On a narrow window it may show only part of the page.',
   })
   const { capturing, recording, submitting, submittedResult, titleInputRef } = form
   useEffect(() => { titleInputRef.current?.focus() }, [titleInputRef])

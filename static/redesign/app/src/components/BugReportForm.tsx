@@ -200,9 +200,10 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // The field a refusal is about, when it is about one (the form's own
-  // checks of the title and the description), with the refusal's words: it
-  // holds only while those are the words on screen, so a later refusal
-  // about something else (a capture that failed) is not pinned on a field.
+  // checks of the name, the title and the description), with the refusal's
+  // words: it holds only while those are the words on screen, so a later
+  // refusal about something else (a capture that failed) is not pinned on a
+  // field.
   const [fieldRefusal, setFieldRefusal] = useState<{ field: 'name' | 'title' | 'description'; text: string } | null>(null)
   const errorField = fieldRefusal && error === fieldRefusal.text ? fieldRefusal.field : null
   // Every refusal goes through here. One with the words already on screen
@@ -960,8 +961,12 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       refuse('Description is too long.', 'description')
       return
     }
-    if (sentBytes(name.trim()) > MAX_NAME_LEN) {
-      refuse('Your name is too long.', 'name')
+    // The name has no counter (it is optional): its refusal says how much
+    // is too much, since the field's own maxLength counts characters and
+    // lets a longer name in.
+    const nameBytes = sentBytes(name.trim())
+    if (nameBytes > MAX_NAME_LEN) {
+      refuse(`Your name is too long: ${nameBytes} of ${MAX_NAME_LEN} bytes.`, 'name')
       return
     }
     clearError()

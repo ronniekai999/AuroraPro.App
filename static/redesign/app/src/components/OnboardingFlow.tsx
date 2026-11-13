@@ -264,10 +264,6 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   // says was saved is read from `landed` as it is drawn, so a write that
   // lands after the failure was shown changes the sentence.
   const [error, setError] = useState<{ failure: unknown; carriedLimit: boolean } | null>(null)
-  // A build that failed in a way trying again cannot change, but a change
-  // on the first step can: the failure then offers the way back there.
-  // Set with every failure, and read only while one is shown.
-  const [fixInDetails, setFixInDetails] = useState(false)
   const [loadNonce, setLoadNonce] = useState(0)
   const [phaseMsg, setPhaseMsg] = useState(0)
   const ranLoadRef = useRef(-1)
@@ -640,6 +636,15 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   // What to say of a build that did not finish, which is first of all what
   // it did save: once the profile has been written its name and avatar are
   // kept, and so is the limit when the age set one, whatever failed after.
+  // A build that failed in a way trying again cannot change, but a change
+  // on the first step can: a refusal of the profile write that carried a
+  // limit an age can avoid, while nothing of it has landed. The failure then
+  // offers the way back there, in its words and its button, both judged as
+  // they are drawn: a write given up on that lands later makes it the
+  // failure of a build whose details are saved.
+  const failsInDetails = (e: unknown, saved: { profile: boolean }, carriedLimit: boolean): boolean =>
+    !saved.profile && carriedLimit && fixableInDetails(refusalReason(e))
+
   const buildFailure = (e: unknown, saved: { profile: boolean; limit: string | null }, carriedLimit: boolean): string => {
     const kept = saved.profile
       ? `Your name and avatar are saved${saved.limit ? `, and this profile is now limited to titles ${limitPhrase(saved.limit)}` : ''}. `
@@ -655,7 +660,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     // carried one, without the age there is nothing to refuse, and the way
     // back to it is offered. (The second is also the answer to any edit
     // from a session on a restricted profile, whatever it carries.)
-    if (carriedLimit && fixableInDetails(reason)) {
+    if (failsInDetails(e, saved, carriedLimit)) {
       return `${refusalMessage(e, '', { reloaded: false })} Nothing was saved. Without an age the rest can be saved: go back to your details, or skip for now.`
     }
     if (reason) return `${refusalMessage(e, '', { reloaded: false })} Nothing was saved.`
@@ -759,10 +764,6 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           if (recovered === null) failure = new BuildTimeout()
         }
         setBuildSaid('')
-        // A refusal the same write would meet again, which a change of the
-        // age can avoid: the way on is back to the first step.
-        const reason = saved.profile ? null : refusalReason(failure)
-        setFixInDetails(carriedLimit && fixableInDetails(reason))
         setError({ failure, carriedLimit })
       }
     })()
@@ -1273,7 +1274,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           <div className="mt-8">
             <p role="alert" className="max-w-[560px] text-[15px] leading-snug text-danger-ink">{buildFailure(error.failure, landed, error.carriedLimit)}</p>
             <div className="mt-4 flex flex-wrap gap-3">
-              {fixInDetails
+              {failsInDetails(error.failure, landed, error.carriedLimit)
                 ? <button type="button" onClick={backToDetails} className="stage-btn stage-btn-primary">Back to your details</button>
                 : <button type="button" onClick={retryLoad} className="stage-btn stage-btn-primary">Try again</button>}
               <button type="button" onClick={leave} className="stage-btn stage-btn-ghost">Skip</button>

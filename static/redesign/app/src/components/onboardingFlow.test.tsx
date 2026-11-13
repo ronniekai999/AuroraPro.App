@@ -1043,13 +1043,16 @@ describe('onboarding: the build', () => {
       expect(onDone).toHaveBeenCalledTimes(1)
     })
 
-    // The failure's sentence says what was saved as it is drawn: a write
-    // that lands after the failure was shown changes it.
-    it('says what was saved once a given-up write lands under a later failure', async () => {
+    // The failure's sentence and its buttons say what was saved as they are
+    // drawn: a write given up on that lands after the failure was shown
+    // changes both. Write 2 is refused as the server refuses it in this
+    // race: once write 1 has set the limit, the acting profile is
+    // restricted (403 profile_restricted, the manager's recheck).
+    it('says what was saved, and offers Try again, once a given-up write lands under a later refusal', async () => {
       let answer!: { land: () => void }
       api.updateProfile.mockReset()
         .mockImplementationOnce(() => new Promise((resolve) => { answer = { land: () => resolve({}) } }))
-        .mockRejectedValueOnce(refusal(409, 'changed', 'profile_changed'))
+        .mockRejectedValueOnce(refusal(403, 'restricted', 'profile_restricted'))
       vi.useFakeTimers()
       flow()
       await act(async () => {})
@@ -1062,9 +1065,14 @@ describe('onboarding: the build', () => {
       await pass(20_100)
       fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
       await act(async () => {})
-      expect(screen.getByRole('alert').textContent).toBe('This profile was changed on another device a moment ago. Try again. Nothing was saved.')
+      // Refused, with nothing landed: the way on is back to the age.
+      expect(screen.getByRole('alert').textContent).toMatch(/Nothing was saved\. Without an age the rest can be saved/)
+      expect(screen.getByRole('button', { name: 'Back to your details' })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
       await act(async () => { answer.land() })
       expect(screen.getByRole('alert').textContent).toBe('Your name and avatar are saved, and this profile is now limited to titles up to PG and TV-Y7. Your picks could not be saved just now. Try again, or skip for now.')
+      expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Back to your details' })).toBeNull()
       expect(document.querySelector('[data-skip-keeps-limit]')).toHaveTextContent('Skipping leaves the limit set.')
     })
 

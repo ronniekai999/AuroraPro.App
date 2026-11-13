@@ -51,9 +51,11 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo) {
-    // Dev: surface stack to console for debugging.
-    // Prod: still log but with no stack — prevents internal-detail
-    // leakage if a console snapshot ends up in a bug report.
+    // Dev: the error with the component stack. Prod: this line carries the
+    // message only, with no component stack. It is not the only line: React
+    // itself logs the caught error in production too, and the console log a
+    // bug report carries (lib/diagnosticBuffer) keeps an Error as its name,
+    // message and the first five lines of its stack.
     if (import.meta.env.DEV) {
       console.error('[ErrorBoundary] caught', error, info.componentStack)
     } else {

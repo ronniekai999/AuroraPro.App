@@ -197,7 +197,7 @@ describe('the error screen: reporting the problem', () => {
     expect(aside.textContent).not.toMatch(/never includes/i)
     // What a capture shows is said for this page: not the app's library or
     // what was playing, which are gone.
-    expect(aside).toHaveTextContent('A capture shows the part of this page that is on screen now, without this panel.')
+    expect(aside).toHaveTextContent('A capture leaves this panel out. On a narrow window it may show only part of the page.')
     expect(aside.textContent).not.toMatch(/currently playing media/)
   })
 
@@ -449,9 +449,9 @@ describe('the error screen: another tab changes who this browser is', () => {
     expect(document.body.textContent).not.toMatch(/another account/)
   })
 
-  // The closure line is about what happened: it stays true when the browser
-  // goes back afterwards.
-  it('says why a report closed in the past, true after the browser goes back', async () => {
+  // The closure line is kept as it was written, so it says what happened in
+  // the past tense: a move back afterwards does not make it false.
+  it('says why a report closed in the past tense', async () => {
     const user = userEvent.setup()
     signedIn()
     crash()
@@ -636,12 +636,12 @@ describe('the bug report dialog carries no such evidence', () => {
     // 60 letters, 120 bytes: over the server's 100.
     fireEvent.change(within(dialog).getByLabelText(/^Your name/), { target: { value: 'Ж'.repeat(60) } })
     await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
-    expect(within(dialog).getByRole('alert')).toHaveTextContent('Your name is too long.')
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Your name is too long: 120 of 100 bytes.')
     expect(within(dialog).getByLabelText(/^Your name/)).toHaveAttribute('aria-invalid', 'true')
     expect(api.submitBugReport).not.toHaveBeenCalled()
     fireEvent.change(within(dialog).getByLabelText(/^Your name/), { target: { value: 'Ж'.repeat(50) } })
     expect(within(dialog).getByLabelText(/^Your name/)).toHaveAttribute('aria-invalid', 'false')
-    expect(within(dialog).queryByText('Your name is too long.')).toBeNull()
+    expect(within(dialog).queryByText(/Your name is too long/)).toBeNull()
     await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
     await waitFor(() => expect(api.submitBugReport).toHaveBeenCalledTimes(1))
   })
