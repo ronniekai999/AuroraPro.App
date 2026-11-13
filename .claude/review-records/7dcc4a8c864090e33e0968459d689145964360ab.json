@@ -1,0 +1,10 @@
+{
+  "sha": "7dcc4a8c864090e33e0968459d689145964360ab",
+  "verdict": "lows-only",
+  "summary": "Follow-up batch: party joins by reason at App's entry points and links, a dropped 404 read again whether the switch attempt is out or has ended, open-question clears pinned on an account with no profile, the native-box guard compared with TypeScript's comment ranges (JSX text included) and chains of the global object, Ask Previously's 409 and the stream cap worded true, the room-offline sentence, the Admin leave-page hold for both browser generations, purge opener, 404 delete focus, approve and deny ids kept in a set, the known-items doc, and CLAUDE.md's Admin dialogs section. Review 35 fix-first (M1), re-check fix-first (the guard's JSX comparison), then lows-only twice; 2 nits left (a template literal ending in a box's name trips the guard loudly; the AI test's probe text unnamed)",
+  "reviewer": "fresh-context-agent-a465693d",
+  "findings": "2",
+  "diff_digest": "3ce46f3cbea5d3259ae56f923f3775a0f32e69538efd5c9c2f66a6e4688c83cc",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T11:39:57Z"
+}
