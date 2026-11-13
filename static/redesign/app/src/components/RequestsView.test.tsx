@@ -438,6 +438,35 @@ describe('what a refusal says on the requests page', () => {
     expect(screen.queryAllByRole('alert')).toEqual([])
   })
 
+  // The filters stay live while a delete is out. Where the words are
+  // announced goes by the filter in force when the answer lands.
+  it('announces it where it is drawn when the filter was changed while the delete was out', async () => {
+    let refuse!: (e: Error) => void
+    api.deleteRequest.mockImplementationOnce(() => new Promise<void>((_, reject) => { refuse = reject }))
+    render(<Kept start={[request(1, { title: 'First' }), request(2, { title: 'Second' })]} userId={1} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete request for First' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
+    // Pressed under All; Pending is chosen before the server answers.
+    fireEvent.click(screen.getByRole('button', { name: 'Pending · 2' }))
+    refuse(new Error('can only delete pending or failed requests'))
+    await flush()
+    expect(names()).toEqual(['Second'])
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(screen.getByRole('alert').textContent).toBe('First: It is with the downloader now and can no longer be deleted. It is listed under Processing now.')
+    cleanup()
+    // And the other way: pressed under Pending, All chosen before the answer.
+    api.deleteRequest.mockImplementationOnce(() => new Promise<void>((_, reject) => { refuse = reject }))
+    render(<Kept start={[request(1, { title: 'First' }), request(2, { title: 'Second' })]} userId={1} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Pending · 2' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete request for First' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
+    fireEvent.click(screen.getByRole('button', { name: 'All · 2' }))
+    refuse(new Error('can only delete pending or failed requests'))
+    await flush()
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(within(row(1)).getByRole('alert').textContent).toBe('It is with the downloader now and can no longer be deleted.')
+  })
+
   // The other way round: said on the row first, then the viewer filters the
   // row out. The words move above the list, and are not announced again.
   it('announces it once when it was said on the row first and the row is then filtered out', async () => {

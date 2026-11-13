@@ -1855,6 +1855,31 @@ export default function App() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: MediaContextItem[]; title?: string; reason?: string; opener?: HTMLElement | null } | null>(null)
 
   const [addToListMedia, setAddToListMedia] = useState<Media | null>(null)
+  // What had the focus as the add-to-list sheet opened: the control it is
+  // handed back to when the sheet is closed from the keyboard or by one of
+  // its own buttons. Read after the commit that opens the sheet, by which
+  // time a card's menu has closed and returned the focus to its More button
+  // (unmount effects run before this one).
+  const addToListOpenerRef = useRef<{ el: HTMLElement | null; mediaId: number } | null>(null)
+  useEffect(() => {
+    addToListOpenerRef.current = addToListMedia
+      ? { el: document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null, mediaId: addToListMedia.id }
+      : null
+  }, [addToListMedia])
+  // Closes the sheet and puts the focus back where it came from: the
+  // opener, or, when that is no longer on the page, the title's own card.
+  // (The sheet's controls go with it, and the focus would fall to the page
+  // body.) Not for a press on the scrim: a pointer has just said where the
+  // viewer is.
+  const closeAddToList = useCallback(() => {
+    const from = addToListOpenerRef.current
+    setAddToListMedia(null)
+    if (!from) return
+    const back = from.el?.isConnected
+      ? from.el
+      : document.querySelector<HTMLElement>(`[data-media-id="${from.mediaId}"] :is(.card-open, .mlr-main, .search-best-open)`)
+    back?.focus({ preventScroll: true })
+  }, [])
   // Phase 6 — Collections modal open state. Triggered by the
   // "+ New Collection" button in CollectionsView OR by future
   // global-action shortcuts (Ctrl+Shift+N).
@@ -3285,11 +3310,14 @@ export default function App() {
         // While a cast/AirPlay receiver is active, Escape
         // must NOT unmount it (that kills the cast) — fall through to the
         // normal app navigation below instead.
-        if ((playerTarget || playerLoading) && !playerRemoteActiveRef.current) closePlayer(true)
         // The add-to-list sheet had no Escape of its own, so the key went
         // to the page behind it: on the search page it cleared the words,
-        // or went Back, with the sheet still up. Escape closes the sheet.
-        else if (addToListMedia) setAddToListMedia(null)
+        // or went Back, with the sheet still up. Escape closes the sheet,
+        // and before anything else: it is what is on top (a player
+        // minimized under it used to be closed first, with the sheet left
+        // up).
+        if (addToListMedia) closeAddToList()
+        else if ((playerTarget || playerLoading) && !playerRemoteActiveRef.current) closePlayer(true)
         else if (view === 'search') {
           // Not behind anything else that is over the page either.
           if (pageCovered()) return
@@ -3350,7 +3378,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, playerLoading, searchQuery, view, handleBack, contextMenu, addToListMedia, user, profilesGateOpen, pinTarget, closePlayer, clearSearch, handleNavigate])
+  }, [playerTarget, playerLoading, searchQuery, view, handleBack, contextMenu, addToListMedia, closeAddToList, user, profilesGateOpen, pinTarget, closePlayer, clearSearch, handleNavigate])
 
   // Session expiry. /api/auth/me is validated once at mount (below), so a
   // long-lived tab whose session expired mid-session never re-checked: it kept
@@ -7664,7 +7692,7 @@ export default function App() {
                     await addToWatchlist(activeProfileId, l.id, addToListMedia.id)
                     const tId = nextToastId()
                     setToasts(prev => [...prev, { id: tId, message: `Added to "${l.name}"`, type: 'success' }])
-                    setAddToListMedia(null)
+                    closeAddToList()
                   } catch (err) {
                     window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
                   } finally {
@@ -7677,7 +7705,7 @@ export default function App() {
               </button>
             ))}
             <button
-              onClick={() => setAddToListMedia(null)}
+              onClick={closeAddToList}
               className="w-full mt-3 py-2 text-white/60 hover:text-white text-sm transition-colors"
             >
               Cancel

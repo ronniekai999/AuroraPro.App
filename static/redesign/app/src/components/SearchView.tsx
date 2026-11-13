@@ -339,7 +339,10 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   // got round to. (The palette's searchStatusMessage held this rule.)
   const settled = !!q && answered?.query === q && answered.described === described
   const searching = loading || (!!q && !settled)
-  const failedNow = searching ? null : failed
+  // (Nor with the field emptied: the effect that forgets the failure runs
+  // after that commit too, and "The search did not work." showed for a
+  // frame over an empty field.)
+  const failedNow = searching || !q ? null : failed
   // On offer once the title search for these words has answered, and until
   // the description search has been asked for.
   const canDescribe = !!onDescribe && !!q && !searching && !described && !failedNow

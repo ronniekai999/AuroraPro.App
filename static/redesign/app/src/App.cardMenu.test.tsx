@@ -471,6 +471,78 @@ describe('Play on the poster and the menu agree', () => {
     await waitFor(() => expect(player()).toBeNull(), find)
   })
 
+  // The add-to-list sheet is over the page, and over a player minimized on
+  // it. Escape closed the player first and left the sheet up, and when it
+  // did close the sheet the focus fell to the page body.
+  it('Escape closes the add-to-list sheet before a player that is on, and hands the focus back to the button that opened its menu', async () => {
+    renderAt('/movies')
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Resume Half Watched' }, find))[0])
+    await waitFor(() => expect(player()).not.toBeNull(), find)
+    const { more, menu } = await openMenu('Half Watched')
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Add to a list…' }))
+    const sheet = () => screen.queryByRole('dialog', { name: 'Add "Half Watched" to a watchlist' })
+    await waitFor(() => expect(sheet()).not.toBeNull(), find)
+    // The viewer is in the sheet, on one of its buttons.
+    const cancel = within(sheet()!).getByRole('button', { name: 'Cancel' })
+    cancel.focus()
+    fireEvent.keyDown(cancel, { key: 'Escape' })
+    expect(sheet()).toBeNull()
+    expect(player()).not.toBeNull()
+    expect(document.activeElement).toBe(more)
+    // With the sheet gone the next Escape is the player's.
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    await waitFor(() => expect(player()).toBeNull(), find)
+  })
+
+  it('hands the focus to the title\'s own card when no control opened the sheet (a right click), and from Cancel too', async () => {
+    renderAt('/movies')
+    const card = (await screen.findAllByRole('button', { name: 'Resume Half Watched' }, find))[0].closest('[data-media-id]') as HTMLElement
+    const open = card.querySelector<HTMLElement>('.card-open')!
+    const sheet = () => screen.queryByRole('dialog', { name: 'Add "Half Watched" to a watchlist' })
+    const openSheet = async () => {
+      ;(document.activeElement as HTMLElement | null)?.blur()
+      fireEvent.contextMenu(card)
+      fireEvent.click(within(await screen.findByRole('menu', { name: 'Actions for Half Watched' }, find)).getByRole('menuitem', { name: 'Add to a list…' }))
+      await waitFor(() => expect(sheet()).not.toBeNull(), find)
+      within(sheet()!).getByRole('button', { name: 'Cancel' }).focus()
+    }
+    await openSheet()
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(sheet()).toBeNull()
+    expect(document.activeElement).toBe(open)
+    await openSheet()
+    fireEvent.click(within(sheet()!).getByRole('button', { name: 'Cancel' }))
+    expect(sheet()).toBeNull()
+    expect(document.activeElement).toBe(open)
+    // A press on the scrim moves no focus: the pointer has said where the viewer is.
+    await openSheet()
+    const before = document.activeElement
+    fireEvent.click(sheet()!.parentElement!)
+    expect(sheet()).toBeNull()
+    expect(document.activeElement === open && before !== open).toBe(false)
+  })
+
+  // The button that opened the sheet can be gone by the time it closes (the
+  // grid redrawn under it): the focus goes to the title's card as it is now.
+  it('hands the focus to the title\'s card when the button that opened the sheet is no longer on the page', async () => {
+    renderAt('/movies')
+    await screen.findAllByRole('button', { name: 'Resume Half Watched' }, find)
+    const { more, menu } = await openMenu('Half Watched')
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Add to a list…' }))
+    const sheet = () => screen.queryByRole('dialog', { name: 'Add "Half Watched" to a watchlist' })
+    await waitFor(() => expect(sheet()).not.toBeNull(), find)
+    // The grid becomes a list while the sheet is up: every card is a new row.
+    fireEvent.click(screen.getAllByRole('button', { name: 'List' })[0])
+    await waitFor(() => expect(document.querySelector('[data-browse-layout="list"]')).not.toBeNull(), find)
+    expect(more.isConnected).toBe(false)
+    within(sheet()!).getByRole('button', { name: 'Cancel' }).focus()
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(sheet()).toBeNull()
+    const row = document.querySelector(`[data-media-id="${HALF.id}"] .mlr-main`)
+    expect(row).not.toBeNull()
+    expect(document.activeElement).toBe(row)
+  })
+
   // Only the address change the typing itself made is let off: coming Back
   // to the search page later is a change of address like any other.
   it('and one started on a title opened from a search goes when the viewer goes Back to the results', async () => {

@@ -143,6 +143,10 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
   onFind?: (title: string) => void
 }) {
   const [filter, setFilter] = useState<Filter>('all')
+  // The filter as it stands when an answer lands, which can be after the
+  // viewer has changed it (the filters stay live while a delete is out).
+  const filterRef = useRef(filter)
+  useLayoutEffect(() => { filterRef.current = filter }, [filter])
   const heading = everyone ? 'Requests' : 'My requests'
   // The row whose delete was pressed and is waiting to be confirmed; the row
   // being worked on (one thing at a time on the page: a second press, on
@@ -220,7 +224,10 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
         setFocusTo({ kind: 'after', ids: [req.id, ...after] })
         onRequestMoved?.(req.id, 'processing')
         // Under any filter but All the row, now Processing, leaves the list.
-        setWrong({ id: req.id, says: 'It is with the downloader now and can no longer be deleted.', above: filter !== 'all' && filter !== 'processing' })
+        // Judged by the filter in force now, not at the press: where the
+        // words are drawn first is where they are announced.
+        const shown = filterRef.current
+        setWrong({ id: req.id, says: 'It is with the downloader now and can no longer be deleted.', above: shown !== 'all' && shown !== 'processing' })
       } else {
         setWrong({ id: req.id, says: 'It could not be deleted. Try again in a moment.' })
       }

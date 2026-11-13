@@ -556,6 +556,19 @@ describe('what the page says in the commit a key lands in, before the search has
     expect(samples.some(c => c.failed)).toBe(false)
   })
 
+  it('does not show a failure over a field that has been emptied', async () => {
+    const { rerender } = render(page({ query: 'har' }))
+    await settle(300)
+    asks[0].fail(new Error('HTTP 503'))
+    await settle()
+    expect(document.querySelector('[data-search-failed]')).not.toBeNull()
+    samples.length = 0
+    rerender(page({ query: '' }))
+    expect(samples.length).toBeGreaterThan(0)
+    expect(samples.map(c => c.status)).toEqual(samples.map(() => 'Type a title, or describe what you are in the mood for'))
+    expect(samples.some(c => c.failed)).toBe(false)
+  })
+
   it('does not say a search by description found nothing in the commit it is asked for', async () => {
     const { rerender } = render(page({ query: 'cozy' }))
     await settle(300)
