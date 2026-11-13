@@ -1,0 +1,10 @@
+{
+  "sha": "8d7340315a9456ec4513c33459b9bad39eba0bc3",
+  "verdict": "lows-only",
+  "summary": "Fourth independent fresh-context adversarial review of the complete diff a98a841..8d73403 (after three earlier rounds whose medium findings were fixed). No critical/high/medium. Lows left as follow-ups: a record of an older success can stand in for this tab's pre-hand-off refusal; the Admin page's Update Now can still restart Aurora mid-restore (timer warned about, button not); a reload after success can stay signed in on a restricted profile for up to a token lifetime; a tab closed mid-upload leaves a long 'Asking Aurora' note; a duplicated tab can mark a live upload ended; test gaps (timeout path, markRestoreRequestEnded call, hook's settle call, aside's running term). Verified: go build/vet, restore tests under -race, internal/api against real Postgres incl. the client-leaves-after-wipe test, vitest 3434, tsc, eslint.",
+  "reviewer": "fresh-context-review-4",
+  "findings": "6",
+  "diff_digest": "2094a3edcf6baec06d55a293352a9c2be954ac4db87e8e273fb70c2268b2e1f6",
+  "branch": "claude/gallant-goodall-b3zxnn",
+  "recorded_at": "2026-11-13T18:03:45Z"
+}
