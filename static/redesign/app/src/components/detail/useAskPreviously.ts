@@ -220,11 +220,14 @@ export function useAskPreviously({
       // the model was running. Reload first so no stale unsafe turn remains.
       if (caught instanceof APIError && caught.status === 409) await loadConversation()
       if (isCurrent(capturedIdentity, controller)) {
-        // The server's 409s here are races (the question already being
-        // answered, the conversation or the viewing progress moving
-        // meanwhile), and the conversation has just been reloaded above, so
-        // asking again works.
-        setSendError(failureWords(caught, 'answer that', { status: { 409: 'That could not be answered just then. Ask again.' } }) ?? 'Could not answer that.')
+        // The server's 409s here are of two kinds, with no reason to tell them
+        // apart: races (the question already being answered, the
+        // conversation or the viewing progress moving meanwhile), which
+        // asking again fixes now that the conversation has been reloaded
+        // above, and Ask Previously being unavailable for the title
+        // (no_history, insufficient_overviews), which it does not. The
+        // sentence is true of both.
+        setSendError(failureWords(caught, 'answer that', { status: { 409: 'That could not be answered just then. Ask again; if it keeps failing, Ask Previously may not be available for this title now.' } }) ?? 'Could not answer that.')
       }
     } finally {
       if (isCurrent(capturedIdentity, controller)) {

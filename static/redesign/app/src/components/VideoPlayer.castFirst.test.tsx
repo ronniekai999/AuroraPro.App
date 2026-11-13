@@ -847,7 +847,7 @@ describe('Successful ACK and receiver status association', () => {
     const element = () => <VideoPlayer target={movie} onClose={() => {}} onToast={onToast} />
     const view = render(element()); await bootHls()
     fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
-    expect(onToast).toHaveBeenCalledWith('Too many streams are running. Close one you have open on another device or tab, or try again later.', 'error')
+    expect(onToast).toHaveBeenCalledWith('Too many streams are running. Close one you have open, or try again later.', 'error')
     expect(onToast.mock.calls.flat().join(' ')).not.toMatch(/Too many tries|maximum transcode/)
   })
 

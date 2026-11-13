@@ -354,10 +354,26 @@ describe('RecapModal Ask Previously', () => {
 		await user.click(screen.getByRole('button', { name: 'Ask Previously' }))
 		await user.type(await screen.findByRole('textbox', { name: 'Ask about what you’ve watched' }), 'What changed?')
 		await user.keyboard('{Enter}')
-		// A race the reload has settled: asking again works, and the page says so.
-		expect(await screen.findByText('That could not be answered just then. Ask again.')).toBeInTheDocument()
+		// A race the reload has settled: asking again works; the sentence is
+		// also true when it does not (the case below).
+		expect(await screen.findByText('That could not be answered just then. Ask again; if it keeps failing, Ask Previously may not be available for this title now.')).toBeInTheDocument()
 		expect(screen.queryByText(/viewing progress changed/)).toBeNull()
 		expect(screen.queryByText('Unsafe E10 question')).not.toBeInTheDocument()
+	})
+
+	// A 409 that asking again does not fix: the server says Ask Previously
+	// is unavailable for the title. The sentence does not promise a retry.
+	it('says an unavailable answer without promising that asking again works', async () => {
+		const user = userEvent.setup()
+		const e5 = { episode_id: 105, season: 1, episode: 5 }
+		api.getRecapConversation.mockResolvedValue({ available: true, can_ask: true, turns: [], current_up_to: e5, hidden_turn_count: 0 })
+		api.askPreviously.mockRejectedValueOnce(new api.APIError(409, 'Ask Previously is unavailable: no_history'))
+		renderModal({ upTo: e5 })
+		await user.click(screen.getByRole('button', { name: 'Ask Previously' }))
+		await user.type(await screen.findByRole('textbox', { name: 'Ask about what you’ve watched' }), 'Who is Cole?')
+		await user.keyboard('{Enter}')
+		expect(await screen.findByText('That could not be answered just then. Ask again; if it keeps failing, Ask Previously may not be available for this title now.')).toBeInTheDocument()
+		expect(screen.queryByText(/no_history/)).toBeNull()
 	})
 
 	it('keeps unavailable saved history manageable without exposing the composer', async () => {

@@ -219,6 +219,7 @@ describe('the ways into a party', () => {
   it.each([
     ['ended', { ok: false, error: 'No party is using that code right now.', reason: 'http_404' }],
     ['a room with no live party', { ok: false, error: 'That code is a persistent room; no live session right now.', reason: 'offline_room' }],
+    ['a code that is not a code', { ok: false, error: 'Party code must be 6 letters or digits.', reason: 'invalid_code' }],
   ])('stops offering a party that has %s', async (_case, refused) => {
     cacheLastParty({ code: 'LAST01', partyName: 'Friday crew', userId: 1, wasHost: false })
     render(<TogetherView {...props({ onJoinParty: async () => refused })} />)

@@ -582,10 +582,12 @@ async function attemptPlay(
 /** The server refuses a new stream with a 429 for a cap, with no reason and
  *  no Retry-After: the person's own ("close one and try again") or the
  *  server's ("try again later"). Nobody made repeated tries, and for their
- *  own cap waiting does nothing, so it is said for both causes. Used for
- *  the session a playback starts and the stream a cast is minted. */
+ *  own cap waiting does nothing, so it is said for both causes. The stream
+ *  to close can be this tab's own (a cast refused under a cap of one), so
+ *  the sentence does not say where it is. Used for the session a playback
+ *  starts and the stream a cast is minted. */
 const STREAM_CAP_OVERRIDE = {
-  status: { 429: 'Too many streams are running. Close one you have open on another device or tab, or try again later.' },
+  status: { 429: 'Too many streams are running. Close one you have open, or try again later.' },
 }
 
 export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onPartyAdvance, onMinimizedChange, onRemoteActiveChange,

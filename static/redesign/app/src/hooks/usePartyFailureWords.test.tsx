@@ -5,13 +5,13 @@
 // has ended", "pq: …") is written for a log.
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { APIError, NetworkError, apiFetch } from '@/lib/api'
+import { APIError, NetworkError, apiFetch, getStoredUser } from '@/lib/api'
 import { useParty } from './useParty'
 
 vi.mock('@/lib/api', async importOriginal => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   apiFetch: vi.fn(),
-  getStoredUser: () => ({ id: 1 }),
+  getStoredUser: vi.fn(() => ({ id: 1 })),
   refreshAccessToken: async () => true,
 }))
 vi.mock('@/lib/voice', () => ({
@@ -38,6 +38,7 @@ beforeEach(() => {
   Socket.all = []
   vi.stubGlobal('WebSocket', Socket)
   vi.mocked(apiFetch).mockReset()
+  vi.mocked(getStoredUser).mockImplementation(() => ({ id: 1 }) as ReturnType<typeof getStoredUser>)
   localStorage.clear()
 })
 afterEach(() => { vi.unstubAllGlobals() })
@@ -105,5 +106,15 @@ it('marks a code that is not six letters or digits', async () => {
   await act(async () => { said = await result.current.join('AB') })
   expect(said).toEqual({ ok: false, error: 'Party code must be 6 letters or digits.', reason: 'invalid_code' })
   expect(apiFetch).not.toHaveBeenCalled()
+  unmount()
+})
+
+it('marks a join with nobody signed in', async () => {
+  vi.mocked(apiFetch).mockResolvedValue({ type: 'active' })
+  vi.mocked(getStoredUser).mockImplementation(() => null)
+  const { result, unmount } = renderHook(() => useParty(1, 3))
+  let said: { ok: boolean; error?: string; reason?: string } | undefined
+  await act(async () => { said = await result.current.join('ABC123') })
+  expect(said).toEqual({ ok: false, error: 'You must be signed in to join a party.', reason: 'signed_out' })
   unmount()
 })
