@@ -3899,9 +3899,10 @@ export default function App() {
   // commit, while its effect still counts it as current, and put state back
   // (My requests' list set empty, so never asked for again, and the next
   // sign-in was told nothing had been requested). A sign-out has the same
-  // window and no second clear of its own, but nothing it starts lands in
-  // it every time (and a request it leaves out usually ends in an expiry,
-  // which brings one).
+  // window and no second clear: nothing it starts lands in it every time,
+  // and an expiry one of its requests brings runs one only when announced
+  // before the sign-out's commit (after it, the tab is signed out and the
+  // listener ignores it).
   useEffect(() => {
     if (expiries === expiriesClearedRef.current) return
     expiriesClearedRef.current = expiries

@@ -1074,11 +1074,12 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     title's hydration refused by the 401, on a Back or Forward to
     `/title/:id`, goes Home, so the address kept is Home's). A sign-out has
     the same window before its commit, with no request that lands in it every
-    time, and no second clear of its own (a request it leaves out usually ends
-    in an expiry, which brings one). A `/me` check that fails without the
-    server ending the session (a network error or a 5xx, at startup or after
-    another tab changed the stored user) drops to the sign-in page with a bare
-    `setUser(false)`: only the signed-out effects run (Tonight's hero,
+    time, and no second clear: an expiry one of its requests brings runs one
+    only when announced before the sign-out's commit (after it, the tab is
+    signed out and the expiry is ignored). A `/me` check that fails without
+    the server ending the session (a network error or a 5xx, at startup or
+    after another tab changed the stored user) drops to the sign-in page with
+    a bare `setUser(false)`: only the signed-out effects run (Tonight's hero,
     Continue Watching and its wait, the search field's words, the open
     questions, the toasts, the badge) and, on an account with profiles, the
     resets of the profile going to null; the party is not left there. A push

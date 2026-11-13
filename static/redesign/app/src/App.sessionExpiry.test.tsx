@@ -557,11 +557,14 @@ describe('a watch party across an expiry', () => {
 // next sign-in, and two things after that page is up used to forget it.
 // The expiry's second clear runs in the passive effects of the commit that
 // draws the page, so the page can be up, and pressed, before it; and an
-// expiry can be announced again once the page is up (here, as in the field,
-// a request of the ended session has its refresh refused after the first
-// announcement, and api.ts announces once per sign-in), which ran the whole
-// handler again. Recorded here inside that commit, before its effects; the
-// test fails if either forgets it.
+// expiry can be announced again once the page is up, which ran the whole
+// handler again. In the field that is a tab signed out another way first
+// (another tab's sign-out, say) whose own request then has its refresh
+// refused; api.ts announces once per sign-in, so an expiry it announced is
+// not followed by a second. Here the first announcement is the test's own,
+// which that latch does not see, and a request of the ended session brings
+// the second. The intent is recorded inside the commit that first draws the
+// page, before its effects; the test fails if either forgets it.
 describe('the TV intent recorded on the sign-in page an expiry puts up', () => {
   it('takes the next sign-in to pair the TV', async () => {
     const page = renderApp('/')
