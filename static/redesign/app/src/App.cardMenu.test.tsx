@@ -126,7 +126,7 @@ function stubServer({ bound: boundAt = 1, role = 'user', noProfiles = false } = 
    *  words, or with the connection lost (fetch rejects). */
   /** Each removal of a title from the library, by its path. */
   const mediaDeletes: string[] = []
-  const failing: { path: RegExp; how: { status: number; words: string } | 'network' }[] = []
+  const failing: { path: RegExp; how: { status: number; words: string } | 'network'; once?: boolean }[] = []
   const parties: unknown[] = []
   const holds = new Map<string, Promise<void>>()
   const json = (body: unknown, status = 200) =>
@@ -152,7 +152,9 @@ function stubServer({ bound: boundAt = 1, role = 'user', noProfiles = false } = 
       bound = Number(activate[1])
       return new Response(null, { status: 204 })
     }
-    const failed = failing.find(f => f.path.test(p))?.how
+    const failure = failing.find(f => f.path.test(p))
+    if (failure?.once) failing.splice(failing.indexOf(failure), 1)
+    const failed = failure?.how
     // A failing answer can be kept back too (`hold` with its path).
     if (failed) { const kept = holds.get(p); if (kept) await kept }
     if (failed === 'network') throw new TypeError('Failed to fetch')
@@ -181,7 +183,9 @@ function stubServer({ bound: boundAt = 1, role = 'user', noProfiles = false } = 
     if (p === '/api/auth/setup-status') return json({ has_users: true })
     // `noProfiles`: an account that has made none (the server acts as a stand-in).
     if (p === '/api/profiles') return json(noProfiles ? [] : [PARENT, KID])
-    if (p === '/api/profiles/active' && noProfiles) return json({ error: 'no profile' }, 404)
+    // The server answers it with its stand-in (`ResolveActingProfile`: the
+    // account's id and nothing else, id 0).
+    if (p === '/api/profiles/active' && noProfiles) return json({ id: 0, user_id: 1, name: '', is_default: false, created_at: '0001-01-01T00:00:00Z', updated_at: '0001-01-01T00:00:00Z' })
     if (p === '/api/profiles/active') return json(bound === 1 ? PARENT : KID)
     if (/^\/api\/profiles\/\d+\/library$/.test(p)) {
       libraryReads.n++
@@ -268,6 +272,8 @@ function stubServer({ bound: boundAt = 1, role = 'user', noProfiles = false } = 
     get libraryReads() { return libraryReads.n },
     /** The title page's read of a title fails from now on (see `failing`). */
     failDetail(how: { status: number; words: string } | 'network') { failing.push({ path: /^\/api\/media\/\d+$/, how }) },
+    /** The title page's next read of a title fails, once. */
+    failDetailOnce(how: { status: number; words: string } | 'network') { failing.push({ path: /^\/api\/media\/\d+$/, how, once: true }) },
     /** Requests to `path` fail from now on (see `failing`). */
     failAt(path: RegExp, how: { status: number; words: string } | 'network') { failing.push({ path, how }) },
     hold(path: string) {
@@ -1437,13 +1443,16 @@ describe('what the app says when it cannot', () => {
 describe('a party join that did not happen', () => {
   const RAW = 'pq: That code is a persistent room; raw words'
   it.each([
-    ['offline_room', 'Room MOON42 is offline — no live session right now. Ask the host to start a watch party.'],
+    ['offline_room', 'Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.'],
     ['http_404', 'No party is using the code MOON42 right now.'],
     ['network', 'Could not reach the server. Check the connection and try again.'],
     ['invalid_code', 'A party code is 6 letters or digits.'],
     ['signed_out', 'Sign in to join a party.'],
-    ['some_reason_not_known_yet', 'Could not join party MOON42 just now.'],
-    [undefined, 'Could not join party MOON42 just now.'],
+    // "Just now" only for a server failure.
+    ['http_502', 'Could not join party MOON42 just now.'],
+    ['http_409', 'Could not join party MOON42.'],
+    ['some_reason_not_known_yet', 'Could not join party MOON42.'],
+    [undefined, 'Could not join party MOON42.'],
   ])('from Tonight\'s strip, reason %s', async (reason, says) => {
     partyStub.join = async () => ({ ok: false, error: RAW, ...(reason ? { reason } : {}) })
     renderAt('/', { before: server => server.live.push({ code: 'MOON42', host_user_id: 9, party_name: '', media_title: 'Night Train', media_poster: '', participant_count: 2, max_participants: 0, is_playing: true, started_at: NOW }) })
@@ -1453,12 +1462,16 @@ describe('a party join that did not happen', () => {
   })
 
   it.each([
-    ['offline_room', 'Room NEWONE is offline — no live session right now. Ask the host to start a watch party.'],
-    ['http_404', 'No party is using the code NEWONE right now.'],
-    [undefined, 'Could not join party NEWONE just now.'],
-  ])('from a party link, reason %s', async (reason, says) => {
+    ['p', 'offline_room', 'Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.'],
+    ['p', 'http_404', 'No party is using the code NEWONE right now.'],
+    ['p', undefined, 'Could not join party NEWONE.'],
+    // A room link is not "offline" whatever the failure: the reason decides.
+    ['r', 'offline_room', 'Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.'],
+    ['r', 'network', 'Could not reach the server. Check the connection and try again.'],
+    ['r', 'http_404', 'No party is using the code NEWONE right now.'],
+  ])('from a /%s/ link, reason %s', async (kind, reason, says) => {
     partyStub.join = async () => ({ ok: false, error: RAW, ...(reason ? { reason } : {}) })
-    window.history.replaceState(null, '', '/p/NEWONE')
+    window.history.replaceState(null, '', `/${kind}/NEWONE`)
     renderAt('/')
     await screen.findByText(says, {}, find)
     expect(document.body.textContent).not.toContain('raw words')
@@ -1489,5 +1502,53 @@ describe('the open title\'s 404 across a switch that changes nothing', () => {
     // The switch ends on Parent; the title is read again, and its 404 leaves.
     await screen.findByText('This title is not available.', {}, find)
     await waitFor(() => expect(screen.queryByRole('heading', { level: 1, name: FRESH.title })).toBeNull(), find)
+  })
+  // The 404 lands after the refused attempt has ENDED (its "Couldn't
+  // switch" said): no attempt is left to read the title again, so the
+  // drop reads it again at once, and its 404 leaves.
+  it('is read again at once when it lands after the refused switch has ended, and the page is left', async () => {
+    const server = renderAt('/movies')
+    await screen.findAllByRole('button', { name: 'More actions for Never Started' }, find)
+    const releaseRead = server.hold(`/api/media/${FRESH.id}`)
+    server.failDetail({ status: 404, words: 'not found' })
+    fireEvent.click(document.querySelector(`[data-media-id="${FRESH.id}"] .card-open`)!)
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: FRESH.title })).toBeInTheDocument(), find)
+    server.activation.fails = true
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Watching as' }, find)).getByRole('button', { name: /Kid/ }))
+    await screen.findByText("Couldn't switch to Kid", {}, find)
+    releaseRead()
+    await screen.findByText('This title is not available.', {}, find)
+    await waitFor(() => expect(screen.queryByRole('heading', { level: 1, name: FRESH.title })).toBeNull(), find)
+  })
+
+  // A dropped 404 after the attempt ended, whose read again finds the title
+  // (the 404 was not this profile's): the page stays, and nothing is left
+  // set for the next attempt, whose end reads nothing again.
+  it('leaves nothing set for the next attempt', async () => {
+    const server = renderAt('/movies')
+    await screen.findAllByRole('button', { name: 'More actions for Never Started' }, find)
+    const releaseRead = server.hold(`/api/media/${FRESH.id}`)
+    server.failDetailOnce({ status: 404, words: 'not found' })
+    fireEvent.click(document.querySelector(`[data-media-id="${FRESH.id}"] .card-open`)!)
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: FRESH.title })).toBeInTheDocument(), find)
+    server.activation.fails = true
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Watching as' }, find)).getByRole('button', { name: /Kid/ }))
+    await screen.findByText("Couldn't switch to Kid", {}, find)
+    const reads = () => server.asks.filter(a => a === `/api/media/${FRESH.id}`).length
+    const before = reads()
+    releaseRead()
+    // Read again at once, and found: the page stays.
+    await waitFor(() => expect(reads()).toBe(before + 1), find)
+    await act(async () => { await new Promise(done => setTimeout(done, 100)) })
+    expect(screen.getByRole('heading', { level: 1, name: FRESH.title })).toBeInTheDocument()
+    // Another attempt, refused: its end reads nothing again.
+    server.activation.fails = true
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Watching as' }, find)).getByRole('button', { name: /Kid/ }))
+    await waitFor(() => expect(screen.getAllByText("Couldn't switch to Kid").length).toBeGreaterThan(1), find)
+    await act(async () => { await new Promise(done => setTimeout(done, 200)) })
+    expect(reads()).toBe(before + 1)
   })
 })

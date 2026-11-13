@@ -193,23 +193,24 @@ const PREFETCH_BY_VIEW: Record<string, keyof typeof VIEW_LOADERS> = {
   library: 'library', search: 'search', members: 'members',
   together: 'together', profile: 'profile', me: 'me', detail: 'detail',
 }
-// What a party's join that did not happen says, by the `reason` the party
-// hook gives beside its words (never its words: they are its own to
-// reword). A reason not listed here gets the general sentence.
+// What a party's join that did not happen says, at App's entry points (the
+// bell, a calendar chip, Tonight's strip, a party link), by the `reason` the
+// party hook gives beside its words, never by its words. A reason not
+// listed here gets the general sentence, which promises a retry ("just
+// now") only for a server failure.
 function joinRefusalWords(code: string, reason: string | undefined): string {
   switch (reason) {
+    case 'offline_room': return ROOM_OFFLINE
     case 'network': return 'Could not reach the server. Check the connection and try again.'
     case 'http_404': return `No party is using the code ${code} right now.`
     case 'invalid_code': return 'A party code is 6 letters or digits.'
     case 'signed_out': return 'Sign in to join a party.'
   }
-  return `Could not join party ${code} just now.`
+  if (reason && /^http_5\d\d$/.test(reason)) return `Could not join party ${code} just now.`
+  return `Could not join party ${code}.`
 }
-/** The join result's `reason`, where the party hook gives one. */
-const joinReason = (r: object): string | undefined => {
-  const reason = (r as { reason?: unknown }).reason
-  return typeof reason === 'string' ? reason : undefined
-}
+// A room with no party running, said as the party hook says it.
+const ROOM_OFFLINE = 'Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.'
 
 // Play found nothing it can play for a title (no season, no episode with a
 // file, no file): said as such, not as a failure to reach anything.
@@ -1884,13 +1885,10 @@ export default function App() {
         setNotifOpen(false)
         setPartyPanelOpen(true)
       } else {
-        const reason = joinReason(r)
         setToasts(prev => [...prev, {
           id: nextToastId(),
-          message: reason === 'offline_room'
-            ? `Room ${code} is offline — no live session right now. Ask the host to start a watch party.`
-            : joinRefusalWords(code, reason),
-          type: reason === 'offline_room' ? 'info' : 'error',
+          message: joinRefusalWords(code, r.reason),
+          type: r.reason === 'offline_room' ? 'info' : 'error',
         }])
       }
     }
@@ -3614,7 +3612,8 @@ export default function App() {
     const m = pathAfterBase.match(/^\/(p|r)\/([A-Za-z0-9]{6})$/)
     if (!m) return
     const code = m[2].toUpperCase()
-    const linkKind = m[1] // 'p' or 'r' — preflight clarifies anyway
+    // A party link (/p/) and a room link (/r/) join the same way; the join's
+    // own lookup says which it was.
     // Strip the code from the URL so a refresh doesn't re-trigger
     // the join (which would error "already in party" if still
     // active, or no-op if not).
@@ -3628,14 +3627,12 @@ export default function App() {
         // a generic error) so the user understands what they clicked.
         const id = nextToastId()
         // By the hook's reason, never its words.
-        const reason = joinReason(result)
-        const isOfflineRoom = linkKind === 'r' || reason === 'offline_room'
+        // A room link and a party link alike: the reason decides (a room's
+        // lost connection or 404 is not its being offline).
         setToasts(prev => [...prev, {
           id,
-          message: isOfflineRoom
-            ? `Room ${code} is offline — no live session right now. Ask the host to start a watch party.`
-            : joinRefusalWords(code, reason),
-          type: isOfflineRoom ? 'info' : 'error',
+          message: joinRefusalWords(code, result.reason),
+          type: result.reason === 'offline_room' ? 'info' : 'error',
         }])
       }
     }
@@ -4963,7 +4960,11 @@ export default function App() {
           // Across a profile switch the answer may be the previous
           // profile's: the switch's own re-read of the open title decides.
           if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) {
-            titleReadDroppedRef.current = true
+            // An attempt still out reads the title again when it ends
+            // (switchProfileWatched). One that has already ended cannot:
+            // read it again now.
+            if (isProfileSwitching()) titleReadDroppedRef.current = true
+            else setDetailReadNonce(n => n + 1)
             return
           }
           leaveMissingTitleRef.current(selectedMedia.id)

@@ -1,3 +1,4 @@
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 // The browser's own alert, confirm and prompt boxes are not the app's: they
@@ -139,27 +140,42 @@ function closing(code: string, open: number): number {
   return -1
 }
 
-/** A native box, however it is reached: `window.alert(`, `window?.confirm(`,
- *  `window['prompt']`, `globalThis.alert(`, the same through a cast
- *  (`(window as any).confirm(`), an alias made of one (`const ask =
- *  window.confirm`), or a bare `alert(…)` with anything in its parentheses.
- *  A method of the app's own named the same (the install prompt's
- *  `prompt()`, declared, or called on an object) is not one.
+/** What names the page's global object here: `window` (with a `!`), its
+ *  synonyms, and `document.defaultView`. */
+const WIN = String.raw`(?:window|globalThis|self|top|parent|document\s*(?:\?\.|\.)\s*defaultView)\s*!?`
+const BOX = String.raw`(?:alert|confirm|prompt)`
+const NATIVE = [
+  // `window.alert`, `window?.confirm`, `window!.prompt`, `document.defaultView!.confirm`.
+  new RegExp(String.raw`(?<![.\w$])${WIN}\s*(?:\?\.|\.)\s*${BOX}\b`),
+  // `window['prompt']`, `window?.["alert"]`.
+  new RegExp(String.raw`(?<![.\w$])${WIN}\s*(?:\?\.)?\[\s*['"\x60]${BOX}['"\x60]\s*\]`),
+  // Through parentheses, a cast or `satisfies`: `(window as any).confirm`,
+  // `((window as any)).confirm`, `(window!).confirm`, `(window satisfies
+  // Window)['alert']`. Not a cast whose type holds parentheses.
+  new RegExp(String.raw`\(+\s*${WIN}\s*(?:(?:as|satisfies)\s+[^()]*)?\)+\s*(?:(?:\?\.|\.)\s*${BOX}\b|(?:\?\.)?\[\s*['"\x60]${BOX}['"\x60]\s*\])`),
+  // A tagged template: alert`x`.
+  new RegExp(String.raw`(?<![.\w$])${BOX}\s*\x60`),
+]
+
+/** A native box, however it is reached: through the global object (see
+ *  NATIVE above), an alias made of one (`const ask = window.confirm`), or a
+ *  bare `alert(…)` or `alert?.(…)` with anything in its parentheses. A
+ *  method of the app's own named the same (the install prompt's `prompt()`,
+ *  declared, or called on an object) is not one.
  *
- *  It reads text, so it does not see: a destructured alias
- *  (`const { confirm: ask } = window`), `confirm.bind(window)` handed on,
- *  `window[key]` with a computed key, or any name built at run time. And
- *  the scanner reads JSX text as code: a `//` in JSX text would hide a call
- *  later on that line, a `/*` everything to the next `*\/` (no source has
- *  either today; the per-file probes below would show one that hid code
- *  there). */
+ *  It reads text, so it does not see a box reached through anything it
+ *  cannot follow by reading: an alias of the global object or of the
+ *  function (`const w = window as any; w.confirm(…)`, `const { confirm:
+ *  ask } = window`, `(0, alert)(…)`, `confirm.bind(window)` handed on), a
+ *  computed key or `Reflect.get(window, 'confirm')`, a cast whose type holds
+ *  parentheses, or a name built at run time. And the scanner reads JSX text
+ *  as code: a `//` in JSX text would hide a call later on that line, a `/*`
+ *  everything to the next `*\/`; the comparison with TypeScript's own
+ *  comments (the last test) would fail on either. */
 function usesNative(text: string): boolean {
   const code = withoutComments(text)
-  if (/\b(?:window|globalThis|self|top|parent)\s*(?:\?\.|\.)\s*(?:alert|confirm|prompt)\b/.test(code)) return true
-  if (/\b(?:window|globalThis|self|top|parent)\s*(?:\?\.)?\[\s*['"`](?:alert|confirm|prompt)['"`]\s*\]/.test(code)) return true
-  // Through a cast: `(window as any).confirm(`, `(window as Win)['alert']`.
-  if (/\(\s*(?:window|globalThis|self|top|parent)\s+as\s+[^()]*\)\s*(?:(?:\?\.|\.)\s*(?:alert|confirm|prompt)\b|(?:\?\.)?\[\s*['"`](?:alert|confirm|prompt)['"`]\s*\])/.test(code)) return true
-  for (const m of code.matchAll(/(?<![.\w$])(?:alert|confirm|prompt)\s*\(/g)) {
+  if (NATIVE.some(re => re.test(code))) return true
+  for (const m of code.matchAll(/(?<![.\w$])(?:alert|confirm|prompt)\s*(?:\?\.\s*)?\(/g)) {
     const open = m.index + m[0].length - 1
     const end = closing(code, open)
     // A declaration: `prompt(): …` or `prompt() {`.
@@ -194,6 +210,10 @@ describe('no native alert, confirm or prompt boxes', () => {
       'if (!confirm(String(n))) return', 'alert(`gone: ${name(x)}`)',
       // Through a cast.
       '(window as any).confirm("x")', "(window as unknown as Win)['alert']('x')", '(globalThis as Record<string, unknown>)?.prompt',
+      // A non-null window, doubled parentheses, `satisfies`, the document's
+      // view, an optional call and a tagged template.
+      'window!.confirm("x")', '(window!).alert("x")', '((window as any)).confirm("x")', "(window satisfies Window)['prompt']('x')",
+      'document.defaultView!.confirm("x")', 'document?.defaultView?.alert("x")', 'alert?.("x")', 'confirm`Leave?`',
     ]) {
       expect(usesNative(box), box).toBe(true)
     }
@@ -242,14 +262,40 @@ describe('no native alert, confirm or prompt boxes', () => {
 
   // Every file keeps its length and its newlines, and nothing changes but
   // to spaces. That alone would pass with code blanked too (blanked code is
-  // spaces as well): what pins that no code is blanked is the per-file
-  // probes above, a box on a statement line that the stripped text keeps.
+  // spaces as well): the per-file probes above cover five lines in four
+  // files, and the comparison with TypeScript's own comments below covers
+  // every character of every file.
   it('keeps every line of every file, and changes nothing but to spaces', () => {
     for (const [path, text] of sources()) {
       const code = withoutComments(text)
       expect(code.length, path).toBe(text.length)
       for (let k = 0; k < text.length; k++) {
         if (code[k] !== text[k] && (code[k] !== ' ' || text[k] === '\n')) throw new Error(`${path}: changed at ${k}`)
+      }
+    }
+  })
+
+  // What pins that no code is blanked: every character the scanner blanks
+  // lies inside a comment as TypeScript's own parser finds them (each
+  // node's leading and trailing comment ranges, JSX text being no comment).
+  it('blanks nothing outside the comments TypeScript finds, in every source file', () => {
+    for (const [path, text] of sources()) {
+      const file = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
+      const inComment = new Uint8Array(text.length)
+      const mark = (ranges: ts.CommentRange[] | undefined) => {
+        for (const r of ranges ?? []) inComment.fill(1, r.pos, r.end)
+      }
+      const visit = (node: ts.Node) => {
+        mark(ts.getLeadingCommentRanges(text, node.pos))
+        mark(ts.getTrailingCommentRanges(text, node.end))
+        for (const child of node.getChildren(file)) visit(child)
+      }
+      visit(file)
+      const code = withoutComments(text)
+      for (let k = 0; k < text.length; k++) {
+        if (code[k] !== text[k] && !/\s/.test(text[k]) && !inComment[k]) {
+          throw new Error(`${path}: code blanked at line ${text.slice(0, k).split('\n').length}`)
+        }
       }
     }
   })

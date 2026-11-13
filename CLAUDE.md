@@ -2025,21 +2025,29 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   a secondary line (`serverSaidForAdmin`); views not yet moved onto the
   helper still show it (known gap until they are). The browser's own alert,
   confirm and prompt boxes are not used: `noNativeDialogs.test.ts` reads
-  every source file with a scanner that, in today's sources, blanks
-  comments only (it knows strings, template literals, regular expressions
-  and both comment kinds; per-file probes pin that no code is blanked),
-  with a list of files still being moved off them. It does not see a
-  destructured alias, a `.bind`, a computed key or a name built at run
-  time, and JSX text holding `//` or `/*` would hide code from it. The
-  app's own question (`ConfirmDialog`, one state in App) is cleared by a
-  sign-out, an expiry and a profile switch. A title page whose title
+  every source file with a scanner that blanks comments only (it knows
+  strings, template literals, regular expressions and both comment kinds;
+  a test compares what it blanks with TypeScript's own comment ranges over
+  every source file, so that holds for today's sources), with a list of
+  files still being moved off them. It matches written forms, so it does
+  not see a box reached by another route: an alias of `window` or of the
+  function, a computed key or `Reflect.get`, a cast whose type has
+  parentheses, or a name built at run time; JSX text holding `//` or `/*`
+  added later would hide code from it, and fail the TypeScript comparison.
+  The app's own question (`ConfirmDialog`, one state in App) is cleared by
+  a sign-out, an expiry and a profile switch. A title page whose title
   answers 404 is left (the step Back takes) and "This title is not
   available." is said where the viewer lands; a 404 that lands while a
   switch attempt is out is dropped, and the title is read again when the
-  attempt ends (`titleReadDroppedRef`), so one that changes nothing still
-  leaves. A party's join that did not happen is said by the reason the
+  attempt ends (`titleReadDroppedRef`, set only while an attempt is out);
+  one that lands after an attempt that started since its read has ended is
+  dropped and read again at once. So one that changes nothing still
+  leaves. A party join that did not happen, at App's entry points (the
+  bell, Tonight's live strip, the calendar, a `/p/` or `/r/` link), is said by the reason the
   party hook gives beside its words (`joinRefusalWords`), never by its
-  words; a reason not listed gets the general sentence.
+  words; "just now" only for a 5xx reason, and a reason not listed gets
+  the general sentence. Together shows the hook's own `error`, which is
+  the app's sentences, not the server's.
 - Pinned by `AuthView.test.tsx`, `Toast.test.tsx`, `lib/libraryUndo.test.ts`,
   `lib/devicePairing.test.ts`, `App.cardMenu.test.tsx` (a stub that holds
   and fails library writes), `App.profileSwitch.test.tsx` (a removal's toast

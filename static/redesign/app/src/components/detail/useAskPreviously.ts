@@ -222,11 +222,14 @@ export function useAskPreviously({
       if (isCurrent(capturedIdentity, controller)) {
         // The server's 409s here are of two kinds, with no reason to tell them
         // apart: races (the question already being answered, the
-        // conversation or the viewing progress moving meanwhile), which
-        // asking again fixes now that the conversation has been reloaded
-        // above, and Ask Previously being unavailable for the title
-        // (no_history, insufficient_overviews), which it does not. The
-        // sentence is true of both.
+        // conversation or the viewing progress moving meanwhile), and Ask
+        // Previously being unavailable for the title (no_history,
+        // insufficient_overviews). Asking again means typing the question
+        // again, which sends a new request id. The panel's Retry resends
+        // this draft's id, so after a clear of the conversation it is refused
+        // each time (the server refuses an id it reserved before the clear,
+        // for good); asking again works. Known, not fixed here. The sentence
+        // says "Ask again", which is true of a race and says what to do.
         setSendError(failureWords(caught, 'answer that', { status: { 409: 'That could not be answered just then. Ask again; if it keeps failing, Ask Previously may not be available for this title now.' } }) ?? 'Could not answer that.')
       }
     } finally {

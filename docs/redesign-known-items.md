@@ -128,11 +128,18 @@ Fix or file each item, and delete it here when it is no longer true.
   next session on the tab (as before the redesign). The clear of an open
   question in `resetUserState` is not pinned on its own: both of its callers
   also sign the tab out, which runs the signed-out effect, whose clear is
-  pinned. The native-box test does not see a destructured alias, `.bind`, a
-  computed key, a name built at run time, or a call hidden behind JSX text
-  that contains `//` (to the end of its line) or `/*` (to the next `*/`). A
-  party socket's error frames are still the server's bare strings (they carry
-  no status or reason to word them by).
+  pinned. The native-box test matches written forms, so it does not see a
+  box reached by another route: an alias of `window` or of the function
+  (`const w = window`, a destructured name, `.bind`, `(0, alert)`), a
+  computed key or `Reflect.get`, a cast whose type has parentheses, a name
+  built at run time, or a call hidden behind JSX text that contains `//` (to
+  the end of its line) or `/*` (to the next `*/`). That its comment scanner
+  blanks no code is checked against TypeScript's own comment ranges over
+  today's sources; JSX text holding `//` or `/*` added later fails that
+  check. Ask Previously's Retry after the conversation was cleared fails
+  each time (it resends a request id the server refused for good); asking
+  the question again works. A party socket's error frames are still the
+  server's bare strings (they carry no status or reason to word them by).
 - Session expiry (older than the redesign): a session that expires signs the
   tab out without the reset an explicit sign-out runs. On an account with
   profiles the profile going away runs the switch's resets; while the app
