@@ -422,15 +422,16 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   is one visit's fact: a sign-out and a profile switch forget it, with the
   mark that the viewer is in the hero (`forgetHeroLeadWait`, called
   wherever Continue Watching's own answer is forgotten), so a return to the
-  same user and profile waits again. A session that expires is a bare
-  `setUser(false)`, not `resetUserState`, and while the app knows no
-  profile for the account no profile changes either, so one effect clears
-  the hero (its picks, its place in the slate, the catalog's stand-in),
-  Continue Watching and the wait whenever nobody is signed in: the next
-  sign-in on the tab used to be handed the last answer's title as the
-  hero's lead. That effect covers Tonight's hero only; what else that path
-  leaves in the tab is a gap older than this (see Known gaps). An answer
-  that arrives after the four seconds takes the hero over only while the
+  same user and profile waits again. A session that expires forgets it
+  too, with the rest of the user's state (`clearUserState`, see Known
+  gaps), and one effect also clears the hero (its picks, its place in the
+  slate, the catalog's stand-in), Continue Watching and the wait whenever
+  nobody is signed in, which covers the bare `setUser(false)` still left
+  (a `/me` check that fails without the session ending). An expiry used to
+  be that bare call too, and while the app knows no profile for the
+  account no profile changes either: the next sign-in on the tab was
+  handed the last answer's title as the hero's lead. An answer that
+  arrives after the four seconds takes the hero over only while the
   hero is still on the entry it opened on and the viewer has done nothing
   in it (pointer or focus in it, a pick chosen, the rotation paused).
   Otherwise the title comes up when the rotation next wraps round to it
@@ -461,10 +462,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   on sign-out), and holds the titles the server listed; a listed title's
   card can still be drawn from this browser's copy of it. Pinned by
   `App.tonight.test.tsx` and `App.profileSwitch.test.tsx`. Of what forgets
-  the wait, the switch's call and the signed-out effect are each pinned
-  alone (a switch away and back; an expiry on an account with no profile);
-  the call in `resetUserState` is not, since after a sign-out the other two
-  run as well.
+  the wait, the switch's call is pinned alone (a switch away and back); the
+  signed-out effect's and `clearUserState`'s are not, since an expiry (on an
+  account with no profile) and a sign-out each run both.
   When the binding cannot be read it shows no profile and opens
   the picker, which cannot be left without a pick, rather than guessing the
   default; if the profile list fails, nothing personalized loads at all. The
@@ -506,13 +506,14 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   title, a collection or My requests opened from the results
   (`keepSearch`), and go when the viewer leaves the search page any other
   way (a destination in the bar, Back out of the results), on a sign-out,
-  and when the session expires (`resetUserState` and the signed-out effect:
-  they used to outlive both, so the next account on the tab found them in
-  the bar and had a search run for them). The search effect starts after
-  the commit a key lands in, so until the answer for the words in the field
-  is in, asked the way they are being asked, the page is searching
-  (`settled`, `searching` in `SearchView`): it does not count the last
-  answer under the new words, show its failure, or offer anything for it.
+  and when the session expires (`clearUserState`, which both run, and the
+  signed-out effect: they used to outlive both, so the next account on the
+  tab found them in the bar and had a search run for them). The search
+  effect starts after the commit a key lands in, so until the answer for
+  the words in the field is in, asked the way they are being asked, the
+  page is searching (`settled`, `searching` in `SearchView`): it does not
+  count the last answer under the new words, show its failure, or offer
+  anything for it.
   Ctrl or Cmd K puts the focus in the search field (there is no palette;
   `lib/searchKeys.ts` moves the real focus through the results: Left and
   Right in drawn order, Down and Up by row on the page) and does nothing
@@ -992,21 +993,106 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     keeps writing progress for the outgoing profile and is refused.
   - The SPA does not re-read the session's profile after a 403
     `profile_restricted` on a data route.
-  - A session that expires (`SESSION_EXPIRED_EVENT`) signs the tab out with
-    a bare `setUser(false)`; `resetUserState` does not run. On an account
-    with profiles the profile going to null runs the switch's resets. While
-    the app knows no profile for the account (a new account before its
-    first progress write, or a tab that has not listed the profiles since)
-    nothing does, beyond Home's rails (`railsUserRef`), the notification
-    count, the search field's words, the toasts, and Tonight's hero,
-    Continue Watching and wait (the signed-out effects). What else App keeps for the previous user on that path (the
-    browse grids and their totals, an open title) has not been audited: the
-    next sign-in on the tab may be shown it until its own answers land. The
-    grids' totals are not kept per owner. What reads them: a grid's count
-    in the Library header and in the Filters sheet's "Show N movies"
-    button, the layout a grid opens with and whether it has an A to Z strip
-    (both by size), and Tonight's closing line, which falls back to them
-    while Home's own count has not answered.
+  - A session that expires (`SESSION_EXPIRED_EVENT`) leaves the watch party
+    and runs `clearUserState`: everything a sign-out clears except where the
+    user was. A sign-out's `resetUserState` is `clearUserState` plus that: the
+    address and the grids' sorts (a sign-out goes Home with the default sort),
+    and this browser's My Library snapshot, which a sign-out writes empty; an
+    expiry keeps all three, as it keeps the recent searches. The address is
+    kept because the expiry also fires at a cold load whose stored session is
+    dead, where it is a link just followed (a title, a TV's `/device?code=`)
+    that the sign-in then opens, and for the same person signing in again it
+    is the page they were on, its data asked for again (a grid from its first
+    page: Load More's depth is lost). The app cannot tell who signs in next,
+    so another account also lands on the previous one's address (its path can
+    name the title, collection or member page that one had open), sorts and
+    browser history for Back, with what is there asked for again under its own
+    session; a title it may not see sends it Home. The player is closed even
+    for the same person: mounted again at the sign-in, it booted the old title
+    before the profile was known. The same person is also out of the party (a
+    host hands it on; it is filed under their "Recently in" for a rejoin).
+    Every other open tab already took the expiry as a full sign-out, address
+    included (`endSession` clears the stored user, which is the cross-tab
+    logout signal). `clearUserState` also closes what is open over the page (a
+    card's menu, the add-to-list sheet, the watch-party composer, an admin's
+    manual match, a PIN prompt, the collections dialog, the bell's and the
+    server's panels, a forced picker): App owns their state, so the sign-in
+    page only hid them, after a sign-out in another tab too, and the next
+    account was shown them. Before this, an expiry was a bare
+    `setUser(false)`, and on an account the app knew no profile for little
+    reset (the signed-out effects' hero, Continue Watching, its wait, search
+    words and open questions, the toasts, and a cold load of Home's rails once
+    the next startup settled): the next account was shown the previous one's
+    grids and their totals (not asked for again until a live catalog update:
+    their effect fetches only a list not yet loaded), its open title, its
+    requests, its unread count, Home's rails until its own landed, and any
+    menu or dialog left open, had its title booted in the player, and was in
+    its watch party as it. When the next account had a profile, its startup
+    binding is not a switch, so the switch's resets did not run for it either.
+    An expiry clears once more after the commit that drops the signed-in app,
+    when every effect's cleanup has marked what it had out as cancelled: the
+    request whose refused refresh fires the expiry runs its own failure
+    handler right after the expiry's, before that commit, while its effect
+    still counts it as current, and it put state back (My requests' list set
+    empty, so never asked for again, and the next sign-in told nothing had
+    been requested). That second clear runs once per expiry, never because
+    `clearUserState` changed (it changes with every user object), or it would
+    run again for the account signed in next, at its sign-in and at every
+    `/me` another tab's write to the stored user brings. It also leaves alone
+    what the sign-in page records for the next sign-in, the TV intent: the
+    expiry forgets that at its moment, not in the second clear, which can run
+    after the page is up. An expiry announced while the tab is already signed
+    out is ignored (another tab's sign-out put the sign-in page up, then one
+    of this tab's requests had its refresh refused: api.ts announces once per
+    sign-in, per tab); running again, it forgot that intent. Pinned by
+    `App.sessionExpiry.test.tsx`, sampling every commit: an account with no
+    profile expires on Home, a grid, an open title or My requests, and another
+    account (with no profile, and with one) signs in; no commit shows the
+    first one's titles, request, grid total or unread count, and removing the
+    reset of the grids, the open title, the requests list (pinned only when
+    the next account has no profile: a profile changes the list's key), the
+    unread count or Home's rails fails it. Also pinned: a card's menu, the
+    composer and a PIN prompt open at the expiry are not drawn for the next
+    account; an expiry found by a request (opening My requests) leaves its
+    list to be asked for again, for either account; the account signed in
+    again keeps its player up when another tab writes the stored user; a TV
+    intent recorded as the sign-in page is first drawn survives the second
+    clear and a second announcement; the player is not booted again for either
+    account; the party's room is told the tab left; the same account is back
+    on its grid and its title with each asked for again; and a title link or a
+    `/device?code=` link followed at a cold load with a dead session opens
+    after the sign-in (the same-account and link cases fail if the expiry runs
+    `resetUserState`). Not pinned on this path, beyond what
+    `App.tonight.test.tsx` and `App.searchRequest.test.tsx` pin (the hero,
+    Continue Watching, its wait, the search field's words): the notification
+    list (the bell is never opened; the next sign-in's feed read also drops
+    it, after its first commit, or for an admin once its startup settles), the
+    rail buffers, the aborts, `libraryServerFor`, the described search's
+    answer, the hero's pause and pool generation, Home's error, the detail
+    fields, the party panel's flag and the other overlays. Still open: a
+    failure handler that navigates before that commit cannot be undone (a
+    title's hydration refused by the 401, on a Back or Forward to
+    `/title/:id`, goes Home, so the address kept is Home's). A sign-out has
+    the same window before its commit, with no request that lands in it every
+    time, and no second clear: an expiry one of its requests brings runs one
+    only when announced before the sign-out's commit (after it, the tab is
+    signed out and the expiry is ignored). A `/me` check that fails without
+    the server ending the session (a network error or a 5xx, at startup or
+    after another tab changed the stored user) drops to the sign-in page with
+    a bare `setUser(false)`: only the signed-out effects run (Tonight's hero,
+    Continue Watching and its wait, the search field's words, the open
+    questions, the toasts, the badge) and, on an account with profiles, the
+    resets of the profile going to null; the party is not left there. A push
+    subscription stays registered on the server for the expired account
+    (deleting it there needs the session that ended), so the device can keep
+    getting that account's pushes until the next sign-in, whose boot resync
+    posts the browser's subscription again and the server reassigns it to the
+    account now signed in (`ON CONFLICT (endpoint)`): that account gets pushes
+    on this device without having turned them on. True before this change too;
+    unsubscribing in the browser at the expiry would instead leave push off
+    for the same person after every expiry (the resync never subscribes). The
+    grids' genre filters and genre lists survive a sign-out and an expiry
+    alike.
 
 ### Member profiles and follows
 
@@ -1952,7 +2038,7 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   comes back to the front page, so the tab keeps that the viewer was on
   their way to pair (`rememberDeviceIntent`: a time in sessionStorage and
   nothing from the address; the destination is fixed). The next sign-in
-  uses it once; a sign-out and ten minutes forget it.
+  uses it once; a sign-out, an expiry and ten minutes forget it.
 - A toast is said to whoever is acting when it is raised. Toasts are
   dropped when nobody is signed in and when the account changes. Each
   takes the acting profile with its id (`nextToastId`, from a layout-effect
