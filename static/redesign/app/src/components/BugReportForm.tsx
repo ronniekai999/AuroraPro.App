@@ -26,7 +26,10 @@ import { Icon } from '@/components/Icon'
 // the chunk only ships when a user clicks Capture.
 
 // Match server-side limits (internal/api/feedback_handlers.go) so the
-// validation message is the same on both sides.
+// validation message is the same on both sides. The server counts bytes of
+// UTF-8 as it receives them, and a form's text goes out with every line
+// break as CR LF: so the form counts the same way (sentBytes), not in
+// JavaScript's string units.
 const MAX_TITLE_LEN = 200
 const MAX_DESC_LEN = 10_000 // lowered from 50k per deep-debug #23
 const MAX_NAME_LEN = 100
@@ -167,16 +170,28 @@ export interface BugReportFormOptions {
   // text is about, whatever the address bar has moved to since). The form
   // says that it carries them (see the heads-up).
   evidence?: BugReportEvidence
+  // What a capture of the page the form is on shows, said before one is
+  // taken. Over the app that is whatever is on screen; a page of its own
+  // says what it shows.
+  captureShows?: string
 }
 
 export interface BugReportEvidence { text: string; url: string }
 
+/** How many bytes a text field's value is when the server reads it: UTF-8,
+ *  with each line break sent as CR LF (a multipart form body does that to
+ *  every text value). A lone surrogate is sent as U+FFFD, three bytes, as
+ *  the encoder makes it. */
+export function sentBytes(value: string): number {
+  return new TextEncoder().encode(value.replace(/\r\n|\r|\n/g, '\r\n')).length
+}
+
 /** What is put between the person's description and the evidence. */
 const EVIDENCE_GAP = '\n\n'
 
-export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed = false, onDismissed, evidence }: BugReportFormOptions) {
+export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed = false, onDismissed, evidence, captureShows }: BugReportFormOptions) {
   // The description and the evidence share the server's limit.
-  const descriptionMax = Math.max(1, MAX_DESC_LEN - (evidence ? evidence.text.length + EVIDENCE_GAP.length : 0))
+  const descriptionMax = Math.max(1, MAX_DESC_LEN - (evidence ? sentBytes(EVIDENCE_GAP + evidence.text) : 0))
   const [name, setName] = useState(prefillName ?? '')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -936,11 +951,11 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       refuse('Description is required.', 'description')
       return
     }
-    if (trimmedTitle.length > MAX_TITLE_LEN) {
+    if (sentBytes(trimmedTitle) > MAX_TITLE_LEN) {
       refuse(`Title exceeds ${MAX_TITLE_LEN} characters.`, 'title')
       return
     }
-    if (trimmedDesc.length > descriptionMax) {
+    if (sentBytes(trimmedDesc) > descriptionMax) {
       refuse(`Description exceeds ${descriptionMax} characters.`, 'description')
       return
     }
@@ -1002,6 +1017,7 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
     handleStopRecording,
     // The fields' own.
     descriptionMax, carriesEvidence: !!evidence,
+    captureShows: captureShows ?? 'Captures show whatever is on screen now — library, currently playing media, profile info.',
     name, setName, title, setTitle, description, setDescription,
     attachment, attachmentPreviewURL,
     error, errorField, fieldRefusal, refilling, clearError, captureAnnounce,
@@ -1017,7 +1033,7 @@ export type BugReportFormState = ReturnType<typeof useBugReportForm>
  *  refusal and status lines, Cancel and Send. */
 export function BugReportFields({ form }: { form: BugReportFormState }) {
   const {
-    submitting, capturing, recording, titleInputRef, descriptionMax, carriesEvidence,
+    submitting, capturing, recording, titleInputRef, descriptionMax, carriesEvidence, captureShows,
     name, setName, title, setTitle, description, setDescription,
     attachment, attachmentPreviewURL,
     error, errorField, fieldRefusal, refilling, clearError, captureAnnounce,
@@ -1071,7 +1087,7 @@ export function BugReportFields({ form }: { form: BugReportFormState }) {
           className="w-full disabled:opacity-50 read-only:opacity-60"
         />
         <p className="text-ink-2 text-xs mt-1 tabular-nums">
-          {title.length} / {MAX_TITLE_LEN}
+          {sentBytes(title)} / {MAX_TITLE_LEN}
         </p>
       </div>
 
@@ -1084,6 +1100,9 @@ export function BugReportFields({ form }: { form: BugReportFormState }) {
           id="bug-desc"
           value={description}
           onChange={e => { setDescription(e.target.value); if (errorField === 'description' || (refilling && fieldRefusal?.field === 'description')) clearError() }}
+          // The browser counts string units here, never more than the
+          // bytes sent: a ceiling, with the true count in the line below
+          // and in the check on Send.
           maxLength={descriptionMax}
           required
           aria-invalid={errorField === 'description'}
@@ -1097,7 +1116,7 @@ export function BugReportFields({ form }: { form: BugReportFormState }) {
           className="w-full disabled:opacity-50 read-only:opacity-60 resize-y min-h-[120px]"
         />
         <p className="text-ink-2 text-xs mt-1 tabular-nums">
-          {description.length} / {descriptionMax}
+          {sentBytes(description)} / {descriptionMax}
         </p>
       </div>
 
@@ -1234,7 +1253,7 @@ export function BugReportFields({ form }: { form: BugReportFormState }) {
             warning further down (which reinforces the warning
             once they see what they captured). */}
         <p className="text-warn text-xs mt-1 leading-snug">
-          Captures show whatever is on screen now — library, currently playing media, profile info.
+          {captureShows}{' '}
           If you Record screen and choose to share tab or system audio in the browser's share
           dialog, that audio is recorded into the clip too. Review the thumbnail below before sending.
         </p>

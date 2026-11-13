@@ -16,7 +16,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { ErrorBoundary } from './ErrorBoundary'
 import { BugReportModal } from './BugReportModal'
-import { APIError } from '@/lib/api'
+import { APIError, SESSION_EXPIRED_EVENT } from '@/lib/api'
+import { codeSpan } from '@/lib/errorReport'
 
 const api = vi.hoisted(() => ({
   getBugReportConfig: vi.fn(),
@@ -25,6 +26,11 @@ const api = vi.hoisted(() => ({
 vi.mock('@/lib/api', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/lib/api')>()), ...api }))
 
 const MORGAN = { id: 1, username: 'morgan', email: 'morgan@example.test', role: 'user' }
+const ROBIN = { id: 2, username: 'robin', email: 'robin@example.test', role: 'user' }
+/** Where the app is served from. */
+const BASE = import.meta.env.BASE_URL
+/** Bytes as the server counts them: UTF-8, every line break sent as CR LF. */
+const bytesSent = (s: string) => new TextEncoder().encode(s.replace(/\r\n|\r|\n/g, '\r\n')).length
 
 function Throws(): never {
   throw new Error('Could not read the list of collections')
@@ -62,7 +68,7 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {})
   api.getBugReportConfig.mockReset().mockResolvedValue({ enabled: true })
   api.submitBugReport.mockReset().mockResolvedValue({ issue_url: 'https://example.test/issues/41', issue_number: 41 })
-  window.history.pushState({}, '', '/collections?sort=name')
+  window.history.pushState({}, '', `${BASE}collections?sort=name`)
 })
 afterEach(() => {
   vi.restoreAllMocks()
@@ -80,10 +86,10 @@ describe('the error screen: who is offered a report', () => {
     expect(api.getBugReportConfig).not.toHaveBeenCalled()
     expect(opener()).toBeNull()
     expect(panel()).toBeNull()
-    // The page is whole all the same.
+    // The page is whole all the same; its way out is the sign-in page.
     expect(screen.getByRole('heading', { level: 1, name: 'That did not load.' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Reload' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Go to Tonight' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Go to sign in' })).toBeInTheDocument()
   })
 
   it('offers nothing on a server that takes no reports', async () => {
@@ -126,7 +132,32 @@ describe('the error screen: who is offered a report', () => {
     expect(opener()).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
     expect(said()).toBe('')
+    // The line that would say why a report closed is in the page and in the
+    // accessibility tree while it is empty, so that its words are announced
+    // when they arrive; it is out of sight meanwhile.
+    const line = document.querySelector<HTMLElement>('[data-error-report-said]')!
+    expect(line).toHaveAttribute('role', 'status')
+    expect(line.style.display).not.toBe('none')
+    expect(line.style.visibility).not.toBe('hidden')
+    expect(line).toHaveStyle({ position: 'absolute', width: '1px', height: '1px', overflow: 'hidden' })
     expect(screen.getByRole('button', { name: 'Reload' })).toBeEnabled()
+  })
+
+  // The app's entries ask again each time the dialog is opened; so does
+  // this. A server that has stopped taking reports closes the panel.
+  it('asks the server again at each opening, and closes when reports have been turned off', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    crash()
+    await openPanel(user)
+    expect(api.getBugReportConfig).toHaveBeenCalledTimes(2)
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    api.getBugReportConfig.mockResolvedValue({ enabled: false })
+    await user.click(await screen.findByRole('button', { name: 'Report a problem' }))
+    expect(api.getBugReportConfig).toHaveBeenCalledTimes(3)
+    await waitFor(() => expect(panel()).toBeNull())
+    expect(said()).toBe('The report was closed because the server is not taking reports now.')
+    expect(opener()).toBeNull()
   })
 
   it('offers nothing to a session the server no longer knows', async () => {
@@ -164,6 +195,10 @@ describe('the error screen: reporting the problem', () => {
     const note = aside.querySelector('[data-evidence-note]')!
     expect(note).toHaveTextContent('This report also carries what the app saw, exactly as it is shown on this page: the error\'s text, the page\'s address, the time and the build. With the log, that can show which pages and titles were open.')
     expect(aside.textContent).not.toMatch(/never includes/i)
+    // What a capture shows is said for this page: not the app's library or
+    // what was playing, which are gone.
+    expect(aside).toHaveTextContent('A capture shows this page as it is now: the error and what the app saw. This panel is left out of it.')
+    expect(aside.textContent).not.toMatch(/currently playing media/)
   })
 
   // What is sent is what is shown: the lines under "What the app saw", as
@@ -179,12 +214,14 @@ describe('the error screen: reporting the problem', () => {
     await waitFor(() => expect(api.submitBugReport).toHaveBeenCalledTimes(1))
     const [sent] = api.submitBugReport.mock.calls[0] as [{ title: string; description: string; name?: string; attachment?: File; context?: { url?: string } }]
     expect(sent.title).toBe('Collections will not open')
-    expect(sent.description).toBe(`I clicked Collections and got this.\n\nWhat the app saw:\n${shown()}`)
+    // Each line as a code span: shown by the tracker as written, and acted
+    // on not at all.
+    expect(sent.description).toBe(`I clicked Collections and got this.\n\nWhat the app saw:\n${shown().split('\n').map(codeSpan).join('\n')}`)
     expect(shown().split('\n').slice(0, 2)).toEqual(['The page stopped while it was being drawn.', 'Could not read the list of collections'])
     expect(sent.name).toBe('morgan')
     expect(sent.attachment).toBeUndefined()
-    expect(sent.context?.url).toBe('/collections?sort=name')
-    expect(shown()).toContain('Page: /collections?sort=name · ')
+    expect(sent.context?.url).toBe(`${BASE}collections?sort=name`)
+    expect(shown()).toContain(`Page: ${BASE}collections?sort=name · `)
     // The rest of what every report carries is still there.
     expect(Object.keys(sent.context ?? {})).toEqual(expect.arrayContaining(['url', 'userAgent', 'clientTime']))
 
@@ -204,25 +241,44 @@ describe('the error screen: reporting the problem', () => {
     signedIn()
     crash()
     const aside = await openPanel(user)
-    window.history.pushState({}, '', '/title/123')
+    window.history.pushState({}, '', `${BASE}title/123`)
     await fill(user)
     await user.click(within(aside).getByRole('button', { name: 'Send report' }))
     await waitFor(() => expect(api.submitBugReport).toHaveBeenCalledTimes(1))
     const [sent] = api.submitBugReport.mock.calls[0] as [{ description: string; context?: { url?: string } }]
-    expect(sent.context?.url).toBe('/collections?sort=name')
+    expect(sent.context?.url).toBe(`${BASE}collections?sort=name`)
     expect(sent.description).not.toContain('/title/123')
   })
 
-  // The description and what the page adds to it share the server's limit.
-  it('leaves room in the description for what it adds', async () => {
+  // The description and what the page adds to it share the server's
+  // limit, which counts the bytes it receives: a description the form lets
+  // go is one the server takes, line breaks and accents included.
+  it('leaves room in the description for what it adds, counted as the server counts', async () => {
     const user = userEvent.setup()
     signedIn()
     crash()
     const aside = await openPanel(user)
-    const room = 10_000 - (`What the app saw:\n${shown()}`.length + 2)
+    await user.type(within(aside).getByLabelText(/^Title/), 'Collections will not open')
     const field = within(aside).getByLabelText(/^Description/)
-    expect(field).toHaveAttribute('maxlength', String(room))
-    expect(aside).toHaveTextContent(`0 / ${room}`)
+    const room = Number(aside.textContent!.match(/0 \/ (\d+)/)![1])
+    // Two lines of accented words, filled to the last byte.
+    const line = 'Élan café — the list stopped\n'
+    let text = line.repeat(Math.floor(room / bytesSent(line)))
+    text += 'x'.repeat(room - bytesSent(text))
+    expect(bytesSent(text)).toBe(room)
+    fireEvent.change(field, { target: { value: `${text}y` } })
+    expect(aside).toHaveTextContent(`${room + 1} / ${room}`)
+    await user.click(within(aside).getByRole('button', { name: 'Send report' }))
+    expect(within(aside).getByRole('alert')).toHaveTextContent(`Description exceeds ${room} characters.`)
+    expect(api.submitBugReport).not.toHaveBeenCalled()
+    fireEvent.change(field, { target: { value: text } })
+    expect(aside).toHaveTextContent(`${room} / ${room}`)
+    await user.click(within(aside).getByRole('button', { name: 'Send report' }))
+    await waitFor(() => expect(api.submitBugReport).toHaveBeenCalledTimes(1))
+    const [sent] = api.submitBugReport.mock.calls[0] as [{ description: string }]
+    // What goes out is exactly at the server's limit.
+    expect(bytesSent(sent.description)).toBe(10_000)
+    expect(sent.description.endsWith(shown().split('\n').map(codeSpan).join('\n'))).toBe(true)
   })
 
   it('shows a refused send where it was pressed, keeps the focus there, and sends once per press', async () => {
@@ -303,8 +359,11 @@ describe('the error screen: another tab changes who this browser is', () => {
     expect(said()).toBe('The report was closed because this browser is now on another profile.')
     expect(document.querySelector('[data-error-report-said]')).toHaveAttribute('role', 'status')
     expect(api.submitBugReport).not.toHaveBeenCalled()
-    // What it is offered now is the new session's to say.
-    await waitFor(() => expect(api.getBugReportConfig).toHaveBeenCalledTimes(2))
+    // The line that says why has the focus, so that it is what is read.
+    expect(document.querySelector('[data-error-report-said]')).toHaveFocus()
+    // What it is offered now is the new session's to say (asked when the
+    // page opened, when the report did, and now).
+    await waitFor(() => expect(api.getBugReportConfig).toHaveBeenCalledTimes(3))
     // A report started now starts empty, and says whose it will be.
     await user.click(await screen.findByRole('button', { name: 'Report a problem' }))
     expect(said()).toBe('')
@@ -343,20 +402,118 @@ describe('the error screen: another tab changes who this browser is', () => {
     expect(panel()).not.toBeNull()
     await act(async () => { land({ issue_url: '', issue_number: 43 }) })
     await waitFor(() => expect(panel()).toBeNull())
-    expect(said()).toBe('The report was closed because this browser is now on another profile.')
+    // It was sent: the number is given, so that it is not filed again.
+    expect(said()).toBe('The report was closed because this browser is now on another profile. It had been sent, as issue #43.')
   })
 
-  it('offers nothing once another tab has signed out, and says another account for another person', async () => {
+  it('offers nothing once another tab has signed out, and says so', async () => {
     const user = userEvent.setup()
     signedIn()
     crash()
     await openPanel(user)
+    expect(api.getBugReportConfig).toHaveBeenCalledTimes(2)
     anotherTab(() => signedIn(null))
     await waitFor(() => expect(panel()).toBeNull())
-    expect(said()).toBe('The report was closed because this browser is now on another account.')
+    expect(said()).toBe('The report was closed because this browser has signed out.')
     await act(async () => {})
     expect(opener()).toBeNull()
-    expect(api.getBugReportConfig).toHaveBeenCalledTimes(1)
+    expect(api.getBugReportConfig).toHaveBeenCalledTimes(2)
+    // And the way out now leads to the sign-in page.
+    expect(screen.getByRole('link', { name: 'Go to sign in' })).toBeInTheDocument()
+  })
+
+  it('says another account for another person', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    crash()
+    await openPanel(user)
+    anotherTab(() => signedIn(ROBIN, 5))
+    await waitFor(() => expect(panel()).toBeNull())
+    expect(said()).toBe('The report was closed because this browser is now on another account.')
+    await user.click(await screen.findByRole('button', { name: 'Report a problem' }))
+    expect(document.querySelector('[data-error-report-switched]')).toHaveTextContent('This browser has moved to another account since this page stopped.')
+    expect(screen.getByLabelText(/^Your name/)).toHaveValue('robin')
+  })
+
+  // What the panel says is judged against the session the page stopped in,
+  // as the browser holds it now: a move and back is no move.
+  it('says nothing of a move once the browser is back on the profile the page stopped in', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    crash()
+    await screen.findByRole('button', { name: 'Report a problem' })
+    anotherTab(() => signedIn(MORGAN, 2))
+    await waitFor(() => expect(api.getBugReportConfig).toHaveBeenCalledTimes(2))
+    anotherTab(() => signedIn(MORGAN, 1))
+    await waitFor(() => expect(api.getBugReportConfig).toHaveBeenCalledTimes(3))
+    await openPanel(user)
+    expect(document.querySelector('[data-error-report-switched]')).toBeNull()
+  })
+
+  it('says nothing of a move when the same person signs out and in again', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    crash()
+    await screen.findByRole('button', { name: 'Report a problem' })
+    anotherTab(() => signedIn(null))
+    await waitFor(() => expect(opener()).toBeNull())
+    anotherTab(() => signedIn(MORGAN, 1))
+    await openPanel(user)
+    expect(document.querySelector('[data-error-report-switched]')).toBeNull()
+  })
+
+  // This tab's own request can end the session: the app's request layer
+  // clears the stored user and says so with an event, not a storage write.
+  it('hears this tab\'s own request ending the session', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    crash()
+    await openPanel(user)
+    act(() => {
+      localStorage.removeItem('aurora_user')
+      window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT))
+    })
+    await waitFor(() => expect(panel()).toBeNull())
+    expect(said()).toBe('The report was closed because this browser has signed out.')
+    expect(opener()).toBeNull()
+  })
+
+  // A page restored from the back/forward cache, or shown again after it was
+  // hidden or frozen, may have missed what changed meanwhile.
+  it.each([
+    ['restored from the back/forward cache', () => window.dispatchEvent(new Event('pageshow'))],
+    ['shown again', () => document.dispatchEvent(new Event('visibilitychange'))],
+  ])('reads the session again when the page is %s', async (_how, comeBack) => {
+    const user = userEvent.setup()
+    signedIn()
+    crash()
+    await openPanel(user)
+    await fill(user)
+    // Changed while this page heard nothing.
+    signedIn(MORGAN, 2)
+    await act(async () => {})
+    expect(panel()).not.toBeNull()
+    act(() => comeBack())
+    await waitFor(() => expect(panel()).toBeNull())
+    expect(said()).toBe('The report was closed because this browser is now on another profile.')
+  })
+
+  // An answer is the session's that was asked for, and only for the stretch
+  // it was asked in: back on an earlier session, the earlier answer is not
+  // used, and nothing is offered until the server answers again.
+  it('does not use an earlier answer for a session the browser has come back to', async () => {
+    signedIn()
+    crash()
+    await screen.findByRole('button', { name: 'Report a problem' })
+    let answer!: (config: { enabled: boolean }) => void
+    api.getBugReportConfig.mockImplementation(() => new Promise(resolve => { answer = resolve }))
+    anotherTab(() => signedIn(MORGAN, 3))
+    await waitFor(() => expect(api.getBugReportConfig).toHaveBeenCalledTimes(2))
+    anotherTab(() => signedIn(MORGAN, 1))
+    await waitFor(() => expect(api.getBugReportConfig).toHaveBeenCalledTimes(3))
+    expect(opener()).toBeNull()
+    await act(async () => { answer({ enabled: true }) })
+    expect(opener()).toBeInTheDocument()
   })
 
   // The stored user is rewritten for other reasons too (an avatar, a name).
@@ -373,7 +530,8 @@ describe('the error screen: another tab changes who this browser is', () => {
     expect(said()).toBe('')
     // Nor is the report said to be going from another profile.
     expect(document.querySelector('[data-error-report-switched]')).toBeNull()
-    expect(api.getBugReportConfig).toHaveBeenCalledTimes(1)
+    // Asked once when the page opened, once when the report did.
+    expect(api.getBugReportConfig).toHaveBeenCalledTimes(2)
   })
 
   // With nothing open there is nothing to close, and nothing to say.
@@ -415,5 +573,41 @@ describe('the bug report dialog carries no such evidence', () => {
     const [sent] = api.submitBugReport.mock.calls[0] as [Record<string, unknown>]
     expect(sent.description).toBe('I clicked Collections and got this.')
     expect(sent).not.toHaveProperty('context')
+  })
+
+  // The server counts bytes, with each line break sent as two: the
+  // dialog's limit is the server's.
+  it('counts the description as the server does', async () => {
+    const user = userEvent.setup()
+    render(<BugReportModal prefillName="morgan" onClose={() => {}} onSubmitted={() => {}} />)
+    const dialog = screen.getByRole('dialog')
+    await user.type(within(dialog).getByLabelText(/^Title/), 'Accents')
+    const field = within(dialog).getByLabelText(/^Description/)
+    // 5,000 string units, 10,001 bytes as sent.
+    const over = `${'é\n'.repeat(2_500)}`.slice(0, -1) + 'éx'
+    expect(over.length).toBe(5_001)
+    expect(bytesSent(over)).toBeGreaterThan(10_000)
+    fireEvent.change(field, { target: { value: over } })
+    expect(dialog).toHaveTextContent(`${bytesSent(over)} / 10000`)
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Description exceeds 10000 characters.')
+    expect(api.submitBugReport).not.toHaveBeenCalled()
+    const fits = 'é'.repeat(5_000)
+    expect(bytesSent(fits)).toBe(10_000)
+    fireEvent.change(field, { target: { value: fits } })
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    await waitFor(() => expect(api.submitBugReport).toHaveBeenCalledTimes(1))
+  })
+
+  it('counts the title as the server does', async () => {
+    const user = userEvent.setup()
+    render(<BugReportModal prefillName="morgan" onClose={() => {}} onSubmitted={() => {}} />)
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText(/^Title/), { target: { value: 'é'.repeat(101) } })
+    expect(dialog).toHaveTextContent('202 / 200')
+    await user.type(within(dialog).getByLabelText(/^Description/), 'Long title')
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Title exceeds 200 characters.')
+    expect(api.submitBugReport).not.toHaveBeenCalled()
   })
 })

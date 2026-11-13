@@ -148,8 +148,13 @@ The same form is also offered on the screen the app shows when a page
 stops ("That did not load."), as "Report a problem", to a signed-in
 session on a server that takes reports. A report sent from there carries,
 at the end of its description, what that screen shows under "What the
-app saw": the error's message (never its stack), the page's address, the
-time and the build. Its "URL" line is the page that stopped.
+app saw", one line each as an inline code span (so the tracker links and
+mentions nothing in them): the kind of failure, the error's message, the
+page's address (path and query), the time and the build. These lines
+never hold the stack; the console log every report carries does hold the
+error, with the last five lines of its stack. The description and these
+lines share the server's limit of 10,000 bytes, which the form counts
+(each line break as two). Its "URL" line is the page that stopped.
 
 To smoke-test the full flow:
 1. Fill in title + description

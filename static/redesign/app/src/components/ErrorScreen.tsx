@@ -13,15 +13,19 @@
 // "Report a problem" is offered as the "Report a bug" entries are: to a
 // signed-in session, on a server that takes reports. The app that knew both
 // is gone, so the screen asks again: nobody stored as signed in means no
-// request and no offer; otherwise one read of the reporting settings, which
+// request and no offer; otherwise a read of the reporting settings, which
 // the server answers only for a session, and nothing is offered until it has
-// answered that reports are on.
+// answered, for the session the browser is on now, that reports are on. It
+// asks again whenever that session changes and each time a report is
+// opened.
 
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
-import { getBugReportConfig, getStoredUser, type BugReportConfig } from '@/lib/api'
+import { SESSION_EXPIRED_EVENT, getBugReportConfig, getStoredUser, type BugReportConfig, type BugReportSubmitResult } from '@/lib/api'
 import { describeCaughtError, thisPage, type AppSaw } from '@/lib/errorReport'
 import { readRememberedProfileId } from '@/lib/profileSession'
 import { AuroraWordmark } from '@/components/AuroraWordmark'
+import { AuroraMark } from '@/components/TopNav'
+import { ErrorGuard } from '@/components/ErrorGuard'
 import {
   BugReportFields, BugReportRecordingPill, BugReportSent, BugReportTokenNotice, useBugReportForm,
 } from '@/components/BugReportForm'
@@ -42,16 +46,26 @@ const action: CSSProperties = {
   border: 'none', fontFamily: 'inherit', fontSize: 16, fontWeight: 600, textDecoration: 'none', cursor: 'pointer',
 }
 const quiet: CSSProperties = { ...action, padding: '0 22px', borderRadius: 12, background: RAISED_2, color: INK }
+// In the accessibility tree and out of sight, as the stylesheet's sr-only
+// is: a live region taken out of the tree while empty is not announced
+// when its words arrive.
+const unseen: CSSProperties = {
+  position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden',
+  clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0,
+}
 
-/** Where the app starts: Tonight. The phone companion is its own small app
+/** Where the app starts: Tonight, or the sign-in page when nobody is signed
+ *  in (the same address shows it). The phone companion is its own small app
  *  at /join, and its way back is its own first screen. */
-function homeFor(pathname: string): { href: string; label: string } {
+function homeFor(pathname: string, signedIn: boolean): { href: string; label: string } {
   const base = import.meta.env.BASE_URL
   const companion = pathname === `${base}join` || pathname.startsWith(`${base}join/`)
-  return companion ? { href: `${base}join`, label: 'Go to the join screen' } : { href: base, label: 'Go to Tonight' }
+  if (companion) return { href: `${base}join`, label: 'Go to the join screen' }
+  return { href: base, label: signedIn ? 'Go to Tonight' : 'Go to sign in' }
 }
 
 interface Session { userId: number | null; name: string | undefined; profileId: number | null }
+const keyOf = (s: Session) => `${s.userId}:${s.profileId}`
 
 /** Who this browser says is signed in, and as which profile: what the app
  *  itself keeps there. Storage that cannot be read is nobody. */
@@ -64,45 +78,69 @@ function sessionNow(): Session {
   }
 }
 
+type Move = 'signed-out' | 'account' | 'profile'
+/** How the browser's session `now` differs from `then`, if it does. */
+function moveFrom(then: Session, now: Session): Move | null {
+  if (now.userId === null) return then.userId === null ? null : 'signed-out'
+  if (now.userId !== then.userId) return 'account'
+  return now.profileId !== then.profileId ? 'profile' : null
+}
+
 interface ReportAccess {
   /** The session the rest is about. */
-  key: string
-  /** A report can be offered: signed in, and the server has just said it
-   *  takes reports. False until it has. */
+  session: Session
+  /** A report can be offered: signed in, and the server has said, for
+   *  this session, that it takes reports. False until it has. */
   offered: boolean
+  /** The server's latest answer for this session says it takes no reports. */
+  refused: boolean
   /** Fills in "Your name": the username, never the email. */
   name: string | undefined
   /** The token's health, which the server tells only a session with the
    *  admin's powers. */
   tokenHealthy: boolean | undefined
   tokenHealthReason: string | undefined
-  /** This browser has changed account or profile since the screen opened
-   *  (another tab did it; this one cannot). */
-  switched: 'account' | 'profile' | null
+  /** Ask the server again (each time a report is opened, as the app's
+   *  entries do). */
+  askAgain: () => void
 }
 
 function useReportAccess(): ReportAccess {
   const [session, setSession] = useState(sessionNow)
-  const [switched, setSwitched] = useState<ReportAccess['switched']>(null)
-  // The server's answer, with the session it was asked for: given to no other.
+  // Counts the changes of session: an answer is good only for the stretch
+  // it was asked in, so a return to an earlier session waits for a new one.
+  const [stretch, setStretch] = useState(0)
+  const [asked, setAsked] = useState(0)
+  // The server's answer, with what it was asked for: given to no other.
   const [answer, setAnswer] = useState<{ key: string; config: BugReportConfig } | null>(null)
-  const key = `${session.userId}:${session.profileId}`
+  const key = `${keyOf(session)}#${stretch}`
 
   // Another tab signing out, signing in or switching profile writes what
-  // sessionNow reads, and this tab hears of it.
+  // sessionNow reads, and this tab hears of it; so does this tab's own
+  // request ending the session. A page frozen, hidden or kept by the
+  // back/forward cache may have missed either, so it reads again as it
+  // comes back.
   const current = useRef(session)
   useEffect(() => {
-    const onStorage = () => {
+    const reread = () => {
       const now = sessionNow()
       const was = current.current
       if (was.userId === now.userId && was.profileId === now.profileId) return
       current.current = now
-      const what = was.userId !== now.userId ? 'account' : 'profile'
-      setSwitched(before => (before === 'account' ? before : what))
       setSession(now)
+      setStretch(n => n + 1)
     }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
+    const onVisible = () => { if (document.visibilityState === 'visible') reread() }
+    window.addEventListener('storage', reread)
+    window.addEventListener(SESSION_EXPIRED_EVENT, reread)
+    window.addEventListener('pageshow', reread)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.removeEventListener('storage', reread)
+      window.removeEventListener(SESSION_EXPIRED_EVENT, reread)
+      window.removeEventListener('pageshow', reread)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [])
 
   useEffect(() => {
@@ -111,46 +149,67 @@ function useReportAccess(): ReportAccess {
     getBugReportConfig(ac.signal)
       .then(config => { if (!ac.signal.aborted) setAnswer({ key, config }) })
       // No answer (signed out after all, or no server to answer): nothing
-      // is known, so nothing is offered.
+      // new is known, so nothing changes.
       .catch(() => {})
     return () => ac.abort()
-  }, [key, session.userId])
+  }, [key, session.userId, asked])
 
   const config = answer && answer.key === key ? answer.config : null
   return {
-    key,
+    session,
     offered: session.userId !== null && config?.enabled === true,
+    refused: config !== null && config.enabled !== true,
     name: session.name,
     tokenHealthy: config?.token_healthy,
     tokenHealthReason: config?.token_health_reason,
-    switched,
+    askAgain: () => setAsked(n => n + 1),
   }
 }
 
-export function ErrorScreen({ error }: { error: Error }) {
-  // Fixed when the screen opens: the page that stopped, and when.
+export function ErrorScreen({ error }: { error: unknown }) {
+  // Fixed when the screen opens: the page that stopped, and when, and who
+  // this browser was then.
   const [saw] = useState(() => describeCaughtError(error, new Date()))
-  const [home] = useState(() => homeFor(window.location.pathname))
+  const [stoppedIn] = useState(sessionNow)
   const access = useReportAccess()
+  const [stoppedAt] = useState(() => window.location.pathname)
+  const home = homeFor(stoppedAt, access.session.userId !== null)
 
   // The session the open report was started in; null while none is open.
-  const [openedFor, setOpenedFor] = useState<string | null>(null)
+  const [openedFor, setOpenedFor] = useState<Session | null>(null)
   const open = openedFor !== null
   // Why the report closed by itself, when it did.
   const [said, setSaid] = useState('')
+  // A report this opening sent.
+  const sentRef = useRef<BugReportSubmitResult | null>(null)
+
+  // A report is one session's, and is only offered while the server takes
+  // reports. Either changing while one is open closes it, as soon as
+  // nothing of its own is in flight.
+  const why: Move | 'refused' | null = openedFor === null
+    ? null
+    : moveFrom(openedFor, access.session) ?? (access.refused ? 'refused' : null)
 
   const headingRef = useRef<HTMLHeadingElement>(null)
   const openerRef = useRef<HTMLButtonElement>(null)
+  const saidRef = useRef<HTMLParagraphElement>(null)
   useEffect(() => { headingRef.current?.focus() }, [])
   // When the panel goes, the focus it held goes to what opened it, or to
-  // the page's heading when that is no longer offered.
+  // the page's heading when that is no longer offered. When it closed by
+  // itself, the focus goes to the line that says why: that is read out,
+  // where moving the focus elsewhere would talk over it.
   const wasOpen = useRef(false)
   useEffect(() => {
     if (open) { wasOpen.current = true; return }
     if (!wasOpen.current) return
     wasOpen.current = false
-    ;(openerRef.current ?? headingRef.current)?.focus()
+    ;((said ? saidRef.current : null) ?? openerRef.current ?? headingRef.current)?.focus()
+    // Only the closing moves the focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
+
+  const moved = moveFrom(stoppedIn, access.session)
+  const switched = moved === 'account' || moved === 'profile' ? moved : null
 
   return (
     <div
@@ -165,10 +224,14 @@ export function ErrorScreen({ error }: { error: Error }) {
         <a
           href={home.href}
           aria-label={`AuroraPro, ${home.label.charAt(0).toLowerCase()}${home.label.slice(1)}`}
-          style={{ minHeight: 44, display: 'inline-flex', alignItems: 'center', color: INK }}
+          style={{ minHeight: 44, display: 'inline-flex', alignItems: 'center', gap: 10, color: INK }}
         >
-          {/* The name, in the page's ink. Sized by its box: the classes
-              that size it elsewhere come from the stylesheet. */}
+          {/* The mark and the name, in the page's ink. Sized by their
+              boxes: the classes that size them elsewhere come from the
+              stylesheet. */}
+          <span data-error-mark="" style={{ display: 'block', width: 28, height: 28, flex: 'none' }}>
+            <AuroraMark size={28} />
+          </span>
           <span aria-hidden="true" style={{ display: 'block', width: 92 }}>
             <AuroraWordmark ink={INK} decorative className="block h-auto w-full" />
           </span>
@@ -207,7 +270,12 @@ export function ErrorScreen({ error }: { error: Error }) {
               <button
                 ref={openerRef}
                 type="button"
-                onClick={() => { setSaid(''); setOpenedFor(access.key) }}
+                onClick={() => {
+                  setSaid('')
+                  sentRef.current = null
+                  setOpenedFor(access.session)
+                  access.askAgain()
+                }}
                 style={quiet}
               >
                 Report a problem
@@ -232,52 +300,96 @@ export function ErrorScreen({ error }: { error: Error }) {
           <p style={{ margin: 0, fontSize: 13, color: INK_3 }}>
             If a new version was installed while this tab was open, a reload usually fixes it.
           </p>
-          {/* Always in the page, so that its words arriving are what is
-              announced; it takes no room while it has none. */}
-          <p role="status" data-error-report-said="" style={{ margin: 0, fontSize: 14, color: INK, display: said ? 'block' : 'none' }}>
+          {/* Always in the page and in the accessibility tree, so that its
+              words arriving are what is announced; out of sight while it
+              has none. */}
+          <p
+            ref={saidRef}
+            role="status"
+            tabIndex={-1}
+            data-error-report-said=""
+            style={said ? { margin: 0, fontSize: 14, color: INK } : unseen}
+          >
             {said}
           </p>
         </main>
 
         {open && (
-          <ErrorReportPanel
-            saw={saw}
-            access={access}
-            // A report is one session's. This browser moving to another
-            // while it is open closes it, as soon as nothing of its own is
-            // in flight, and the person is told why.
-            dismissed={openedFor !== access.key}
-            onClose={() => setOpenedFor(null)}
-            onDismissed={(unsent) => {
-              const why = `The report was closed because this browser is now on another ${access.switched === 'account' ? 'account' : 'profile'}`
-              setSaid(unsent ? `${why}, and it was not sent: ${unsent}` : `${why}.`)
-              setOpenedFor(null)
-            }}
-          />
+          // Each opening is a new form behind a new guard: closing
+          // unmounts both.
+          <ErrorGuard
+            fallback={<PanelFailed onClose={() => setOpenedFor(null)} />}
+          >
+            <ErrorReportPanel
+              saw={saw}
+              access={access}
+              switched={switched}
+              dismissed={why !== null}
+              onClose={() => setOpenedFor(null)}
+              onSubmitted={(result) => { sentRef.current = result }}
+              onDismissed={(unsent) => {
+                const because = why === 'refused'
+                  ? 'the server is not taking reports now'
+                  : why === 'signed-out'
+                    ? 'this browser has signed out'
+                    : `this browser is now on another ${why === 'account' ? 'account' : 'profile'}`
+                const sent = sentRef.current
+                const line = `The report was closed because ${because}`
+                setSaid(sent
+                  ? `${line}. It had been sent, as issue #${sent.issue_number}.`
+                  : unsent ? `${line}, and it was not sent: ${unsent}` : `${line}.`)
+                setOpenedFor(null)
+              }}
+            />
+          </ErrorGuard>
         )}
       </div>
     </div>
   )
 }
 
+/** In place of the report panel when it could not be drawn: the rest of
+ *  the page, Reload and the way out, is untouched. */
+function PanelFailed({ onClose }: { onClose: () => void }) {
+  const lineRef = useRef<HTMLParagraphElement>(null)
+  // The focus was in the panel, which is gone.
+  useEffect(() => { lineRef.current?.focus() }, [])
+  return (
+    <aside
+      data-error-report-failed=""
+      aria-label="Report a problem"
+      style={{ flex: '1 1 400px', maxWidth: 520, minWidth: 0, boxSizing: 'border-box', padding: 24, borderRadius: 20, background: RAISED_2 }}
+    >
+      <p ref={lineRef} role="alert" tabIndex={-1} style={{ margin: '0 0 16px', fontSize: 15, color: INK }}>
+        The report form could not be shown. Reload, and report the problem from the app once it is back.
+      </p>
+      <button type="button" onClick={onClose} style={{ ...quiet, height: 44 }}>Close</button>
+    </aside>
+  )
+}
+
 /** The report form, as a panel on the page. The form is the app's one bug
  *  report form (components/BugReportForm); this is its frame here. */
-function ErrorReportPanel({ saw, access, dismissed, onClose, onDismissed }: {
+function ErrorReportPanel({ saw, access, switched, dismissed, onClose, onSubmitted, onDismissed }: {
   saw: AppSaw
   access: ReportAccess
+  switched: 'account' | 'profile' | null
   dismissed: boolean
   onClose: () => void
+  onSubmitted: (result: BugReportSubmitResult) => void
   onDismissed: (unsent: string | null) => void
 }) {
   const form = useBugReportForm({
     prefillName: access.name,
     onClose,
-    // The panel shows that it was sent; there is no page behind it to tell.
-    onSubmitted: () => {},
+    // The panel shows that it was sent; the page keeps the number, to say
+    // it if the panel then closes by itself.
+    onSubmitted,
     dismissed,
     onDismissed,
     // What the page shows under "What the app saw", as it shows it.
     evidence: { text: saw.text, url: saw.page },
+    captureShows: 'A capture shows this page as it is now: the error and what the app saw. This panel is left out of it.',
   })
   const { capturing, recording, submitting, submittedResult, titleInputRef } = form
   useEffect(() => { titleInputRef.current?.focus() }, [titleInputRef])
@@ -306,9 +418,9 @@ function ErrorReportPanel({ saw, access, dismissed, onClose, onDismissed }: {
               This opens a GitHub issue with the details below.
             </p>
           )}
-          {!submittedResult && access.switched && (
+          {!submittedResult && switched && (
             <p data-error-report-switched="" style={{ margin: '8px 0 0', fontSize: 14, color: INK }}>
-              This browser has moved to another {access.switched} since this page stopped. A report is sent from the one it is on now.
+              This browser has moved to another {switched} since this page stopped. A report is sent from the one it is on now.
             </p>
           )}
         </div>
