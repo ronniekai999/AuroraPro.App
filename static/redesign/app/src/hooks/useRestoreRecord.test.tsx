@@ -104,6 +104,49 @@ describe('with a ticket kept', () => {
   })
 })
 
+describe('across tabs and lost tickets', () => {
+  it('forgets on Dismiss only the ticket its record was read with, not one another tab kept since', async () => {
+    keep('succeeded')
+    answers = [json(200, rec({ state: 'succeeded', step: undefined, database: 'restored', restart_required: true }))]
+    const { result } = renderHook(() => useRestoreRecord({}))
+    await settle()
+    expect(result.current.status?.state).toBe('succeeded')
+    // Another tab starts a restore and keeps its ticket.
+    localStorage.setItem('aurora.restore', JSON.stringify({ ticket: 'n'.repeat(43), file: 'new.dump', seen: null }))
+    act(() => result.current.dismiss())
+    await settle()
+    expect(JSON.parse(localStorage.getItem('aurora.restore')!).ticket).toBe('n'.repeat(43))
+  })
+
+  it('reads the admin route after a lost ticket, and says a restore running now before the lost one', async () => {
+    keep('running')
+    answers = [json(404, { error: { reason: 'restore_unknown' } })]
+    const adminRead = vi.fn(async () => rec({ file: 'now.dump' }))
+    const { result } = renderHook(() => useRestoreRecord({ adminRead }))
+    await settle()
+    await settle()
+    expect(result.current.lost?.file).toBe('b.dump')
+    expect(result.current.status?.state).toBe('running')
+    expect(adminRead).toHaveBeenCalledTimes(1)
+    // It goes on asking the admin route while that restore runs.
+    await tick()
+    expect(adminRead).toHaveBeenCalledTimes(2)
+    expect(ticketReads()).toBe(1)
+  })
+
+  it('does not keep asking a refused admin read after a lost ticket', async () => {
+    keep('running')
+    answers = [json(404, { error: { reason: 'restore_unknown' } })]
+    const adminRead = vi.fn<(s: AbortSignal) => Promise<RestoreStatus>>().mockRejectedValue(new Error('401'))
+    renderHook(() => useRestoreRecord({ adminRead }))
+    await settle()
+    await tick()
+    await tick()
+    expect(adminRead).toHaveBeenCalledTimes(1)
+    expect(ticketReads()).toBe(1)
+  })
+})
+
 describe('without a ticket', () => {
   it('reads nothing where there is no admin read', async () => {
     renderHook(() => useRestoreRecord({}))

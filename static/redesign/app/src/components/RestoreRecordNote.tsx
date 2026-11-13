@@ -14,7 +14,9 @@ export function RestoreRecordNote({ record, server = null, className = '' }: {
   className?: string
 }) {
   const { status, lost, unreachable, waiting, dismiss } = record
-  const words = lost
+  // A restore running now is said first, whatever became of a lost ticket.
+  const runningNow = status?.state === 'running'
+  const words = lost && !runningNow
     ? lostRestoreWords(lost.file, lost.seen === 'running')
     : status
       ? restoreWords(status)
@@ -23,7 +25,7 @@ export function RestoreRecordNote({ record, server = null, className = '' }: {
         : null
   if (!words) return null
   // Nothing to put away while it runs, or before the server has said anything.
-  const running = (!lost && status?.state === 'running') || (!status && !lost && !!waiting)
+  const running = runningNow || (!status && !lost && !!waiting)
   return (
     <div
       role="region"
@@ -35,7 +37,7 @@ export function RestoreRecordNote({ record, server = null, className = '' }: {
       <div role="status" className="min-w-0 flex-1 basis-[16rem]">
         <p className={`text-[15px] font-semibold ${words.urgent ? 'text-warn' : 'text-ink'}`}>{words.title}</p>
         <p className="mt-1 text-[14px] leading-snug text-ink-2">{words.says}</p>
-        {server && !lost && <p className="mt-1 text-[13px] text-ink-2 [overflow-wrap:anywhere]">{server}</p>}
+        {server && !(lost && !runningNow) && <p className="mt-1 text-[13px] text-ink-2 [overflow-wrap:anywhere]">{server}</p>}
         {unreachable && (
           <p className="mt-1 text-[13px] text-ink-2">
             {running ? 'Aurora did not answer just now. Asking again every few seconds.' : 'Aurora did not answer just now.'}

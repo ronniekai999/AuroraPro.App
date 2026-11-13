@@ -18,10 +18,11 @@ restore cannot run at once; the second one asked for is refused with a 409.
 From the server's shell instead:
 
 ```bash
-sudo -u aurora pg_dump --format=custom --compress=6 --no-owner --no-acl --exclude-table-data=refresh_tokens --exclude-table-data=scan_progress "$DATABASE_URL" > aurora-backup.dump
+sudo -u aurora bash -c 'set -a; . /etc/aurora/aurora.env; pg_dump --format=custom --compress=6 --no-owner --no-acl --no-publications --no-subscriptions --quote-all-identifiers --exclude-table-data=refresh_tokens --exclude-table-data=scan_progress "$DATABASE_URL"' > aurora-backup.dump
 ```
 
-`DATABASE_URL` is in `/etc/aurora/aurora.env`.
+These are the flags the Admin page's download uses. `DATABASE_URL` is in
+`/etc/aurora/aurora.env`, which the `aurora` user can read.
 
 ## What a restore does
 
@@ -49,7 +50,10 @@ stopped `pg_restore` part way and left the database empty, with nothing to say
 so.) The whole restore after the upload has 60 minutes.
 
 **Everyone is signed out by a restore**, the admin who started it included:
-backups hold no sessions. Sign in again with an account from the backup.
+backups hold no sessions. Each browser finds out at its next token refresh,
+within about 15 minutes; until then a page can still load, but anything that
+checks the session (the Admin page among them) is refused. Sign in again with
+an account from the backup.
 
 **Restart Aurora after a restore that succeeds**: `sudo systemctl restart
 aurora`. Until then the server runs on a database its migrations have not seen,
@@ -70,8 +74,9 @@ restart.
   empty). That browser keeps a ticket for the restore in its local storage to
   ask with; a private window, or site data that is blocked or cleared, loses
   it.
-- **Any other admin**, while the database can still vouch for their session,
-  sees it in the same Admin section.
+- **Any admin**, while the database can still vouch for their session, sees a
+  restore that is running, or one that needs acting on, on whichever Admin
+  section they open, and the full record under Backup and restore.
 
 The two reads behind these:
 
@@ -86,13 +91,14 @@ Both answer:
 | --- | --- |
 | `state` | `none` (no restore since Aurora started), `running`, `succeeded`, `failed` |
 | `step` | `checking`, `clearing` or `restoring`: where a running restore is, or where a failed one stopped |
-| `database` | `unchanged`, `empty`, `restored`, or `unknown` (a step was cut short by the timeout or a shutdown, and may or may not have landed) |
+| `database` | `unchanged`, `empty`, `restored`, or `unknown`: the old data is being cleared (while running), or a step stopped part way and may or may not have landed (the timeout, a shutdown, psql losing its connection mid-statement, an internal error) |
 | `file`, `started_at`, `finished_at` | the uploaded file's name, and when the restore began and ended |
 | `restart_required` | a restore has succeeded since Aurora started; a later restore that is refused does not clear it |
-| `message` | the server's account of a finished restore: the same text its request was, or would have been, answered with |
+| `message` | the server's account of a finished restore: the same text its request was, or would have been, answered with. The admin read only: it can quote `pg_restore`'s or `psql`'s output, which can include a row of the table that failed, and the ticket read has no session behind it |
 
 A client that sends no ticket still restores; it reads the outcome through the
-admin route only.
+admin route only. Every failure is also in the server log, with the tool's
+output: `journalctl -u aurora | grep -i restore`.
 
 ## What still stops a restore
 

@@ -1253,7 +1253,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// ended, whether Aurora needs a restart. A restore no longer ends
 			// with its request, so this is where its outcome is read. For any
 			// admin the database can vouch for; the person who started it
-			// also has the ticket read below, which needs no database.
+			// also has the ticket read (GET /api/restore/status, mounted with
+			// the public routes above), which needs no database.
 			r.With(requireAdmin).Get("/api/admin/restore/status", adminH.RestoreStatus)
 
 			// Requests (media request + ARR integration)

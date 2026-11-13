@@ -25,7 +25,7 @@ package api
 //   - GET /api/admin/restore/status, behind the admin guard, for any admin
 //     while the database can answer for them.
 //   - GET /api/restore/status, outside the session checks, answered only to
-//     the restore's ticket: a secret of at least 192 bits the client chose,
+//     the restore's ticket, without the server's own text (statusForTicket): a secret of at least 192 bits the client chose,
 //     sent with the upload (restoreTicketHeader), and kept here only as its
 //     SHA-256. The upload itself passed the full admin guard, so the ticket
 //     is held by the admin who started the restore and names that restore
@@ -125,7 +125,8 @@ type RestoreStatus struct {
 	// refused before its wipe does not clear it.
 	RestartRequired bool `json:"restart_required"`
 	// Message is the server's account of a finished restore: the same text
-	// its request was (or would have been) answered with.
+	// its request was (or would have been) answered with. The admin read
+	// only; the ticket read leaves it out (statusForTicket).
 	Message string `json:"message,omitempty"`
 }
 
@@ -220,7 +221,12 @@ func (t *restoreTracker) statusLocked() RestoreStatus {
 	return s
 }
 
-// statusForTicket is the record when ticket is the latest restore's.
+// statusForTicket is the record when ticket is the latest restore's, without
+// its message: that is psql's or pg_restore's own output, which can quote a
+// row of the failing table (a password or PIN hash, a provider key), and the
+// ticket read has no session behind it. The ticket outlives the restore in
+// the browser that started it, so whoever uses that browser later can replay
+// it. The admin read keeps the message; so does the server log.
 func (t *restoreTracker) statusForTicket(ticket string) (RestoreStatus, bool) {
 	if !validRestoreTicket(ticket) {
 		return RestoreStatus{}, false
@@ -231,7 +237,9 @@ func (t *restoreTracker) statusForTicket(ticket string) (RestoreStatus, bool) {
 	if t.run == nil || !t.run.hasTicket || subtle.ConstantTimeCompare(sum[:], t.run.ticketHash[:]) != 1 {
 		return RestoreStatus{}, false
 	}
-	return t.statusLocked(), true
+	st := t.statusLocked()
+	st.Message = ""
+	return st, true
 }
 
 // restoreResult is how a restore ended: the record's outcome and the answer

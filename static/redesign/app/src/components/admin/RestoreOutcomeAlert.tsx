@@ -28,7 +28,14 @@ export function RestoreOutcomeAlert({ accountId }: { accountId: number }) {
           <>
             <AlertDialogHeader>
               <AlertDialogTitle className="font-display text-[22px] leading-tight">
-                {outcome.ok ? 'Restart Aurora now' : `The restore from ${outcome.file} did not go through`}
+                {outcome.ok
+                  ? 'Restart Aurora now'
+                  // No answer is not a failure: the restore may still be
+                  // running on the server, past its wipe, and a restart now
+                  // would empty the database.
+                  : outcome.lost
+                    ? `No answer came back about the restore from ${outcome.file}`
+                    : `The restore from ${outcome.file} did not go through`}
               </AlertDialogTitle>
               <AlertDialogDescription asChild>
                 <div className="text-[15px] leading-relaxed text-ink-2">

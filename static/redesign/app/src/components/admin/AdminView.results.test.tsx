@@ -467,7 +467,7 @@ describe('a restore’s other answers', () => {
     await user.click(within(d).getByRole('button', { name: 'Restore database' }))
     return alertLines(await within(d).findByRole('alert'))[0]
   }
-  const LOST = 'The connection to the server was lost during the restore. If the upload had finished, the restore goes on on the server without this page, and how it ends is shown here once Aurora can be asked: the database may be as it was, restored, or empty until then.'
+  const LOST = 'The connection to the server was lost during the restore. If the upload had finished, the restore goes on on the server without this page: do not restart Aurora until you know how it ended, since a restart stops a restore still running. Admin, under Backup and restore, shows how it ends once Aurora can be asked, and so does the sign-in page in this browser.'
   it.each([
     ['no answer', () => Promise.reject(new TypeError('Failed to fetch')), LOST],
     ['a proxy that gave up (504)', async () => json(504, { error: 'gateway timeout' }), LOST],

@@ -826,8 +826,9 @@ $do$;
 	// travels via PGPASSWORD in cmd.Env so it never lands on argv. See
 	// pgConnEnv.
 	connURL, pgEnv := pgConnEnv(h.databaseURL)
-	// The wipe is one DO block, so one statement: if psql reports it
-	// failed, it rolled back as a whole and nothing was cleared. Only a
+	// The wipe is one DO block, so one statement: when the statement
+	// itself failed, it rolled back as a whole and nothing was cleared
+	// (wipeLeftDatabase reads psql's exit for which failure it was). A
 	// wipe the context cut short is in doubt, since the server can finish
 	// and commit a statement whose client has gone.
 	h.restores.step(run, restoreStepClearing, restoreDBUnknown)
@@ -849,7 +850,11 @@ $do$;
 		if stderrTail != "" {
 			msg += " — psql said: " + stderrTail
 		}
-		return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepClearing, database: restoreDBUnchanged}
+		database := wipeLeftDatabase(err, stderrTail)
+		if database == restoreDBUnknown {
+			msg += " — the connection was lost while clearing the old data, so the database may be as it was or empty; check it before going on"
+		}
+		return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepClearing, database: database}
 	}
 
 	// Phase 2 — pg_restore the upload.
@@ -919,4 +924,37 @@ $do$;
 
 	slog.Info("restore succeeded — Aurora MUST be restarted to use new data")
 	return restoreResult{ok: true, message: restoreSucceededMessage, database: restoreDBRestored}
+}
+
+// wipeLeftDatabase says what a wipe that psql reports as failed left. psql
+// exits 1 or 3 when the statement failed (or psql itself did, before
+// sending it), and the DO block then rolled back as a whole. It exits 2
+// when the connection went bad: that is in doubt unless the connection was
+// never made, since a statement whose client has gone can still finish and
+// commit. A command that never started (psql missing) changed nothing; one
+// killed by a signal may have.
+func wipeLeftDatabase(err error, stderr string) string {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return restoreDBUnchanged
+	}
+	switch exitErr.ExitCode() {
+	case 1, 3:
+		return restoreDBUnchanged
+	case 2:
+		if neverConnected(stderr) {
+			return restoreDBUnchanged
+		}
+	}
+	return restoreDBUnknown
+}
+
+// neverConnected reports libpq's account of a connection that was never
+// made: "connection to server ... failed" (libpq 14 and later) or "could
+// not connect to server" (before). A connection lost mid-statement says
+// "server closed the connection unexpectedly" or "connection to server
+// was lost", which this does not match.
+func neverConnected(stderr string) bool {
+	return strings.Contains(stderr, "could not connect to server") ||
+		(strings.Contains(stderr, "connection to server") && strings.Contains(stderr, "failed"))
 }

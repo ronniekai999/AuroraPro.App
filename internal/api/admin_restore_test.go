@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -479,6 +480,13 @@ func TestTheTicketReadsOnlyItsOwnRestore(t *testing.T) {
 		t.Errorf("its own ticket: %d %+v", rr.Code, st)
 	} else if cc := rr.Header().Get("Cache-Control"); cc != "no-store" {
 		t.Errorf("ticket read Cache-Control = %q", cc)
+	} else if strings.Contains(rr.Body.String(), "message") {
+		// psql's and pg_restore's own output can quote a row of the failing
+		// table; the ticket read has no session behind it.
+		t.Errorf("the ticket read carries the server's text: %s", rr.Body)
+	}
+	if adminStatus(t, h).Message == "" {
+		t.Error("the admin read lost the server's text")
 	}
 	// A body is the same for every refusal, so it says nothing about the
 	// restore that exists.
@@ -579,5 +587,57 @@ func TestRestoreFileLabel(t *testing.T) {
 		if got := restoreFileLabel(in); got != want {
 			t.Errorf("restoreFileLabel(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// exitError runs a shell that ends as script says, for a real
+// *exec.ExitError.
+func exitError(t *testing.T, script string) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", script).Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("sh -c %q: %v, want an exit error", script, err)
+	}
+	return err
+}
+
+// TestAFailedWipeSaysWhatItLeft: the wipe is one statement, so a statement
+// that failed changed nothing, but psql also fails when its connection goes
+// mid-statement, and the server can still commit a statement whose client
+// has gone. Only what psql's exit and libpq's words rule out is "unchanged".
+func TestAFailedWipeSaysWhatItLeft(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		stderr string
+		want   string
+	}{
+		{"the statement failed", exitError(t, "exit 1"), "ERROR:  permission denied for schema public", restoreDBUnchanged},
+		{"a script error under ON_ERROR_STOP", exitError(t, "exit 3"), "ERROR:  syntax error", restoreDBUnchanged},
+		{"never connected (libpq 14+)", exitError(t, "exit 2"), `psql: error: connection to server at "db" (10.0.0.2), port 5432 failed: Connection refused`, restoreDBUnchanged},
+		{"never connected (older libpq)", exitError(t, "exit 2"), "psql: could not connect to server: No such file or directory", restoreDBUnchanged},
+		{"lost mid-statement", exitError(t, "exit 2"), "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally", restoreDBUnknown},
+		{"lost, as libpq says it", exitError(t, "exit 2"), "connection to server was lost", restoreDBUnknown},
+		{"killed", exitError(t, "kill -9 $$"), "", restoreDBUnknown},
+		{"psql is not installed", errors.New(`exec: "psql": executable file not found in $PATH`), "", restoreDBUnchanged},
+	}
+	for _, c := range cases {
+		if got := wipeLeftDatabase(c.err, c.stderr); got != c.want {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
+		}
+	}
+
+	// Through the handler: a connection lost mid-wipe is recorded as in doubt.
+	f := newFakeRestore()
+	lost := exitError(t, "exit 2")
+	f.steps[restoreStepClearing] = func(context.Context) (string, error) { return "server closed the connection unexpectedly", lost }
+	h := newRestoreHandler(f)
+	rec, done := startRestore(t, h, context.Background(), "")
+	waitFor(t, "the answer", done)
+	st := adminStatus(t, h)
+	if st.State != restoreStateFailed || st.Step != string(restoreStepClearing) || st.Database != restoreDBUnknown ||
+		!strings.Contains(rec.Body.String(), "may be as it was or empty") {
+		t.Errorf("a wipe whose connection was lost: %d %s, record %+v", rec.Code, rec.Body, st)
 	}
 }

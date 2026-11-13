@@ -2137,15 +2137,18 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   latest restore that got past its upload (refusals of the upload itself
   record nothing): `state` none/running/succeeded/failed, `step`
   checking/clearing/restoring, `database` unchanged/unknown/empty/restored
-  (`unknown` only when the context cut a wipe or `pg_restore` short), file,
-  times, message, and `restart_required` (a restore succeeded since boot; a
-  later refusal does not clear it). Two reads of it:
+  (`unknown` while the wipe runs, and for a step the context cut short, a
+  wipe whose psql lost its connection mid-statement (`wipeLeftDatabase`,
+  which reads psql's exit code and libpq's words) or a recovered panic),
+  file, times, message, and `restart_required` (a restore succeeded since
+  boot; a later refusal does not clear it). Two reads of it:
   `GET /api/admin/restore/status` behind `requireAdmin`, and
   `GET /api/restore/status` outside every session check, answered only to the
   latest restore's ticket (`X-Aurora-Restore-Ticket`, 32-128 base64url
   characters the client chose and sent with the upload; kept as SHA-256,
   compared in constant time; any other value is the same 404
-  `restore_unknown`). The ticket read exists because the admin read cannot
+  `restore_unknown`; without `message`, which can quote a row of the failing
+  table and the ticket outlives the restore in that browser). The ticket read exists because the admin read cannot
   serve the person who started the restore when it matters: from the wipe
   until the commit there are no tables, so `RequireAuth`'s token-version
   check and the admin guard fail; a failure after the wipe leaves it so; and
@@ -2157,13 +2160,24 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   restore's ticket is not lost), sends it, and reads the record
   (`hooks/useRestoreRecord`): by ticket when one is kept (no session, so it
   works signed out and never sets off the session-expiry path), else through
-  the admin route on the Admin page; again every 5 s while running, and while
-  a kept ticket gets no answer. The sign-in page shows it
+  the admin route on the Admin page, which also asks it after a kept ticket
+  the server no longer knows (so a restore running now is said and holds the
+  button); again every 5 s while running, and while a kept ticket gets no
+  answer, but a refused admin read is not retried. Dismiss forgets only the
+  ticket the record was read with. The sign-in page shows it
   (`RestoreRecordNote`), since a reload during or after a restore lands
-  there. The backup panel shows it when this tab has no answer of its own
+  there. The Admin page reads it once for every section (`AdminView`); the
+  backup panel says it when this tab has no answer of its own
   (`restoreOutcome`'s outcome, with `lost` for no answer or a 502-504), and
   always while a restore runs, with the restore button and file input
-  disabled. The server's text (`message`) is shown on the Admin page only
+  disabled; the other sections say a running restore and, when this tab has
+  no answer, one the admin must act on (urgent words, or a lost ticket).
+  Nothing is said while a restore request from this tab is out
+  (`restoreOutcome`'s `out`, which outlives a remount): its ticket is kept
+  before the server has a record of it, and a read then would call it
+  unknown. `RestoreOutcomeAlert` titles an answer that never came "No answer
+  came back about the restore from …", never "did not go through": it may
+  still be running past its wipe. The server's text (`message`) is shown on the Admin page only
   (`restoreServerLine`); the sign-in page uses the page's words. The
   outcome of this tab's request still goes to the module store keyed by the
   account id from before the restore; the backup panel says it, or
@@ -2177,8 +2191,13 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   browser's localStorage (a private window or cleared site data loses it,
   and then only the admin read is left); a client older than the ticket
   restores without one; this tab's own outcome is still memory only and keyed
-  by the pre-restore account id; nothing in the browser tests the sign-in
-  page's note beyond one render of its longest words at two sizes; an answer
+  by the pre-restore account id; the sign-in page's note is in no committed
+  browser check (`verify-signed-out.mjs` keeps no ticket): it was rendered by
+  hand once, at 390x844 and 1440x900 with its longest words, and on a phone
+  as small as 320x568 it pushes the form's first field and button below the
+  first screenful; a ticket kept in a browser has no expiry, so whoever uses
+  that browser later can read the restore's state, step and file name (not
+  its message) until it is dismissed or Aurora restarts; an answer
   that lands after its section was left is said nowhere, except a restore's
   outcome and the AI settings' restart notice; a dialog taller than the
   window keeps its focused button in view and lets the title scroll away.

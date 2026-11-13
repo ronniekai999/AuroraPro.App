@@ -23,21 +23,33 @@ export type RestoreOutcome =
 
 interface State {
   outcome: RestoreOutcome | null
+  /** Restore requests this tab has out now. Their tickets are kept before
+   *  the upload ends, so the server's record of them is not there yet: a
+   *  read now would call them unknown. */
+  out: number
+  /** Counts the requests that have ended, so the server's record is read
+   *  again (hooks/useRestoreRecord's recheck). */
+  ended: number
   /** Said already: by a backup panel that was up, or by the alert. */
   seen: boolean
   /** Backup panels mounted now (one at most in practice). */
   panels: number
 }
 
-let state: State = { outcome: null, seen: false, panels: 0 }
+let state: State = { outcome: null, out: 0, ended: 0, seen: false, panels: 0 }
 const listeners = new Set<() => void>()
 const set = (next: Partial<State>) => {
   state = { ...state, ...next }
   for (const l of listeners) l()
 }
 
+/** A restore request goes out from this tab. */
+export function beginRestore(): void {
+  set({ out: state.out + 1 })
+}
+
 export function finishRestore(outcome: RestoreOutcome): void {
-  set({ outcome, seen: state.panels > 0 })
+  set({ outcome, seen: state.panels > 0, out: Math.max(0, state.out - 1), ended: state.ended + 1 })
 }
 
 /** The alert's button, or a panel that showed it. The success notice stays
@@ -66,5 +78,5 @@ export function useRestoreOutcome(): State {
 
 /** Tests only. */
 export function resetRestoreOutcomeForTest(): void {
-  state = { outcome: null, seen: false, panels: 0 }
+  state = { outcome: null, out: 0, ended: 0, seen: false, panels: 0 }
 }

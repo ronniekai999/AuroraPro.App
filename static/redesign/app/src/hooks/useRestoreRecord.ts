@@ -52,6 +52,9 @@ export function useRestoreRecord({ adminRead, recheck = 0 }: {
   const [lost, setLost] = useState<RememberedRestore | null>(null)
   const [unreachable, setUnreachable] = useState(false)
   const [waiting, setWaiting] = useState<RememberedRestore | null>(null)
+  // The ticket `status` was read with (null for the admin read): Dismiss
+  // forgets that one only, never a newer one another tab has kept since.
+  const [source, setSource] = useState<string | null>(null)
   // Bumped when a ticket is forgotten, so the reads start again without it.
   const [forgotten, setForgotten] = useState(0)
 
@@ -64,11 +67,12 @@ export function useRestoreRecord({ adminRead, recheck = 0 }: {
     const ac = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     let lastState: RestoreStatus['state'] | null = null
+    let byTicket = !!kept
     const again = () => { timer = setTimeout(() => { void ask() }, RESTORE_POLL_MS) }
     const ask = async () => {
       try {
         let st: RestoreStatus | null
-        if (kept) {
+        if (kept && byTicket) {
           st = await readRestoreByTicket(kept.ticket, ac.signal)
           if (ac.signal.aborted) return
           if (!st) {
@@ -78,6 +82,13 @@ export function useRestoreRecord({ adminRead, recheck = 0 }: {
             setStatus(null)
             if (seen === null || seen === 'running') {
               setLost(kept)
+              // Where there is an admin read, it says what runs now (another
+              // restore, or this one), so a restore running is said and its
+              // button held; it cannot say what became of this ticket's.
+              if (adminRead) {
+                byTicket = false
+                await ask()
+              }
             } else {
               // It ended, this browser saw how, and Aurora has restarted
               // since: nothing left to say.
@@ -87,21 +98,25 @@ export function useRestoreRecord({ adminRead, recheck = 0 }: {
             return
           }
           noteRestoreSeen(kept.ticket, st.state)
+          setSource(kept.ticket)
+          setLost(null)
         } else {
           st = await adminRead!(ac.signal)
           if (ac.signal.aborted) return
+          setSource(null)
         }
         lastState = st.state
         setWaiting(null)
         setUnreachable(false)
-        setLost(null)
         setStatus(st)
         if (st.state === 'running') again()
       } catch {
         if (ac.signal.aborted) return
         setUnreachable(true)
-        if (kept && lastState === null) setWaiting(kept)
-        if (kept || lastState === 'running') again()
+        if (kept && byTicket && lastState === null) setWaiting(kept)
+        // A ticket read has no session to upset; an admin read that was
+        // refused would only be refused again, unless a restore was running.
+        if ((kept && byTicket) || lastState === 'running') again()
       }
     }
     void ask()
@@ -113,8 +128,7 @@ export function useRestoreRecord({ adminRead, recheck = 0 }: {
 
   const dismiss = useCallback(() => {
     if (status?.started_at && status.state !== 'running') dismissedStarts.add(status.started_at)
-    const kept = rememberedRestore()
-    const ticket = lost?.ticket ?? (status && status.state !== 'running' ? kept?.ticket : undefined)
+    const ticket = lost?.ticket ?? (status && status.state !== 'running' ? source ?? undefined : undefined)
     setLost(null)
     setStatus(null)
     setWaiting(null)
@@ -122,7 +136,7 @@ export function useRestoreRecord({ adminRead, recheck = 0 }: {
       forgetRestore(ticket)
       setForgotten(n => n + 1)
     }
-  }, [status, lost])
+  }, [status, lost, source])
 
   const shown = status && status.state !== 'running' && status.started_at && dismissedStarts.has(status.started_at) ? null : status
   return { status: shown, lost, unreachable, waiting, dismiss }

@@ -25,11 +25,11 @@ import { ConfirmDialog } from '@/components/settings/ConfirmDialog'
 import { adminFailure, restoreServerLine, type Failure } from './adminFailure'
 import { FailureNote, FailureText, StandingNotice, StatusLine, useSaid } from './AdminNotes'
 import { useConfirmedAction } from './useConfirmedAction'
-import { backupPanelMounted, clearRestoreOutcome, finishRestore, useRestoreOutcome } from './restoreOutcome'
+import { backupPanelMounted, beginRestore, clearRestoreOutcome, finishRestore, useRestoreOutcome } from './restoreOutcome'
 import { RestoreRecordNote } from '@/components/RestoreRecordNote'
-import { useRestoreRecord } from '@/hooks/useRestoreRecord'
+import { useRestoreRecord, type RestoreRecord } from '@/hooks/useRestoreRecord'
 import {
-  RESTORE_TICKET_HEADER, newRestoreTicket, noteRestoreSeen, putBackRestore, rememberRestore, rememberedRestore,
+  RESTORE_TICKET_HEADER, newRestoreTicket, noteRestoreSeen, putBackRestore, rememberRestore, rememberedRestore, restoreWords,
 } from '@/lib/restoreStatus'
 import {
   parseReferralOptionsSetting,
@@ -125,10 +125,12 @@ const REFERRAL_OPTIONS_KEY = 'referral_prompt_options'
 /* ─────────────────────── ADMIN VIEW ─────────────────────── */
 // Admin backup + restore card. Backup is a tokenized anchor
 // download; restore is a multipart upload guarded by a hard-confirm.
-function AdminBackupRestore({ downloadBackup, accountId }: {
+function AdminBackupRestore({ downloadBackup, accountId, record }: {
   downloadBackup: () => Promise<Failure | null>
   /** The signed-in account: a restore's outcome is said to it only. */
   accountId: number
+  /** The server's record of the latest restore, read by the page. */
+  record: RestoreRecord
 }) {
   const [file, setFile] = useState<File | null>(null)
   const [doneBlocked, setDoneBlocked] = useState(false)
@@ -141,22 +143,22 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
   // What came of the last restore lives outside this panel (restoreOutcome):
   // the restore can end after the panel, or the whole Admin page, has gone.
   // While the panel is up it says it, so the app's alert does not.
-  const { outcome } = useRestoreOutcome()
+  const { outcome, out } = useRestoreOutcome()
   useEffect(() => backupPanelMounted(), [])
-  // The server's own record of the latest restore (hooks/useRestoreRecord).
-  // A restore no longer ends with its request, so after a reload, or for a
-  // restore this tab did not start or got no answer for, this is what says
-  // it is running or how it went. Read again when this tab's restore ends.
-  const [restoresEnded, setRestoresEnded] = useState(0)
-  const record = useRestoreRecord({ adminRead: getAdminRestoreStatus, recheck: restoresEnded })
+  // The server's own record of the latest restore (hooks/useRestoreRecord,
+  // read by the page). A restore no longer ends with its request, so after a
+  // reload, or for a restore this tab did not start or got no answer for,
+  // this is what says it is running or how it went.
   const serverRunning = record.status?.state === 'running'
   const mine = outcome && outcome.accountId === accountId ? outcome : null
   // This tab's own answer, when it is one: Aurora said how the restore went.
   const answered = !!mine && (mine.ok || !mine.lost)
   const recordSays = (!!record.status && record.status.state !== 'none') || !!record.lost || !!record.waiting
   // The record is said unless this tab's answer already says the same
-  // restore; a restore running now is always said.
-  const showRecord = !restoreFlow.busy && recordSays && (serverRunning || !answered)
+  // restore; a restore running now is always said. Not while this tab has a
+  // restore out (`out`, which outlives a remount of this panel): its record
+  // does not exist until the upload ends, and a read would call it unknown.
+  const showRecord = out === 0 && recordSays && (serverRunning || !answered)
   const restored = mine?.ok ? mine.file : null
   // An outcome that lands while this panel is up is said in its status line,
   // whichever panel sent the restore (the admin may have left the section
@@ -177,7 +179,7 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
   useEffect(() => () => { mountedRef.current = false }, [])
 
   const onSubmit = () => {
-    if (!file || submitting || doneBlocked) return
+    if (!file || submitting || doneBlocked || out > 0 || serverRunning) return
     restoreFlow.ask(file)
   }
 
@@ -191,6 +193,7 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
     const previous = rememberedRestore()
     const ticket = newRestoreTicket()
     rememberRestore(ticket, f.name)
+    beginRestore()
     try {
       const form = new FormData()
       form.append('backup', f)
@@ -236,8 +239,6 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
       if (!lost) noteRestoreSeen(ticket, 'failed')
       finishRestore(lost ? { accountId, file: f.name, ok: false, failure, lost } : { accountId, file: f.name, ok: false, failure })
       return failure
-    } finally {
-      if (mountedRef.current) setRestoresEnded(n => n + 1)
     }
   })
 
@@ -301,7 +302,7 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
           <input
             type="file"
             accept=".dump,application/octet-stream"
-            disabled={submitting || doneBlocked || serverRunning}
+            disabled={submitting || doneBlocked || serverRunning || out > 0}
             onChange={e => setFile(e.target.files?.[0] ?? null)}
             className="min-w-0 max-w-full text-sm text-ink-2 file:mr-3 file:px-3 file:py-1.5 file:rounded-chip file:border-0 file:bg-surface-raised-2 file:text-ink file:cursor-pointer hover:file:bg-action-soft"
           />
@@ -313,7 +314,7 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
               e.currentTarget.focus()
               onSubmit()
             }}
-            disabled={!file || submitting || doneBlocked || serverRunning}
+            disabled={!file || submitting || doneBlocked || serverRunning || out > 0}
             className="stage-btn stage-btn-destructive"
           >
             <Icon name="refresh" size={16} /> {doneBlocked ? 'Restart Aurora to continue' : 'Restore database'}
@@ -368,7 +369,7 @@ function restoreFailure(e: unknown): { failure: Failure; lost: boolean } {
   // from a proxy in front of it that gave up waiting, while the restore may
   // still be running. They are no answer, not a restore that failed.
   const noAnswer = e instanceof NetworkError || (e instanceof APIError && [502, 503, 504].includes(e.status))
-  const lost = 'The connection to the server was lost during the restore. If the upload had finished, the restore goes on on the server without this page, and how it ends is shown here once Aurora can be asked: the database may be as it was, restored, or empty until then.'
+  const lost = 'The connection to the server was lost during the restore. If the upload had finished, the restore goes on on the server without this page: do not restart Aurora until you know how it ended, since a restart stops a restore still running. Admin, under Backup and restore, shows how it ends once Aurora can be asked, and so does the sign-in page in this browser.'
   return {
     lost: noAnswer,
     failure: adminFailure(e, 'restore the database', { 502: lost, 503: lost, 504: lost, 400: 'The server refused this file, and the database was not changed.', 409: 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.', 413: 'The file is too large to restore from here, and the database was not changed.', noAnswer: lost, otherwise: 'The restore did not finish. Depending on where it stopped, the database is either as it was or empty. Read what the server said before going on.' }),
@@ -3188,6 +3189,20 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
   sectionAsk?: number
 }) {
   const [tab, setTab] = useState<AdminTab>(initialSection ?? 'dashboard')
+  // The server's record of the latest restore, read when the page opens and
+  // again when a restore this tab sent ends (hooks/useRestoreRecord): a
+  // restore no longer ends with its request, so a reload, another admin or a
+  // request that got no answer learns of it here.
+  const { outcome: restoreOutcomeNow, out: restoresOut, ended: restoresEnded } = useRestoreOutcome()
+  const restoreRecord = useRestoreRecord({ adminRead: getAdminRestoreStatus, recheck: restoresEnded })
+  const restoreMine = restoreOutcomeNow && restoreOutcomeNow.accountId === currentAdminId ? restoreOutcomeNow : null
+  // This tab's own answer is said by RestoreOutcomeAlert; the record is not
+  // said beside it, except for a restore running now.
+  const restoreAnswered = !!restoreMine && (restoreMine.ok || !restoreMine.lost)
+  const restoreAside = restoresOut === 0 && (
+    restoreRecord.status?.state === 'running' ||
+    (!restoreAnswered && (!!restoreRecord.lost || (!!restoreRecord.status && !!restoreWords(restoreRecord.status)?.urgent)))
+  )
   useEffect(() => {
     if (initialSection) setTab(initialSection)
   }, [sectionAsk, initialSection])
@@ -3491,6 +3506,12 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
     // shows (the effects above key on `tab`): two of them poll, so nothing is
     // mounted that is not on screen.
     <AdminShell current={tab} onSection={setTab}>
+      {/* Every section but Backup and restore (which says the record
+          itself): a restore running, or one whose end the admin must act on,
+          that this tab has no answer of its own about. */}
+      {tab !== 'backup' && restoreAside && (
+        <RestoreRecordNote record={restoreRecord} server={restoreServerLine(restoreRecord.status)} className="mb-6" />
+      )}
       {tab === 'dashboard' && (
         <div>
           {statsErr && (
@@ -3925,7 +3946,7 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
       {tab === 'flagged' && <AdminFlaggedTab />}
       {tab === 'llm' && <AdminLLMTab restartNeeded={llmRestart} onRestartNeeded={() => setLLMRestart(true)} onDismissRestart={() => setLLMRestart(false)} />}
       {tab === 'oauth' && <AdminOAuthTab />}
-      {tab === 'backup' && <AdminBackupRestore downloadBackup={downloadBackup} accountId={currentAdminId} />}
+      {tab === 'backup' && <AdminBackupRestore downloadBackup={downloadBackup} accountId={currentAdminId} record={restoreRecord} />}
       {tab === 'health' && <PlaybackHealth />}
     </AdminShell>
   )
