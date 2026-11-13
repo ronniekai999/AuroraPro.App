@@ -1,0 +1,10 @@
+{
+  "sha": "fbd6e57f997cdd8fcbc34ec48fb65c9e231b06d6",
+  "verdict": "lows-only",
+  "summary": "docs/redesign-known-items.md: the PR description's known open items moved into the repo item for item (this PR reads the redesign), with the Admin items its third review accepted; indexed in docs/README.md. Lows: one Admin sentence overstated (the AI restart notice is also said later), a dangling reference, wording that still speaks as the PR; fixed in the follow-up doc commit",
+  "reviewer": "fresh-context-agent-a31b3af3",
+  "findings": "5",
+  "diff_digest": "c8fb7c5f6515880f481ddd9f513ce1352427e80184a9ba4c89aee06659a6bed4",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T10:08:26Z"
+}
