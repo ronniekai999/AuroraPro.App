@@ -161,7 +161,10 @@ Fix or file each item, and delete it here when it is no longer true.
   animation any value but `none`, `initial` or `unset` alone, or a shorthand
   whose every part is a time, a number, an easing function or one of its
   keywords, so a quoted or escaped name, `var()`, `attr()`, `inherit` and
-  `revert` all count. Check 5b reads the stilling's selectors with names in
+  `revert` all count. A keyframes name that repeats a shorthand keyword in its
+  layer (`animation: ease ease 1s` with `@keyframes ease`, or `forwards
+  backwards` with `@keyframes backwards`) is read as no animation, though
+  Chromium runs it under that name, so that form gets past 5c. Check 5b reads the stilling's selectors with names in
   any letter case and the attribute's value exactly, so
   `[data-effects="REDUCED"]` is not taken for `"reduced"`, and recognises a
   stilling only written as those six selectors (spaced or quoted otherwise,
