@@ -543,11 +543,24 @@ const INLINE_COVERED = new Map([
 //      the three animated pseudo-elements are stilled with
 //      `animation: none !important` inside a top-level
 //      `@media (prefers-reduced-motion: reduce)`, and again in top-level
-//      rules for `html[data-effects="reduced"]`.
+//      rules for `html[data-effects="reduced"]`;
+//   c. and nothing in the stylesheet gets round that: an animation the
+//      stylesheet gives a view-transition pseudo-element is on one of those
+//      three (not on ::view-transition-image-pair or the ::view-transition
+//      overlay, which nothing stills) and is not `!important` (an important
+//      one on a named pseudo-element, ::view-transition-old(root) say,
+//      outranks the system setting's `(*)`, whose argument counts for
+//      nothing); and there is no `@view-transition` rule, which starts a
+//      transition between documents with no script, so with no guard. The
+//      title page's open captures the root, so the whole page cross-fades:
+//      a cross-fade written on the image pair, or forced with `!important`,
+//      would run under both settings, and (a) and (b) would still pass.
 // There is no list of exceptions. What this still cannot see: a call made
 // through an alias that never spells the name (a function handed the
-// document's method by something else), and a guard that is an `if` with a
-// `return` but returns on the wrong answer.
+// document's method by something else), a guard that is an `if` with a
+// `return` but returns on the wrong answer, and an animation given to a
+// view-transition pseudo-element from outside index.css (a style element
+// or an inline style written by script).
 {
   console.log('\n## Check 5 — view transitions are removed by both "less motion" settings')
   const strip = src => src.replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' ')).replace(/(^|[^:'"`])\/\/[^\n]*/g, (m, lead) => lead + ' '.repeat(m.length - lead.length))
@@ -634,6 +647,33 @@ const INLINE_COVERED = new Map([
     else { bad++; console.log('  ***     index.css does not still ::view-transition-group/old/new(*) inside a top-level @media (prefers-reduced-motion: reduce) (animation: none !important on all three).') }
     if (PSEUDOS.every(x => covered.has('app ' + x))) console.log('  ok      index.css stills them under Reduce effects, in top-level rules')
     else { bad++; console.log('  ***     index.css does not still html[data-effects="reduced"]::view-transition-group/old/new(*) in top-level rules (animation: none !important on all three).') }
+    // c. Nothing gets round the stilling.
+    let around = 0
+    sheet.walkRules(rule => {
+      if (stilled(rule)) return
+      const vt = rule.selectors.map(x => x.trim()).filter(x => /::view-transition\b/.test(x))
+      if (!vt.length) return
+      for (const d of rule.nodes ?? []) {
+        if (d.type !== 'decl' || (d.prop !== 'animation' && d.prop !== 'animation-name') || /^none$/i.test(d.value.trim())) continue
+        const line = d.source?.start?.line
+        for (const sel of vt) {
+          const kind = /::(view-transition(?:-[a-z-]+)?)/.exec(sel)?.[1]
+          if (!['view-transition-group', 'view-transition-old', 'view-transition-new'].includes(kind)) {
+            around++
+            console.log(`  ***     index.css:${line} gives ${sel} an animation (${d.prop}: ${d.value}): nothing stills ::${kind} under either setting, so it would run under both.`)
+          } else if (d.important) {
+            around++
+            console.log(`  ***     index.css:${line} gives ${sel} an !important animation (${d.prop}: ${d.value}): it outranks the stilling of ::${kind}(*) under the system setting.`)
+          }
+        }
+      }
+    })
+    sheet.walkAtRules('view-transition', at => {
+      around++
+      console.log(`  ***     index.css:${at.source?.start?.line} has an @view-transition rule: it starts a transition between documents with no script, so no guard asks whether less motion was wanted.`)
+    })
+    if (!around) console.log('  ok      no animation in index.css gets round that stilling, and no @view-transition starts one without the script')
+    bad += around
   } else {
     console.log('  no view transition is started and none is named.')
   }

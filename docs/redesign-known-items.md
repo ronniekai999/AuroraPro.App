@@ -115,13 +115,31 @@ Fix or file each item, and delete it here when it is no longer true.
   not run). The written position leaves the card while the receiver buffers.
   While the picker is open the chat ticker can be drawn over the card. No real
   cast session was rendered.
-- Motion: a waiting open is dropped by the app's Back, a destination or Play,
-  but not by the browser's own Back, Resume on a card or a profile switch
-  inside the one frame before it lands. A poster inside a rail's faded edge
-  travels without the fade. The motion audit cannot see a guard that asks the
-  wrong way round, an alias, or a later rule that restores an animation. App's
-  wiring of the travel has no test (jsdom has no view transitions), and
-  Firefox and Safari were not run.
+- Motion: opening a title from a poster cross-fades the whole page into the
+  title page while the poster travels, and for the length of it a press does
+  nothing: with the page captured, Chromium sends every press to `<html>`.
+  That is the owner's choice of trade-off. The window, from the press to the
+  first press that lands on the title page, was measured in headless Chromium
+  in the build container (software rendering, no GPU), with the 200 ms
+  `--dur-travel`: median about 360 ms at 1440x900 (326 to 411 over sixteen
+  opens) and 362 ms at 1024x768 (317 to 380 over six); every press in it went
+  to `<html>`. A 1 ms transition still cost about 155 ms there (the frames the
+  browser takes its pictures in, and slow first frames in software), so a
+  GPU-composited browser should do better; that was not measured. Only opens
+  that travel cross-fade (from 1024px, a plain press on a loaded 2:3 poster);
+  everything else, every open below 1024px wide (phones, most tablets held
+  upright) included, opens at once as before, with no window. If the browser
+  skips a transition after the title page is in (a name used twice), the page
+  appears without any fade: its own entrance was finished for the cross-fade.
+  A waiting open is dropped by the app's Back, a destination or Play, but not
+  by the browser's own Back, Resume on a card or a profile switch inside the
+  one frame before it lands. A poster inside a rail's faded edge travels
+  without the fade. The motion audit cannot see a guard that asks the wrong
+  way round, an alias, an animation given to a view-transition pseudo-element
+  from outside `index.css`, or a later rule that restores an animation other
+  than an `!important` one on a view-transition pseudo-element (which it
+  refuses). App's wiring of the travel has no test (jsdom has no view
+  transitions), and Firefox and Safari were not run.
 - Failure words: a step back can still be taken twice in the few milliseconds
   between a press on Back and the browser applying it. A request already out
   when a session ends still completes, and a toast it raises is shown to the

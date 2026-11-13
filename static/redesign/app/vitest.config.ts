@@ -1,4 +1,5 @@
-// Vitest configuration — exists solely to pin the test-run timezone.
+// Vitest configuration — pins the test-run timezone, and lets a test read a
+// stylesheet as text (see `css` below).
 //
 // WHY A NON-UTC ZONE. The calendar's date math is deliberately UTC-consistent
 // (Audit M3) and contentViews.test.ts asserts so. But this container and any
@@ -43,6 +44,12 @@ export default mergeConfig(
     test: {
       env: { TZ: 'America/New_York' },
       setupFiles: ['./src/test/setup-dom.ts'],
+      // A stylesheet imported as text (`index.css?raw`) arrives as its text.
+      // Vitest otherwise turns every CSS import into an empty string, `?raw`
+      // included, so a test reading the stylesheet would read nothing and
+      // pass vacuously (lib/posterTravel.test.ts reads which rules name what).
+      // Plain CSS imports are untouched.
+      css: { include: [/\.css\?raw$/] },
     },
   }),
 )

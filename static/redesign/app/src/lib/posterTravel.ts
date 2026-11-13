@@ -1,15 +1,21 @@
 // Travel: the poster that was pressed moves to where the title page draws
-// it, instead of one page replacing the other.
+// it, while the page it was pressed on cross-fades into the title page.
 //
-// The browser does the moving (the View Transitions API): the pressed
-// card's picture and the title page's poster have one name, and for the
-// length of the transition the browser draws the first growing into the
-// second. Nothing else is captured: the root has no transition name
-// (index.css), so the page under the poster is the live one from the first
-// frame, the old page goes at once and the title page fades in by its own
-// entrance (.animate-fade-in). A captured root would take every press for
-// the length of the transition: Chromium sends each hit to <html> while a
-// captured root's transition runs, whatever pointer-events says.
+// The browser does the moving (the View Transitions API). For the length of
+// the transition <html> carries TRAVELLING (index.css): the page itself is
+// captured (the root's name), and so are the pressed card's picture and the
+// title page's poster, under one name. The browser draws the old page fading
+// out as the title page fades in, and the first picture growing into the
+// second over both. Nothing is named before or after: the attribute and the
+// picture's name are put on as the transition starts and taken off as it ends.
+//
+// WHAT IT COSTS. A captured root takes every press for the length of the
+// transition: Chromium sends each hit to <html> while it runs, whatever
+// pointer-events says. So a press during it does nothing; the owner chose the
+// cross-fade knowing that, and the transition is kept short to keep that
+// window short (--dur-travel). The title page's own entrance
+// (.animate-fade-in) is finished as it arrives, so it is not faded twice, once
+// by itself and once by the cross-fade.
 //
 // THE OPEN COMES FIRST. Whatever the browser does with the transition, the
 // title is opened exactly once: `change` runs once, in the transition's
@@ -18,7 +24,9 @@
 // so nothing is drawn growing into a page that was not flushed). A press
 // that arrives while an earlier open has not been made yet takes its
 // place: the latest press wins, and the earlier one is not made at all; so
-// does anything that leaves the page meanwhile (dropWaitingOpen).
+// does anything that leaves the page meanwhile (dropWaitingOpen), and the
+// transition of an open that is not made is skipped, so the captured page
+// does not hold presses for a cross-fade between a page and itself.
 //
 // WHAT TRAVELS. Only a plain press on a card's own open control, during
 // that press: a click with the main button and no modifier key, on the
@@ -30,28 +38,34 @@
 // will draw a poster (from lg) and its code is here (`arrives`). And only
 // when, once the title page is in the document, its poster is there with
 // its picture ready; otherwise the pressed picture has nothing to grow
-// into, and it fades out where it was.
+// into, and it fades out where it was (the pages still cross-fade).
 //
-// NO TRANSITION AT ALL where the browser has none; where the viewer asked
-// for less motion, of the system (prefers-reduced-motion) or of the app
-// (Reduce effects, <html data-effects="reduced">); while the tab is hidden;
-// while the caller says something is over the page (the player, a party's
-// panel); for an open with no picture that travels; and for an open that
-// no plain press on that title's card is behind (a deep link, a
+// NO TRANSITION AT ALL, so no cross-fade either, where the browser has none;
+// where the viewer asked for less motion, of the system
+// (prefers-reduced-motion) or of the app (Reduce effects,
+// <html data-effects="reduced">); while the tab is hidden; while the caller
+// says something is over the page (the player, a party's panel); for an open
+// with no picture that travels (which includes every open below lg, a phone's
+// or a tablet's: the title page draws no poster there, and a cross-fade alone
+// would cost the dead window without the travel it is paid for); and for an
+// open that no plain press on that title's card is behind (a deep link, a
 // notification, "Find it", Back). There the change is made at once, as it
-// always was.
+// always was, and the title page fades in by its own entrance.
 //
-// WHAT IT COSTS THE PRESS. The browser takes its picture of the poster
-// first and runs the change at its next frame, so the title page is in the
-// document about one frame later than it would have been. Nothing waits
-// for the animation.
+// WHAT IT COSTS THE PRESS. The browser takes its picture of the page first
+// and runs the change at its next frame, so the title page is in the
+// document about one frame later than it would have been.
 
 import { flushSync } from 'react-dom'
 
-/** The one name the travelling poster has: the pressed picture for the
- *  length of the transition, and the title page's poster always
- *  (index.css, .stage-detail-poster). */
+/** The one name the travelling poster has, for the length of the
+ *  transition: the pressed picture's (set here) and the title page's
+ *  poster's (index.css, under TRAVELLING). */
 export const TRAVEL_NAME = 'title-poster'
+/** The attribute <html> carries for the length of a transition. index.css
+ *  names the root (so the two pages cross-fade) and the title page's poster
+ *  under it, and only under it. */
+export const TRAVELLING = 'data-title-travel'
 
 /** The title page's poster (DetailHero). */
 const DESTINATION = '[data-title-poster]'
@@ -109,11 +123,27 @@ function travellingPicture(card: Element, doc: Document): HTMLImageElement | nul
   return corners.every(([x, y]) => { const hit = doc.elementFromPoint(x, y); return !!hit && card.contains(hit) }) ? img : null
 }
 
+/** The title page's own entrance, finished as it arrives inside the
+ *  transition: the cross-fade brings the page in, and the entrance run
+ *  under it as well would fade its content twice (it would come up after
+ *  its own background). Only the page entrance (`fadeIn`, .animate-fade-in);
+ *  a picture's own fade as it loads is the picture's. */
+function finishEntrances(doc: Document): void {
+  for (const el of doc.querySelectorAll('.animate-fade-in')) {
+    // getAnimations flushes style first, so an entrance the change has just
+    // mounted is there to finish. A browser without it has no transitions.
+    for (const a of el.getAnimations?.() ?? []) {
+      if ((a as CSSAnimation).animationName !== 'fadeIn') continue
+      try { a.finish() } catch { /* nothing to finish */ }
+    }
+  }
+}
+
 /** The open that has been asked for and not made yet. */
 let waiting: { cancel: () => void } | null = null
-/** The latest transition started: only it may take the name off the
- *  picture it named (a superseded one's end comes after the next has named
- *  the same picture again). */
+/** The latest transition started: only it may take off the names it put on
+ *  (a superseded one's end comes after the next has named the same picture,
+ *  and <html>, again). */
 let current: object | null = null
 
 /** Drops an open asked for and not made yet: for whatever leaves the page
@@ -124,12 +154,13 @@ export function dropWaitingOpen(): void {
 }
 
 /** Opens a title: runs `change` exactly once, with the pressed card's
- *  poster travelling to the title page's where it can (see the top of the
- *  file). `change` sets state and navigates; it is flushed, so the title
- *  page is in the document when the browser takes its second picture.
- *  `blocked`: something is over the page, so no transition. `arrives`: the
- *  title page can draw its poster at once (its code is loaded, the title
- *  has a poster). Says whether a transition was started. */
+ *  poster travelling to the title page's, and the pages cross-fading,
+ *  where it can (see the top of the file). `change` sets state and
+ *  navigates; it is flushed, so the title page is in the document when the
+ *  browser takes its second picture. `blocked`: something is over the page,
+ *  so no transition. `arrives`: the title page can draw its poster at once
+ *  (its code is loaded, the title has a poster). Says whether a transition
+ *  was started. */
 export function travelToTitle(mediaId: number, change: () => void, { blocked = false, arrives = true, doc = document }: { blocked?: boolean; arrives?: boolean; doc?: Document } = {}): boolean {
   // The latest press wins: an earlier open that has not been made is not made.
   dropWaitingOpen()
@@ -142,9 +173,9 @@ export function travelToTitle(mediaId: number, change: () => void, { blocked = f
   }
 
   // The picture travels only to a title page that draws a poster. A page
-  // that already draws one (a title opened from another) holds the name,
-  // and two elements with one name void the whole transition: that open is
-  // made at once.
+  // that already draws one (a title opened from another) would hold the
+  // name too, and two elements with one name void the whole transition:
+  // that open is made at once.
   const picture = doc.defaultView?.matchMedia?.(POSTER_FROM).matches && !doc.querySelector(DESTINATION) ? travellingPicture(card, doc) : null
   if (!picture) {
     change()
@@ -152,12 +183,20 @@ export function travelToTitle(mediaId: number, change: () => void, { blocked = f
   }
   const token = {}
   current = token
-  const untag = () => { if (current === token) picture.style.removeProperty('view-transition-name') }
+  const root = doc.documentElement
+  // Takes off what this transition put on: the picture's name and <html>'s
+  // attribute (with it the root's name and the title page's poster's).
+  const untag = () => {
+    if (current !== token) return
+    picture.style.removeProperty('view-transition-name')
+    root.removeAttribute(TRAVELLING)
+  }
   // Set when the title page's poster is kept out of this transition.
   let unhold = () => {}
 
   let state: 'waiting' | 'made' | 'cancelled' = 'waiting'
   let timer: ReturnType<typeof setTimeout> | undefined = undefined
+  let transition: ViewTransition | undefined = undefined
   const settle = () => {
     if (timer !== undefined) clearTimeout(timer)
     if (waiting === mine) waiting = null
@@ -172,12 +211,17 @@ export function travelToTitle(mediaId: number, change: () => void, { blocked = f
       // and the title page must be in it. Safe here: the browser calls this
       // from a task of its own, never from inside a React render or effect.
       flushSync(change)
+    } catch (e) {
+      untag()
+      throw e
     } finally {
       // The first picture is taken: the name comes off the card (which the
       // open has usually removed from the page anyway), so the second
-      // picture holds it once at most.
-      untag()
+      // picture holds it once at most. <html> keeps its attribute: the
+      // second picture is of the page too.
+      if (current === token) picture.style.removeProperty('view-transition-name')
     }
+    finishEntrances(doc)
     // Nothing to grow into (the title page's poster or its picture is not
     // there yet): the title page's poster is kept out of this transition,
     // and the pressed picture fades out where it was.
@@ -194,12 +238,15 @@ export function travelToTitle(mediaId: number, change: () => void, { blocked = f
       state = 'cancelled'
       settle()
       untag()
+      // Not made: nothing is to cross-fade, and the captured page would
+      // hold every press while the browser drew the page into itself.
+      try { transition?.skipTransition() } catch { /* already over */ }
     },
   }
   waiting = mine
 
   picture.style.setProperty('view-transition-name', TRAVEL_NAME)
-  let transition: ViewTransition
+  root.setAttribute(TRAVELLING, '')
   try {
     transition = doc.startViewTransition(() => { make(true) })
   } catch {
@@ -207,18 +254,19 @@ export function travelToTitle(mediaId: number, change: () => void, { blocked = f
     make(false)
     return false
   }
+  const started = transition
   // The browser calls the update callback even for a transition it skips.
   // Should it not have by then, the transition is skipped (nothing may be
   // drawn growing into a page that was not flushed) and the open is made
   // without it.
   timer = setTimeout(() => {
-    try { transition.skipTransition() } catch { /* already over */ }
+    try { started.skipTransition() } catch { /* already over */ }
     make(false)
   }, CALLBACK_WAIT_MS)
   const done = () => { untag(); unhold() }
   // A skipped transition rejects `ready` (a duplicate name, a hidden tab):
   // not an error of this code's, and the open has been made.
-  transition.ready.catch(() => {})
-  transition.finished.then(done, done)
+  started.ready.catch(() => {})
+  started.finished.then(done, done)
   return true
 }
