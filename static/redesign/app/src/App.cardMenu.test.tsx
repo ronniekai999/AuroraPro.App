@@ -105,8 +105,10 @@ const FOUND = item(401, 'Found By Search')
 const SAVED = item(501, 'Saved Title')
 const COLLECTED = item(601, 'In A Collection')
 
-function stubServer({ bound: boundAt = 1, role = 'user' } = {}) {
+function stubServer({ bound: boundAt = 1, role = 'user', noProfiles = false } = {}) {
   let bound = boundAt
+  /** `activation.fails`: the server refuses the next activation (500). */
+  const activation = { fails: false }
   /** Parties the server lists as live (Tonight's strip). */
   const live: unknown[] = []
   const me = { id: 1, username: 'ronnie', email: 'r@example.test', role }
@@ -142,8 +144,17 @@ function stubServer({ bound: boundAt = 1, role = 'user' } = {}) {
     }
     // A switch binds the session to the profile it names.
     const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
-    if (activate && init?.method === 'POST') { bound = Number(activate[1]); return new Response(null, { status: 204 }) }
+    if (activate && init?.method === 'POST') {
+      // 'activate' keeps the answer back.
+      const kept = holds.get('activate')
+      if (kept) await kept
+      if (activation.fails) { activation.fails = false; return json({ error: { code: 500, message: 'pq: deadlock detected' } }, 500) }
+      bound = Number(activate[1])
+      return new Response(null, { status: 204 })
+    }
     const failed = failing.find(f => f.path.test(p))?.how
+    // A failing answer can be kept back too (`hold` with its path).
+    if (failed) { const kept = holds.get(p); if (kept) await kept }
     if (failed === 'network') throw new TypeError('Failed to fetch')
     if (failed) return json({ error: { code: failed.status, message: failed.words } }, failed.status)
     // The profile's lists, for the add-to-list sheet.
@@ -168,7 +179,9 @@ function stubServer({ bound: boundAt = 1, role = 'user' } = {}) {
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: me })
     if (p === '/api/auth/login' && init?.method === 'POST') return json({ expires_in: 900, user: me })
     if (p === '/api/auth/setup-status') return json({ has_users: true })
-    if (p === '/api/profiles') return json([PARENT, KID])
+    // `noProfiles`: an account that has made none (the server acts as a stand-in).
+    if (p === '/api/profiles') return json(noProfiles ? [] : [PARENT, KID])
+    if (p === '/api/profiles/active' && noProfiles) return json({ error: 'no profile' }, 404)
     if (p === '/api/profiles/active') return json(bound === 1 ? PARENT : KID)
     if (/^\/api\/profiles\/\d+\/library$/.test(p)) {
       libraryReads.n++
@@ -237,7 +250,7 @@ function stubServer({ bound: boundAt = 1, role = 'user' } = {}) {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal('scrollTo', () => {})
   return {
-    asks, parties, writes, mediaDeletes, live,
+    asks, parties, writes, mediaDeletes, live, activation,
     /** Keeps the answer to every library write back until the returned
      *  function is called; writes asked after that are answered at once. */
     holdLibraryWrites() {
@@ -265,7 +278,7 @@ function stubServer({ bound: boundAt = 1, role = 'user' } = {}) {
   }
 }
 
-function renderAt(path: string, opts: { bound?: number; role?: string; prefs?: Record<string, unknown>; before?: (server: ReturnType<typeof stubServer>) => void } = {}) {
+function renderAt(path: string, opts: { bound?: number; role?: string; noProfiles?: boolean; prefs?: Record<string, unknown>; before?: (server: ReturnType<typeof stubServer>) => void } = {}) {
   localStorage.clear()
   localStorage.setItem('aurora_user', JSON.stringify({ id: 1, username: 'ronnie', email: 'r@example.test', role: opts.role ?? 'user' }))
   localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true, ...opts.prefs }))
@@ -1260,8 +1273,12 @@ describe('a question asked with the app\'s dialog', () => {
   }
   const signInAgain = () => act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'aurora_user', newValue: localStorage.getItem('aurora_user') })) })
 
-  it('goes when the session expires, and is not there for the next sign-in', async () => {
-    const server = renderAt(`/title/${FRESH.id}`, { role: 'admin' })
+  // On an account with no profile no profile goes to null, so the switch's
+  // reset does not run: the expiry's and the sign-out's own clears are
+  // what is left.
+  const accounts = [['an account with profiles', false], ['an account with no profile', true]] as const
+  it.each(accounts)('goes when the session expires, and is not there for the next sign-in (%s)', async (_account, noProfiles) => {
+    const server = renderAt(`/title/${FRESH.id}`, { role: 'admin', noProfiles })
     await askRemove()
     act(() => { window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT)) })
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull(), find)
@@ -1272,8 +1289,8 @@ describe('a question asked with the app\'s dialog', () => {
     expect(server.mediaDeletes).toEqual([])
   })
 
-  it('goes with a sign-out, and is not there for the next sign-in', async () => {
-    const server = renderAt(`/title/${FRESH.id}`, { role: 'admin' })
+  it.each(accounts)('goes with a sign-out, and is not there for the next sign-in (%s)', async (_account, noProfiles) => {
+    const server = renderAt(`/title/${FRESH.id}`, { role: 'admin', noProfiles })
     await askRemove()
     // Driven behind the question (it hides the page), as a sign-out made
     // in another tab of the same session reaches this one.
@@ -1412,5 +1429,65 @@ describe('what the app says when it cannot', () => {
     sheet = await open()
     await within(sheet).findByRole('button', { name: 'Weekend' }, find)
     expect(within(sheet).queryByRole('alert')).toBeNull()
+  })
+})
+
+// A party's join that did not happen is said by the hook's reason, never
+// by the hook's words (they are the hook's own to reword).
+describe('a party join that did not happen', () => {
+  const RAW = 'pq: That code is a persistent room; raw words'
+  it.each([
+    ['offline_room', 'Room MOON42 is offline — no live session right now. Ask the host to start a watch party.'],
+    ['http_404', 'No party is using the code MOON42 right now.'],
+    ['network', 'Could not reach the server. Check the connection and try again.'],
+    ['invalid_code', 'A party code is 6 letters or digits.'],
+    ['signed_out', 'Sign in to join a party.'],
+    ['some_reason_not_known_yet', 'Could not join party MOON42 just now.'],
+    [undefined, 'Could not join party MOON42 just now.'],
+  ])('from Tonight\'s strip, reason %s', async (reason, says) => {
+    partyStub.join = async () => ({ ok: false, error: RAW, ...(reason ? { reason } : {}) })
+    renderAt('/', { before: server => server.live.push({ code: 'MOON42', host_user_id: 9, party_name: '', media_title: 'Night Train', media_poster: '', participant_count: 2, max_participants: 0, is_playing: true, started_at: NOW }) })
+    fireEvent.click(await screen.findByRole('button', { name: 'Join the party watching Night Train' }, find))
+    await screen.findByText(says, {}, find)
+    expect(document.body.textContent).not.toContain('raw words')
+  })
+
+  it.each([
+    ['offline_room', 'Room NEWONE is offline — no live session right now. Ask the host to start a watch party.'],
+    ['http_404', 'No party is using the code NEWONE right now.'],
+    [undefined, 'Could not join party NEWONE just now.'],
+  ])('from a party link, reason %s', async (reason, says) => {
+    partyStub.join = async () => ({ ok: false, error: RAW, ...(reason ? { reason } : {}) })
+    window.history.replaceState(null, '', '/p/NEWONE')
+    renderAt('/')
+    await screen.findByText(says, {}, find)
+    expect(document.body.textContent).not.toContain('raw words')
+  })
+})
+
+// A 404 for the open title that lands while a switch attempt is out is
+// dropped (it might be the other profile's answer). When the attempt then
+// changes nothing, the title is read again, and its 404 leaves the page.
+describe('the open title\'s 404 across a switch that changes nothing', () => {
+  it('is read again when the switch is refused, and the page is left', async () => {
+    const server = renderAt('/movies')
+    await screen.findAllByRole('button', { name: 'More actions for Never Started' }, find)
+    const releaseRead = server.hold(`/api/media/${FRESH.id}`)
+    server.failDetail({ status: 404, words: 'not found' })
+    fireEvent.click(document.querySelector(`[data-media-id="${FRESH.id}"] .card-open`)!)
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: FRESH.title })).toBeInTheDocument(), find)
+    // A switch to Kid, its activation kept back and then refused.
+    const releaseActivation = server.hold('activate')
+    server.activation.fails = true
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Watching as' }, find)).getByRole('button', { name: /Kid/ }))
+    // The 404 lands while the switch is out: dropped, the page stays.
+    releaseRead()
+    await act(async () => { await new Promise(done => setTimeout(done, 100)) })
+    expect(screen.getByRole('heading', { level: 1, name: FRESH.title })).toBeInTheDocument()
+    releaseActivation()
+    // The switch ends on Parent; the title is read again, and its 404 leaves.
+    await screen.findByText('This title is not available.', {}, find)
+    await waitFor(() => expect(screen.queryByRole('heading', { level: 1, name: FRESH.title })).toBeNull(), find)
   })
 })

@@ -140,15 +140,25 @@ function closing(code: string, open: number): number {
 }
 
 /** A native box, however it is reached: `window.alert(`, `window?.confirm(`,
- *  `window['prompt']`, `globalThis.alert(`, an alias made of one
- *  (`const ask = window.confirm`), or a bare `alert(…)` with anything in
- *  its parentheses. A method of the app's own named the same (the install
- *  prompt's `prompt()`, declared, or called on an object) is not one. It
- *  reads text: a name built at run time is not seen. */
+ *  `window['prompt']`, `globalThis.alert(`, the same through a cast
+ *  (`(window as any).confirm(`), an alias made of one (`const ask =
+ *  window.confirm`), or a bare `alert(…)` with anything in its parentheses.
+ *  A method of the app's own named the same (the install prompt's
+ *  `prompt()`, declared, or called on an object) is not one.
+ *
+ *  It reads text, so it does not see: a destructured alias
+ *  (`const { confirm: ask } = window`), `confirm.bind(window)` handed on,
+ *  `window[key]` with a computed key, or any name built at run time. And
+ *  the scanner reads JSX text as code: a `//` in JSX text would hide a call
+ *  later on that line, a `/*` everything to the next `*\/` (no source has
+ *  either today; the per-file probes below would show one that hid code
+ *  there). */
 function usesNative(text: string): boolean {
   const code = withoutComments(text)
   if (/\b(?:window|globalThis|self|top|parent)\s*(?:\?\.|\.)\s*(?:alert|confirm|prompt)\b/.test(code)) return true
   if (/\b(?:window|globalThis|self|top|parent)\s*(?:\?\.)?\[\s*['"`](?:alert|confirm|prompt)['"`]\s*\]/.test(code)) return true
+  // Through a cast: `(window as any).confirm(`, `(window as Win)['alert']`.
+  if (/\(\s*(?:window|globalThis|self|top|parent)\s+as\s+[^()]*\)\s*(?:(?:\?\.|\.)\s*(?:alert|confirm|prompt)\b|(?:\?\.)?\[\s*['"`](?:alert|confirm|prompt)['"`]\s*\])/.test(code)) return true
   for (const m of code.matchAll(/(?<![.\w$])(?:alert|confirm|prompt)\s*\(/g)) {
     const open = m.index + m[0].length - 1
     const end = closing(code, open)
@@ -182,6 +192,8 @@ describe('no native alert, confirm or prompt boxes', () => {
       'if (!confirm("x")) return', 'alert(`x`)', 'const ask = window.confirm',
       // Nested parentheses, and a template with a call inside.
       'if (!confirm(String(n))) return', 'alert(`gone: ${name(x)}`)',
+      // Through a cast.
+      '(window as any).confirm("x")', "(window as unknown as Win)['alert']('x')", '(globalThis as Record<string, unknown>)?.prompt',
     ]) {
       expect(usesNative(box), box).toBe(true)
     }
@@ -228,7 +240,11 @@ describe('no native alert, confirm or prompt boxes', () => {
     expect(usesNative(withBox)).toBe(true)
   })
 
-  it('keeps every line of every file, and changes nothing but comments to spaces', () => {
+  // Every file keeps its length and its newlines, and nothing changes but
+  // to spaces. That alone would pass with code blanked too (blanked code is
+  // spaces as well): what pins that no code is blanked is the per-file
+  // probes above, a box on a statement line that the stripped text keeps.
+  it('keeps every line of every file, and changes nothing but to spaces', () => {
     for (const [path, text] of sources()) {
       const code = withoutComments(text)
       expect(code.length, path).toBe(text.length)

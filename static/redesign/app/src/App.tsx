@@ -193,6 +193,24 @@ const PREFETCH_BY_VIEW: Record<string, keyof typeof VIEW_LOADERS> = {
   library: 'library', search: 'search', members: 'members',
   together: 'together', profile: 'profile', me: 'me', detail: 'detail',
 }
+// What a party's join that did not happen says, by the `reason` the party
+// hook gives beside its words (never its words: they are its own to
+// reword). A reason not listed here gets the general sentence.
+function joinRefusalWords(code: string, reason: string | undefined): string {
+  switch (reason) {
+    case 'network': return 'Could not reach the server. Check the connection and try again.'
+    case 'http_404': return `No party is using the code ${code} right now.`
+    case 'invalid_code': return 'A party code is 6 letters or digits.'
+    case 'signed_out': return 'Sign in to join a party.'
+  }
+  return `Could not join party ${code} just now.`
+}
+/** The join result's `reason`, where the party hook gives one. */
+const joinReason = (r: object): string | undefined => {
+  const reason = (r as { reason?: unknown }).reason
+  return typeof reason === 'string' ? reason : undefined
+}
+
 // Play found nothing it can play for a title (no season, no episode with a
 // file, no file): said as such, not as a failure to reach anything.
 const NO_FILE_TO_PLAY = new Error('no file to play')
@@ -1866,10 +1884,13 @@ export default function App() {
         setNotifOpen(false)
         setPartyPanelOpen(true)
       } else {
+        const reason = joinReason(r)
         setToasts(prev => [...prev, {
           id: nextToastId(),
-          message: r.error || 'Failed to join the party',
-          type: 'error',
+          message: reason === 'offline_room'
+            ? `Room ${code} is offline — no live session right now. Ask the host to start a watch party.`
+            : joinRefusalWords(code, reason),
+          type: reason === 'offline_room' ? 'info' : 'error',
         }])
       }
     }
@@ -1958,6 +1979,10 @@ export default function App() {
   const [detailFiles, setDetailFiles] = useState<MediaFile[]>([])
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
+  // A detail read whose 404 was dropped across a switch attempt, and the
+  // count that reads the open title again once that attempt has ended.
+  const titleReadDroppedRef = useRef(false)
+  const [detailReadNonce, setDetailReadNonce] = useState(0)
   // M10 Phase 4.5 — multi-season support.
   const [detailSeasons, setDetailSeasons] = useState<{ season_number: number; episode_count?: number }[]>([])
   const [detailSelectedSeason, setDetailSelectedSeason] = useState<number | null>(null)
@@ -2334,6 +2359,17 @@ export default function App() {
       return await switchProfile(id)
     } finally {
       setSwitchesEnded(n => n + 1)
+      // The open title's 404 was dropped while this attempt was out (the
+      // answer might have been for the profile it was binding). Read it
+      // again: when the attempt changed nothing (a PIN prompt cancelled, an
+      // activation refused) nothing else would, and a 404 must still leave
+      // the page; when it did change the profile, the switch's own reset
+      // has already sent the title through its re-read, and this one reads
+      // whatever is open, which is idempotent.
+      if (titleReadDroppedRef.current) {
+        titleReadDroppedRef.current = false
+        setDetailReadNonce(n => n + 1)
+      }
     }
   }, [switchProfile])
   const switchWatch = useMemo(
@@ -3591,12 +3627,14 @@ export default function App() {
         // Persistent rooms surface a friendly "offline" toast (vs
         // a generic error) so the user understands what they clicked.
         const id = nextToastId()
-        const isOfflineRoom = linkKind === 'r' || (result.error || '').toLowerCase().includes('persistent room')
+        // By the hook's reason, never its words.
+        const reason = joinReason(result)
+        const isOfflineRoom = linkKind === 'r' || reason === 'offline_room'
         setToasts(prev => [...prev, {
           id,
           message: isOfflineRoom
             ? `Room ${code} is offline — no live session right now. Ask the host to start a watch party.`
-            : (result.error || `Couldn't join party ${code}.`),
+            : joinRefusalWords(code, reason),
           type: isOfflineRoom ? 'info' : 'error',
         }])
       }
@@ -4924,7 +4962,10 @@ export default function App() {
         if (err instanceof APIError && err.status === 404) {
           // Across a profile switch the answer may be the previous
           // profile's: the switch's own re-read of the open title decides.
-          if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) return
+          if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) {
+            titleReadDroppedRef.current = true
+            return
+          }
           leaveMissingTitleRef.current(selectedMedia.id)
           return
         }
@@ -4936,7 +4977,8 @@ export default function App() {
     })()
     return () => { cancelled = true; ac.abort() }
     // The switch's two readers are stable (they read refs).
-  }, [user, view, selectedMedia, isProfileSwitching, profileSwitchGeneration])
+    // detailReadNonce: a read again after a dropped 404 (switchProfileWatched).
+  }, [user, view, selectedMedia, isProfileSwitching, profileSwitchGeneration, detailReadNonce])
 
   // 2026-05-27 — Continue Watching resume handler. Restored after the
   // PR #95 cleanup pass deleted it (see git blame on PR #95 for the
