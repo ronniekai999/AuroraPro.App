@@ -3665,10 +3665,11 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
-  // What App keeps for whoever is signed in, cleared whenever the tab stops
-  // having a signed-in user: a sign-out here or in another tab
-  // (resetUserState, below) and a session that expires (the expiry listener
-  // below). Must clear every per-user cache (rails, grids, detail, player,
+  // What App keeps for whoever is signed in, cleared when the tab stops
+  // having a signed-in user by a sign-out here or in another tab
+  // (resetUserState, below) or a session that expires (the expiry listener
+  // below). Not by a /me check that fails without the session ending: that
+  // is a bare setUser(false) (see the signed-out effect). Must clear every per-user cache (rails, grids, detail, player,
   // …): on a shared browser a missed field shows the previous user's data to
   // the next one to sign in on the tab. An expiry used to be a bare
   // setUser(false), and on an account the app knew no profile for little
@@ -3697,6 +3698,10 @@ export default function App() {
     forgetDeviceIntent()
     setLibraryServerFor(null)
     setHomeRails(undefined)
+    // A failure of the previous session's load (its last requests are
+    // refused as it ends) is not the next one's: Home would show it in place
+    // of the skeleton until the next load starts.
+    setHomeError(null)
     setHomeHero(null)
     // Clear hero pool too — without this, user A's personalized
     // blurb is briefly visible to user B after a cross-tab logout.
@@ -3853,15 +3858,30 @@ export default function App() {
   // already takes this event as a sign-out, address included: endSession
   // clears the stored user, which is the cross-tab logout signal below.)
   const leaveParty = party.leave
+  const [expiries, setExpiries] = useState(0)
+  const clearUserStateRef = useRef(clearUserState)
+  useLayoutEffect(() => { clearUserStateRef.current = clearUserState }, [clearUserState])
   useEffect(() => {
     const onExpired = () => {
       leaveParty()
       setUser(false)
       clearUserState()
+      setExpiries(n => n + 1)
     }
     window.addEventListener(SESSION_EXPIRED_EVENT, onExpired)
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired)
   }, [leaveParty, clearUserState])
+  // And again once the commit that drops the signed-in app has run every
+  // effect's cleanup, which marks what each had out as cancelled. The
+  // request whose refused refresh fired the expiry is still out when the
+  // handler runs: its own failure handler runs right after it, before that
+  // commit, while its effect still counts it as current, and put state back
+  // (My requests' list set empty, so never asked for again, and the next
+  // sign-in was told nothing had been requested). A sign-out has the same
+  // window, but nothing it starts lands in it every time.
+  useEffect(() => {
+    if (expiries > 0) clearUserStateRef.current()
+  }, [expiries])
 
   // Cross-tab logout. A logout in another tab clears aurora_token
   // and fires a `storage` event here; we tear down the watch party

@@ -13,7 +13,7 @@
 // totals, the title it had open, its requests, its unread count, its Home
 // and any menu or dialog it had left open, had the previous one's title
 // booted in the player, and was in its watch party. (The grids were not
-// even asked again: their effect fetches only an empty list.)
+// even asked again: their effect fetches only a list not yet loaded.)
 //
 // The whole App renders, against a fetch stub that answers for whichever
 // account is signed in, as the server does. Everything the first account
@@ -34,8 +34,9 @@
 import { Profiler } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter, useLocation } from 'react-router'
+import { MemoryRouter, useLocation, useNavigate, type NavigateFunction } from 'react-router'
 import App from './App'
+import { resetSessionEndedLatch } from '@/lib/api'
 import { pageText } from '@/test/pageText'
 
 // The player is replaced by a marker that says what it was asked to play.
@@ -218,6 +219,10 @@ function stubServer({ signedIn: startAs = 1 as number | null, blakeProfile = fal
         window.dispatchEvent(new Event('aurora:session-expired'))
       })
     },
+    /** The server ends the session and says nothing: the app learns of it
+     *  from its next request, whose refresh is refused (api.ts then ends the
+     *  session and fires the expiry itself). */
+    endQuietly() { signedIn = null },
   }
 }
 
@@ -236,14 +241,20 @@ interface Commit {
   player: string | null
 }
 
-/** Where the app is, without putting the address in the page's text. */
+/** Where the app is, without putting the address in the page's text; and a
+ *  way to go somewhere, as a link inside the app would. */
+let go: NavigateFunction = () => {}
 function Where() {
   const loc = useLocation()
+  go = useNavigate()
   return <div data-test-where={`${loc.pathname}${loc.search}`} hidden />
 }
 const where = () => document.querySelector('[data-test-where]')?.getAttribute('data-test-where') ?? null
 
 function renderApp(path: string, opts: Parameters<typeof stubServer>[0] = {}) {
+  // api.ts ends a session once per sign-in; a test that ended one and never
+  // signed in again must not leave the next one's expiry unannounced.
+  resetSessionEndedLatch()
   localStorage.clear()
   // The stored user is the sign-in a fresh tab renders with at once.
   localStorage.setItem('aurora_user', JSON.stringify(AVERY.user))
@@ -272,6 +283,15 @@ function renderApp(path: string, opts: Parameters<typeof stubServer>[0] = {}) {
 }
 
 const find = { timeout: 5000 }
+
+/** A moment more, for anything still to land. Waited out in waitFor, which
+ *  lets React commit as it would (inside act, updates that land in the
+ *  meantime are held and committed together, and a value set and then
+ *  replaced in between is never sampled). */
+async function settle(ms = 400) {
+  const until = Date.now() + ms
+  await waitFor(() => { if (Date.now() < until) throw new Error('still settling') }, { timeout: ms + 2000 })
+}
 
 async function signInAs(who: Account) {
   const username = await screen.findByLabelText('Username', {}, find)
@@ -319,13 +339,37 @@ describe.each([
     const since = page.commits.length
     await screen.findAllByText(shows(BLAKE), undefined, find)
     // A moment more, for anything still to land.
-    await act(() => new Promise(done => setTimeout(done, 400)))
+    await settle()
     expect(screen.queryByLabelText('Username')).toBeNull()
     const after = page.commits.slice(since)
     expect(after.some(c => c.signedInAs === 'Signed in as blake')).toBe(true)
     expect(after.filter(c => c.avery)).toEqual([])
     expect(after.filter(c => c.averyTotal)).toEqual([])
     expect(after.filter(c => c.averyUnread)).toEqual([])
+  }, 20_000)
+})
+
+// Above, the app is told of the expiry with nothing out. In the field it
+// learns of it from a request: its 401, then a refused refresh, and api.ts
+// fires the expiry from inside that request, whose own failure handler runs
+// right after the expiry's, before React has committed the sign-in page and
+// run the cleanups that would mark it cancelled. Opening My requests for the
+// first time is such a request: its failure handler set the list empty, so
+// it was never asked for again, and whoever signed in next was told nothing
+// had been requested.
+describe('a session found expired by a request', () => {
+  it.each([
+    { next: BLAKE, label: 'another account' },
+    { next: AVERY, label: 'the same account' },
+  ])('leaves nothing that request put back for $label', async ({ next }) => {
+    const page = renderApp('/')
+    await screen.findAllByText(AVERY.recent.title, undefined, find)
+    page.endQuietly()
+    act(() => { go('/requests') })
+    await signInAs(next)
+    await screen.findAllByText(next.request, undefined, find)
+    expect(where()).toBe('/requests')
+    expect(screen.queryByText(/Nothing requested yet/i)).toBeNull()
   }, 20_000)
 })
 
@@ -375,7 +419,7 @@ describe('the player across an expiry', () => {
     await signInAs(next)
     const since = page.commits.length
     await screen.findAllByText(next.recent.title, undefined, find)
-    await act(() => new Promise(done => setTimeout(done, 400)))
+    await settle()
     expect(page.commits.slice(since).filter(c => c.player !== null)).toEqual([])
   }, 20_000)
 })
@@ -392,7 +436,7 @@ describe('what was open over the page at an expiry', () => {
     await signInAs(BLAKE)
     const since = page.commits.length
     await screen.findAllByText(BLAKE.recent.title, undefined, find)
-    await act(() => new Promise(done => setTimeout(done, 400)))
+    await settle()
     expect(page.commits.slice(since).filter(c => c.avery)).toEqual([])
   }
 
@@ -467,7 +511,7 @@ describe('a watch party across an expiry', () => {
     await signInAs(BLAKE)
     const since = page.commits.length
     await screen.findAllByText(BLAKE.recent.title, undefined, find)
-    await act(() => new Promise(done => setTimeout(done, 400)))
+    await settle()
     expect(page.commits.slice(since).filter(c => c.avery)).toEqual([])
     expect(screen.queryByText('Averyonly Party')).toBeNull()
   }, 20_000)
