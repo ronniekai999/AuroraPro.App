@@ -64,6 +64,8 @@ const PROFILES = [
   { id: 1, user_id: 1, name: 'Parent', is_default: true, created_at: NOW, updated_at: NOW },
   { id: 2, user_id: 1, name: 'Kid', is_default: false, created_at: NOW, updated_at: NOW, max_age_rating: 'PG' },
 ]
+/** A title both profiles may have in their own lists (`sharedSaved`). */
+const SHARED = item(300, 'Shared Saved')
 const USER = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' }
 // What each profile may see. The server filters every list by the session's
 // profile, so the mock answers from the bound one.
@@ -107,7 +109,8 @@ const SEES: Record<number, { hero: Item[]; catalog: Item; page2: Item; vibe: Ite
  *  answered for; `searches`, the profile each search was asked under and
  *  how it was asked for (`literal`: by title; `semantic`: by description,
  *  which costs the server a model call). */
-function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnrestricted = false, activationFails = false } = {}) {
+function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnrestricted = false, activationFails = false, sharedSaved = false } = {}) {
+  // `sharedSaved`: both profiles have SHARED in their own lists too.
   // `kidUnrestricted`: the Kid profile has no content limit. A restricted
   // profile is not shown My Library at all, so a switch on that page is held
   // to the rule between two profiles that both may open it.
@@ -195,7 +198,7 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     }
     if (/^\/api\/profiles\/\d+\/library$/.test(p)) {
       if (listFails.has(asked)) return json({ error: 'unavailable' }, 503)
-      return json([{ media_item_id: sees.saved.id, title: sees.saved.title, type: 'movie', year: 2020 }])
+      return json([sees.saved, ...(sharedSaved ? [SHARED] : [])].map(x => ({ media_item_id: x.id, title: x.title, type: 'movie', year: 2020 })))
     }
     if (p === '/api/me/hero') {
       heroPools.push(asked)
@@ -214,7 +217,7 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     }
     const title = p.match(/^\/api\/media\/(\d+)$/)
     if (title) {
-      const it = [...sees.hero, sees.catalog, sees.page2, sees.vibe, sees.resume, sees.saved].find(x => x.id === Number(title[1]))
+      const it = [...sees.hero, sees.catalog, sees.page2, sees.vibe, sees.resume, sees.saved, SHARED].find(x => x.id === Number(title[1]))
       return it ? json(it) : json({ error: { code: 404, message: 'not found' } }, 404)
     }
     if (p.startsWith('/api/me/discover')) return json({ rails: [] })
@@ -285,6 +288,10 @@ interface Commit {
   parentTotal: boolean
   /** The title Tonight's hero names, when it is up. */
   heroTitle: string | null
+  /** SHARED's card is drawn. */
+  sharedCard: boolean
+  /** The Kid's own saved title's card is drawn: the Kid's list is up. */
+  kidSavedCard: boolean
 }
 
 /** The name on the top bar's identity control: the profile the app says it
@@ -318,6 +325,9 @@ function renderApp(path: string) {
       kidTitles: `${text} ${named.join(' ')}`.includes('Kidonly'),
       parentTotal: /\b37 titles in your library/.test(text),
       heroTitle: document.querySelector('section[data-hero-kind] h2')?.textContent ?? null,
+      // SHARED's card is drawn (`sharedSaved`).
+      sharedCard: document.querySelector(`[data-media-id="${SHARED.id}"]`) !== null,
+      kidSavedCard: document.querySelector(`[data-media-id="${SEES[2].saved.id}"]`) !== null,
     })
   }
   render(<Profiler id="app" onRender={onRender}><MemoryRouter initialEntries={[path]}><App /></MemoryRouter></Profiler>)
@@ -766,10 +776,10 @@ describe('a profile switch never commits the new name over the previous profileâ
   // A toast is said to whoever is acting when it is raised. "Removed <title>
   // from My Library. Undo" stays seven seconds, and stayed through a switch:
   // the title's name was up under the new profile's.
-  const removeTheSavedTitle = async () => {
-    fireEvent.click((await screen.findAllByRole('button', { name: 'More actions for Parentonly Saved' }, { timeout: 5000 }))[0])
-    fireEvent.click(within(await screen.findByRole('menu', { name: 'Actions for Parentonly Saved' })).getByRole('menuitem', { name: 'Remove from My Library' }))
-    return await screen.findByText('Removed Parentonly Saved from My Library.', undefined, { timeout: 5000 })
+  const removeTheSavedTitle = async (title = 'Parentonly Saved') => {
+    fireEvent.click((await screen.findAllByRole('button', { name: `More actions for ${title}` }, { timeout: 5000 }))[0])
+    fireEvent.click(within(await screen.findByRole('menu', { name: `Actions for ${title}` })).getByRole('menuitem', { name: 'Remove from My Library' }))
+    return await screen.findByText(`Removed ${title} from My Library.`, undefined, { timeout: 5000 })
   }
   it('with a removal\'s toast up: the toast and its Undo go with the profile they were said to', async () => {
     vi.unstubAllGlobals()
@@ -836,29 +846,79 @@ describe('a profile switch never commits the new name over the previous profileâ
 
   // The same into a restricted profile: a session acting as it may name only
   // it, so the server refuses the Undo (403). Nothing is said, and nothing on
-  // the Kid's screen changes. (The Parent's removal stands: see CLAUDE.md's
-  // known gaps.)
+  // the Kid's screen changes: the title is one both profiles have saved, and
+  // taking the refused Undo back on the Kid's screen would take the Kid's
+  // own copy of it off. (The Parent's removal stands: see CLAUDE.md's known
+  // gaps.)
   it('with an Undo waiting behind its removal, into a restricted profile: the refused Undo says and changes nothing', async () => {
     vi.unstubAllGlobals()
-    server = stubServer()
+    server = stubServer({ sharedSaved: true })
     const commits = renderApp('/library')
     const release = server.hold('library-write')
-    const said = await removeTheSavedTitle()
-    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104']))
+    const said = await removeTheSavedTitle(SHARED.title)
+    await waitFor(() => expect(server.libraryWrites).toEqual([`DELETE /api/profiles/1/library/${SHARED.id}`]))
     fireEvent.click(within(said.closest('.toast') as HTMLElement).getByRole('button', { name: 'Undo' }))
     switchToKid()
     await kidHeroUp()
+    // The Kid's own list is up on Tonight, with its copy of the shared title.
+    await waitFor(() => expect(document.querySelector(`[data-media-id="${SHARED.id}"]`)).not.toBeNull(), { timeout: 5000 })
     const settled = commits.length
     const before = pageText()
     release()
-    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104', 'POST /api/profiles/1/library']))
+    await waitFor(() => expect(server.libraryWrites).toEqual([`DELETE /api/profiles/1/library/${SHARED.id}`, 'POST /api/profiles/1/library']))
     await new Promise(done => setTimeout(done, 200))
     expect(kidOverParent(commits)).toBe(0)
     expect(screen.queryByText(/Couldn't|Parentonly/)).toBeNull()
     expect(document.querySelector('.toast')).toBeNull()
     // Nothing drawn after the refusal differs from what was up before it.
     expect(pageText()).toBe(before)
-    expect(commits.slice(settled).every(c => c.label === 'Kid' && !c.parentTitles)).toBe(true)
+    expect(commits.slice(settled).every(c => c.label === 'Kid' && !c.parentTitles && c.sharedCard)).toBe(true)
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toContain(SHARED.title)
+  })
+
+  // In-flight marks are the profile's. Both profiles have the shared title;
+  // the Parent's removal of it is still out when the switch is made, and the
+  // Kid's own list is answered meanwhile. Keyed by title alone, the
+  // Parent's mark took the title out of the Kid's list, on screen and in the
+  // Kid's stored copy, until the next read.
+  it('with a removal of a title both profiles have still out: the new profile\'s list keeps its own copy', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true, sharedSaved: true })
+    const commits = renderApp('/library')
+    const release = server.hold('library-write')
+    await removeTheSavedTitle(SHARED.title)
+    await waitFor(() => expect(server.libraryWrites).toEqual([`DELETE /api/profiles/1/library/${SHARED.id}`]))
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 200))
+    // Every commit that draws the Kid's own list draws the shared title in it.
+    const kidLists = kid(commits).filter(c => c.kidSavedCard)
+    expect(kidLists.length).toBeGreaterThan(0)
+    expect(kidLists.every(c => c.sharedCard)).toBe(true)
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toContain(SHARED.title)
+    release()
+    await waitFor(() => expect(server.libraryWrites).toEqual([`DELETE /api/profiles/1/library/${SHARED.id}`]))
+    await new Promise(done => setTimeout(done, 200))
+    expect(document.querySelector(`[data-media-id="${SHARED.id}"]`)).not.toBeNull()
+  })
+
+  // A write is the signed-in account's. One queued behind a slow one whose
+  // turn comes after a sign-out is not sent: answered 401, it would end
+  // whatever session the tab has by then.
+  it('with an Undo waiting behind its removal, then a sign-out: the Undo is not sent', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    renderApp('/library')
+    const release = server.hold('library-write')
+    const said = await removeTheSavedTitle()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104']))
+    fireEvent.click(within(said.closest('.toast') as HTMLElement).getByRole('button', { name: 'Undo' }))
+    fireEvent.click(document.querySelector('[data-identity-trigger]')!)
+    fireEvent.click(screen.getByRole('button', { name: /^Sign out/ }))
+    await screen.findByLabelText('Username', {}, { timeout: 5000 })
+    release()
+    await new Promise(done => setTimeout(done, 200))
+    expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104'])
   })
 
   it('on My Library, into a restricted profile: the page goes with the switch', async () => {

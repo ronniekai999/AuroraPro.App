@@ -1967,8 +1967,12 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   the address, so the server takes it from a session acting as an
   unrestricted profile and refuses it (403) from one acting as a restricted
   profile, and either way nothing of it reaches the new profile's screen
-  (the owner checks below). Each write's in-flight mark
-  (`pendingLibOpsRef`) is its own object, cleared only by that write. A
+  (the owner checks below). A write whose turn comes once the account it
+  was made for is no longer the one signed in (a sign-out) is not sent: its
+  401 would end whatever session the tab has by then. Each write's
+  in-flight mark (`pendingLibOpsRef`, keyed by profile and title) is its
+  own object, cleared only by that write, and a read of a profile's list
+  re-applies only that profile's marks. A
   refused write takes back its own toast; only the latest write asked for
   a title is taken back on screen and said ("Couldn't …"), and a queue in
   which any write failed ends with the profile's list read again from the
@@ -2002,15 +2006,18 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   `lib/devicePairing.test.ts`, `App.cardMenu.test.tsx` (a stub that holds
   and fails library writes), `App.profileSwitch.test.tsx` (a removal's toast
   and a refusal across a switch, every commit sampled; a queued Undo sent
-  after one, taken or refused) and
+  after one, taken or refused, and not sent after a sign-out; a title both
+  profiles have, with the Parent's removal out across a switch) and
   `App.searchRequest.test.tsx` (a sign-out, an expiry, the TV intent).
 - Known gaps: the owner half of `undoMayRestore` is pinned at the function
   only (once toasts go at a switch no press reaches it in the app); a
   queued write whose turn comes after a switch to a restricted profile is
   refused and lost with nothing said, so a parent who removed a title on a
   slow network, pressed Undo and switched to a kid's profile before the
-  removal was answered keeps the removal, and the title is as the last
-  answered write left it until that profile's list is next read (the same
+  removal was answered keeps the removal, while the parent's list as this
+  browser stored it at the switch holds the Undo's save, so a return to the
+  parent shows the title saved until that profile's list is read, which is
+  at once on the switch back (the same
   class as the progress writes a switch refuses, see Profile lock); the
   read at the end of a failed queue replaces the whole list, so if the
   server answered it before another title's save landed, and that save's
@@ -2021,7 +2028,7 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   screen keeps what the queue's last answer left on it until the next
   library read; when a removal and its Undo are both refused, the read
   puts the title back and the Undo's "Couldn't put … back" is still said;
-  `pendingLibOpsRef` is keyed by title, not profile; the layout-effect
+  the layout-effect
   mirrors (`buildCardMenuRef`, `restoreToLibRef`) have no deterministic
   test (a press from a MutationObserver as a card is first drawn came after
   React had run the passive effects, so it passed with the mirror made

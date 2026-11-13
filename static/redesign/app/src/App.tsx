@@ -1710,19 +1710,28 @@ export default function App() {
   // to, or the same user signing in again, was taken as answered for while
   // `library` held the snapshot.
   const [libraryServerFor, setLibraryServerFor] = useState<string | null>(null)
-  // In-flight optimistic library toggles, by media id → the latest write's
-  // mark ('add' | 'remove'). The reconcile below re-applies these on top of
-  // the server snapshot so a save/unsave that completes DURING the fetch
-  // isn't clobbered by the (older) snapshot. Each write has a mark object of
-  // its own and clears only that one when it settles: by value, a removal
+  // In-flight optimistic library toggles, by profile and media id
+  // (`${profileId}:${mediaId}`) → the latest write's mark ('add' |
+  // 'remove'). The reconcile below re-applies these on top of the server
+  // snapshot so a save/unsave that completes DURING the fetch isn't
+  // clobbered by the (older) snapshot. Each write has a mark object of its
+  // own and clears only that one when it settles: by value, a removal
   // answered while a later removal of the same title waited cleared the
-  // later one's mark.
-  const pendingLibOpsRef = useRef<Map<number, { op: 'add' | 'remove' }>>(new Map())
+  // later one's mark. By profile: keyed by title alone, a Parent's removal
+  // still out after a switch took the same title off the Kid's list.
+  const pendingLibOpsRef = useRef<Map<string, { op: 'add' | 'remove' }>>(new Map())
+  // The signed-in account, read when a queued library write's turn comes.
+  const libraryUserRef = useRef<number | null>(user ? user.id : null)
+  useLayoutEffect(() => { libraryUserRef.current = user ? user.id : null }, [user])
   // The server's list of a profile's library on top of what is on screen:
-  // cached cards kept, in-flight writes re-applied.
-  const mergeServerLibrary = useCallback((prev: Media[], items: LibraryItem[]) => {
+  // cached cards kept, that profile's in-flight writes re-applied.
+  const mergeServerLibrary = useCallback((prev: Media[], items: LibraryItem[], profileId: number) => {
     const cachedById = new Map(prev.map(m => [m.id, m]))
-    const pending = pendingLibOpsRef.current
+    const pending = new Map<number, { op: 'add' | 'remove' }>()
+    for (const [key, mark] of pendingLibOpsRef.current) {
+      const [pid, id] = key.split(':').map(Number)
+      if (pid === profileId) pending.set(id, mark)
+    }
     // Server set, minus any item an in-flight unsave is removing.
     const merged = items
       .filter(it => pending.get(it.media_item_id)?.op !== 'remove')
@@ -1751,7 +1760,7 @@ export default function App() {
         if (cancelled) return
         setLibraryLoaded(true)
         setLibraryServerFor(`aurora_my_library:${user.id}:${activeProfileId}`)
-        setLibrary(prev => mergeServerLibrary(prev, items))
+        setLibrary(prev => mergeServerLibrary(prev, items, activeProfileId))
       })
       .catch(() => {
         // offline / transient — keep the localStorage cache, and stop
@@ -2905,17 +2914,23 @@ export default function App() {
     const addLocal = (prev: Media[]) => (prev.some(i => i.id === m.id) ? prev : [...prev, m])
     const removeLocal = (prev: Media[]) => prev.filter(i => i.id !== m.id)
     setLibrary(op === 'add' ? addLocal : removeLocal)
+    const key = `${profileId}:${m.id}`
     const mark = { op }
-    pendingLibOpsRef.current.set(m.id, mark)
-    const settle = () => { if (pendingLibOpsRef.current.get(m.id) === mark) pendingLibOpsRef.current.delete(m.id) }
+    pendingLibOpsRef.current.set(key, mark)
+    const settle = () => { if (pendingLibOpsRef.current.get(key) === mark) pendingLibOpsRef.current.delete(key) }
     // The list this change was made on. A switch before the answer swaps in
     // another profile's, which nothing here may edit.
     const owner = libraryOwnerRef.current
-    const key = `${profileId}:${m.id}`
+    // The account it was made for: a write whose turn comes after a sign-out
+    // (or once another account has signed in) is not sent. Its 401 would end
+    // whatever session the tab has by then.
+    const madeFor = libraryUserRef.current
     const queue = libraryWritesRef.current.get(key) ?? { tail: Promise.resolve(), made: 0, failed: false }
     libraryWritesRef.current.set(key, queue)
     const n = ++queue.made
-    const send = () => (op === 'add' ? addToLibrary(profileId, m.id) : removeFromLibrary(profileId, m.id))
+    const send = () => (libraryUserRef.current !== madeFor
+      ? Promise.reject(new Error('signed out since'))
+      : op === 'add' ? addToLibrary(profileId, m.id) : removeFromLibrary(profileId, m.id))
     const sent = queue.tail.then(send, send)
     queue.tail = sent
     const last = () => queue.made === n
@@ -2938,7 +2953,7 @@ export default function App() {
       // left the screen saying saved for a title the server did not have.
       if (!queue.failed || libraryOwnerRef.current !== owner) return
       getLibrary(profileId).then(items => {
-        if (libraryOwnerRef.current === owner) setLibrary(prev => mergeServerLibrary(prev, items))
+        if (libraryOwnerRef.current === owner) setLibrary(prev => mergeServerLibrary(prev, items, profileId))
       }, () => {})
     })
   }, [mergeServerLibrary])
