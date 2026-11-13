@@ -1,6 +1,7 @@
 import { getDiagnosticBuffer, redactURL } from './diagnosticBuffer'
 import type { CodeInfo } from './party'
 import type { ReferralOption } from './referral'
+import type { RestoreStatus } from './restoreStatus'
 
 // Aurora V2 — API client.
 //
@@ -1544,6 +1545,14 @@ export async function getAdminDashboard(signal?: AbortSignal): Promise<ServerSta
   return apiFetch<ServerStats>('/api/admin/dashboard', { signal })
 }
 
+// The latest database restore since Aurora last started (running, how it
+// ended, whether a restart is due), behind the admin guard. A restore no
+// longer ends with its request, so this is where its outcome is read; the
+// browser that started one also reads it by ticket (lib/restoreStatus).
+export async function getAdminRestoreStatus(signal?: AbortSignal): Promise<RestoreStatus> {
+  return apiFetch<RestoreStatus>('/api/admin/restore/status', { signal })
+}
+
 // Embedding coverage for the admin dashboard. embedded/total count media_items
 // (movies + shows; episodes aren't embedded). `enabled` is false when the
 // LLM/Ollama embedder isn't configured.
@@ -2869,46 +2878,6 @@ export interface UpdateStatus {
 
 export async function getUpdateStatus(signal?: AbortSignal): Promise<UpdateStatus> {
   return apiFetch<UpdateStatus>('/api/admin/system/update/status', { signal })
-}
-
-// A database restore runs as a job on the server (POST /api/admin/restore
-// answers 202 with this status once it has started); the Admin page follows
-// it here. In memory on the server: a restart forgets both halves. The job
-// checks the file ('validating'), then clears the old data and loads the
-// backup in one transaction ('replacing'): it commits whole or not at all.
-export type RestorePhase = 'validating' | 'replacing'
-export interface RestoreRun {
-  id: string
-  /** The uploaded file's name, as the browser gave it. */
-  file: string
-  phase: RestorePhase
-  started_at: string
-}
-export interface RestoreResult {
-  id: string
-  file: string
-  started_at: string
-  ended_at: string
-  succeeded: boolean
-  /** The phase it ended in. */
-  phase: RestorePhase
-  /** What it left: what was there before, the backup, or (when the
-   *  database connection was lost as it committed) one of the two. */
-  database: 'unchanged' | 'restored' | 'unknown'
-  /** The server's own sentence. */
-  message: string
-  /** What psql or pg_restore wrote, capped by the server. */
-  stderr?: string
-  /** Why the server stopped it: it was shutting down, or 60 minutes passed. */
-  stopped?: 'shutdown' | 'timeout'
-}
-export interface RestoreStatus {
-  running: RestoreRun | null
-  last: RestoreResult | null
-}
-
-export async function getRestoreStatus(signal?: AbortSignal): Promise<RestoreStatus> {
-  return apiFetch<RestoreStatus>('/api/admin/restore/status', { signal })
 }
 
 // Kicks off the updater service. Returns 202 with {started: true}

@@ -6,6 +6,8 @@ history rather than in the working tree once their decision has been made.
 
 ## Operate Aurora
 
+- [`backup-restore.md`](backup-restore.md) — back up and restore the
+  database, learn how a restore went, and recover from one that failed.
 - [`bug-report-setup.md`](bug-report-setup.md) — configure the optional in-app
   GitHub issue reporter.
 - [`moving-media-paths.md`](moving-media-paths.md) — safely move an existing

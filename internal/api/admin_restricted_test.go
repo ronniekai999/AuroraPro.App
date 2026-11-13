@@ -217,6 +217,12 @@ func TestAdminRoutesRefuseARestrictedSession(t *testing.T) {
 	if code, reason := do(http.MethodGet, "/api/users", f.parentRT); code != http.StatusOK {
 		t.Errorf("GET /api/users as the parent: %d %q, want 200", code, reason)
 	}
+	// The restore's record is mounted, and answers an unrestricted admin (the
+	// /api/admin subrouter refuses before routing, so the refusals above
+	// would pass with the route gone).
+	if code, reason := do(http.MethodGet, "/api/admin/restore/status", f.parentRT); code != http.StatusOK {
+		t.Errorf("GET /api/admin/restore/status as the parent: %d %q, want 200", code, reason)
+	}
 	// With no unrestricted profile left on the account (data from before the
 	// rule, a restore, hand-written SQL), the restricted session is all it
 	// has, and keeps the admin powers.

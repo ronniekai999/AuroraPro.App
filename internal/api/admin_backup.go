@@ -343,22 +343,19 @@ func streamWithFlush(dst io.Writer, src io.Reader) error {
 //
 // Companion to Backup. Admin-only.
 //
-// Pipeline (steps 1-2 on the request; 3-4 in a job on the server's
-// lifecycle that outlives it, admin_restore_job.go and
-// admin_restore_pipeline.go, which answers its progress at
-// GET /api/admin/restore/status):
+// Pipeline:
 //   1. Validate magic bytes (custom format starts with "PGDMP") before
 //      doing anything destructive.
 //   2. Stream the upload to a temp file. pg_restore needs a seekable
 //      file (custom format has a table of contents it reads first, then
 //      jumps around in). We cap the file size at maxRestoreSizeBytes.
-//      The request answers 202 here, with the job's status.
-//   3. Validate, touching nothing: the client programs' --restrict-key,
-//      the archive's table of contents (only entry types that run in a
-//      transaction), and a full read (`pg_restore -f /dev/null`).
-//   4. In ONE transaction: the per-object wipe that preserves installed
-//      extensions (see restoreWipeSQL), then the SQL `pg_restore -f -`
-//      makes of the archive with:
+//   3. Check, touching nothing: the client programs (pg_restore
+//      --restrict-key), the archive's table of contents (only entries that
+//      can run inside a transaction, and at least one table), and a full
+//      read of the archive.
+//   4. In ONE transaction (admin_restore_pipeline.go): the per-object
+//      wipe that preserves installed extensions (see restoreWipeSQL),
+//      then the SQL `pg_restore -f -` makes of the archive with:
 //        --no-owner            → skip ALTER OWNER statements
 //        --no-privileges       → skip GRANT/REVOKE statements
 //        --no-comments         → skip COMMENT ON statements (including the
@@ -366,7 +363,15 @@ func streamWithFlush(dst io.Writer, src io.Reader) error {
 //                                extension-owner privilege)
 //      run by one psql session with ON_ERROR_STOP, and a COMMIT written
 //      only once pg_restore has exited 0. Any failure rolls back to the
-//      old data.
+//      old data. (The wipe used to commit on its own first, so a failure
+//      after it left the database empty.)
+//
+// Steps 3 and 4 do not belong to the request (runRestore, admin_restore.go):
+// once the upload is on disk they run on the server-lifecycle context to
+// their end, whatever becomes of the client, and record how they went for
+// GET /api/admin/restore/status and the ticket read. A reload or a closed tab
+// used to cancel pg_restore part way and leave the database empty, with
+// nothing to say so.
 //
 // Why we no longer line-filter the dump (2026-05-18 rearchitecture):
 //   The old plain-format + bufio.Scanner filter pipeline could mangle
@@ -380,11 +385,11 @@ func streamWithFlush(dst io.Writer, src io.Reader) error {
 //
 // CRITICAL: Aurora's own pgxpool connections are still pointed at this DB
 // and may have cached metadata or prepared statements. After a successful
-// restore the operator MUST restart Aurora. The status's message + the UI
-// both call this out. We do NOT attempt to restart automatically because
-// (a) the restart would forget the restore's in-memory status before the
-// admin has read it, (b) the user may want to verify before restarting,
-// (c) systemd / process supervision handles this externally.
+// restore the operator MUST restart Aurora. The response message + the UI
+// modal both call this out. We do NOT attempt to restart automatically
+// because (a) restarting from within the request you're serving is a
+// guaranteed lost-response, (b) the user may want to verify before
+// restarting, (c) systemd / process supervision handles this externally.
 
 // maxRestoreSizeBytes caps the upload to prevent disk exhaustion when we
 // spill the upload to a temp file. 50GB is comfortably above any realistic
@@ -400,12 +405,11 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2026-05-16 audit H1 — extend server-level deadlines. main.go's
-	// 15s ReadTimeout and 120s WriteTimeout would tear down the connection
-	// part way through the upload of a large archive (the write deadline
-	// counts from the request's headers, so a long upload leaves no time
-	// to write the answer). The restore itself no longer runs on this
-	// request (see admin_restore_job.go); these cover the upload, up to
-	// maxRestoreSizeBytes on a slow link.
+	// 120s WriteTimeout would tear down the connection before psql
+	// finishes ingesting any non-trivial dump, even though the DB
+	// restore itself succeeded. The 65min extension matches the
+	// handler's own 60min ctx timeout with a small buffer for the
+	// final writeJSON response.
 	// See the backup handler: write half via the logging helper, read half
 	// hand-rolled.
 	extendWriteDeadline(w, r, 65*time.Minute, "admin restore")
@@ -413,18 +417,34 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		_ = rc.SetReadDeadline(time.Now().Add(65 * time.Minute))
 	}
 
+	// The restore's ticket, if the client sent one: the credential for the
+	// status read that needs no session (admin_restore.go). Optional, so a
+	// client that sends none still restores; one that is malformed is
+	// refused before anything happens, rather than restoring with a status
+	// its sender cannot read.
+	ticket := r.Header.Get(restoreTicketHeader)
+	if ticket != "" && !validRestoreTicket(ticket) {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("%s must be %d to %d characters of A-Z, a-z, 0-9, '-' and '_'",
+				restoreTicketHeader, minRestoreTicketLen, maxRestoreTicketLen))
+		return
+	}
+
 	// Client programs that cannot run a restore safely (missing, or older
-	// than pg_restore --restrict-key) are refused before the upload is read:
-	// the job's validation would refuse them anyway, after the whole file.
-	if msg := h.restores().tools.missingRestrictSupport(r.Context()); msg != "" {
+	// than pg_restore --restrict-key; admin_restore_pipeline.go) are refused
+	// before the upload is read: the check would refuse them anyway, after
+	// the whole file.
+	if msg := h.restorePrograms().ready(r.Context()); msg != "" {
 		writeError(w, http.StatusInternalServerError, msg+" — no restore was started and the database was NOT modified")
 		return
 	}
 
 	// 2026-05-16 audit H3 — serialize backup/restore operations. See
-	// Backup for the rationale. Same mutex — both endpoints share it. It
-	// is held from here for the restore job's whole life: once the job has
-	// started (handedOff), the job unlocks it when it ends, however it ends.
+	// Backup for the rationale. Same mutex — both endpoints share it.
+	//
+	// Held until the restore ENDS, not until this handler returns: once the
+	// upload is on disk the restore runs on without the request, and the
+	// goroutine that runs it releases the lock (handedOff).
 	if !h.backupRestoreMu.TryLock() {
 		writeError(w, http.StatusConflict, "another backup or restore is already in progress; please wait for it to complete")
 		return
@@ -557,14 +577,13 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tmpPath := tmpFile.Name()
-	// Cleanup on every exit path until the job takes the file: Close
-	// (idempotent — sentinel errors after first call) and Remove. defers
-	// run LIFO, so Close happens before Remove. The double-close from later
-	// f.Close() after copy is harmless (returns ErrClosed which we ignore).
-	// Once the job has started it removes the file when it ends.
-	defer tmpFile.Close()
+	// Cleanup on every exit path: Close (a second Close after the one
+	// below returns ErrClosed, ignored) and Remove. Until the hand-off
+	// the handler owns the file; after it, the goroutine running the
+	// restore removes it when the restore ends.
 	defer func() {
 		if !handedOff {
+			_ = tmpFile.Close()
 			_ = os.Remove(tmpPath)
 		}
 	}()
@@ -582,13 +601,13 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 				"--dbname=$DATABASE_URL backup.dump`", maxRestoreSizeBytes>>30))
 		return
 	}
-	// Reject suspiciously tiny uploads BEFORE the destructive wipe.
+	// Reject suspiciously tiny uploads before anything else runs.
 	// A real Aurora dump (even an empty database with just schema)
 	// runs to several KB; anything under 256 bytes can't possibly
-	// hold the PGDMP header + TOC + a single table. Without this,
-	// a 5-byte upload of just "PGDMP" wipes the DB then fails in
-	// pg_restore with "unexpected end of file" — leaving the
-	// operator's DB destroyed for a malformed upload.
+	// hold the PGDMP header + TOC + a single table. (When the wipe
+	// committed on its own, a 5-byte upload of just "PGDMP" wiped
+	// the DB and then failed in pg_restore with "unexpected end of
+	// file". The check and the one transaction now stop that too.)
 	const minRestoreSizeBytes = 256
 	if n < minRestoreSizeBytes {
 		writeError(w, http.StatusBadRequest,
@@ -601,21 +620,174 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The destructive part runs as a job on the server's lifecycle, not on
-	// this request: see admin_restore_job.go. From here the job owns the
-	// backup/restore lock and the temp file, and lets both go when it ends.
-	st, err := h.restores().Start(h.databaseURL, tmpPath, restoreFileName(part.FileName()), func() {
+	// From here the restore does not depend on the request. The check,
+	// the wipe and pg_restore run on the server-lifecycle context with the
+	// overall timeout (restoreTimeout); this goroutine owns the lock and the
+	// temp file until they end, and records each step for the status reads.
+	// If the client is still here when the restore ends, it gets the same
+	// answer it always did; if it has gone (a reload, a closed tab, a lost
+	// connection), the restore goes on and the record is the answer.
+	file := restoreFileLabel(part.FileName())
+	run := h.restores.begin(file, ticket, time.Now().UTC())
+	done := make(chan restoreResult, 1)
+	handedOff = true
+	go func() {
+		res := h.runRestoreRecorded(tmpPath, run)
+		// Everything is released before the answer goes, so a client that
+		// is told the restore ended can start the next one at once.
 		_ = os.Remove(tmpPath)
 		h.backupRestoreMu.Unlock()
-	})
-	switch {
-	case errors.Is(err, errRestoreRunning):
-		writeError(w, http.StatusConflict, "another backup or restore is already in progress; please wait for it to complete")
-		return
-	case err != nil:
-		writeError(w, http.StatusInternalServerError, "failed to start the restore: "+err.Error())
-		return
+		done <- res
+	}()
+
+	select {
+	case res := <-done:
+		if !res.ok {
+			writeError(w, res.httpStatus, res.message)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":  "ok",
+			"message": res.message,
+		})
+	case <-r.Context().Done():
+		slog.Warn("restore request ended before the restore did; the restore runs on to its end",
+			"file", file, "err", r.Context().Err())
+		// Nothing reaches a client that has gone, but the request log reads
+		// the status from here: 499 (nginx's "client closed request"), not
+		// the 200 a handler that wrote nothing is logged with.
+		w.WriteHeader(499)
 	}
-	handedOff = true
-	writeJSON(w, http.StatusAccepted, st)
+}
+
+// restoreSucceededMessage is a successful restore's answer and record.
+const restoreSucceededMessage = "Restore complete. RESTART AURORA NOW — current connections will see stale state until you do."
+
+// runRestoreRecorded runs the restore and records how it ended. A panic is
+// recorded too, as a restore that stopped part way: on this goroutine no
+// recoverer would catch it, and the whole server would go down mid-restore.
+func (h *AdminHandler) runRestoreRecorded(tmpPath string, run *restoreRun) (res restoreResult) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("restore panicked", "panic", p)
+			res = restoreResult{
+				httpStatus: http.StatusInternalServerError,
+				message:    "the restore stopped on an internal error; the database holds either what it held before or the backup — check which before going on",
+				database:   restoreDBUnknown,
+			}
+			// Still checking: nothing had touched the database.
+			if h.restores.status().Step == string(restoreStepChecking) {
+				res.message = "the restore stopped on an internal error while it checked the file; the database was NOT modified"
+				res.database = restoreDBUnchanged
+			}
+		}
+		h.restores.finish(run, res, time.Now().UTC())
+	}()
+	return h.runRestore(tmpPath, run)
+}
+
+// runRestore checks the archive at tmpPath and then, in one transaction,
+// wipes the public schema and restores the archive into it
+// (admin_restore_pipeline.go), on the server-lifecycle context with the
+// overall timeout, moving run through its steps. It never reads the request.
+func (h *AdminHandler) runRestore(tmpPath string, run *restoreRun) restoreResult {
+	ctx, cancel := context.WithTimeout(h.restoreContext(), restoreTimeout)
+	defer cancel()
+	programs := h.restorePrograms()
+
+	// stopped describes a step the context ended (the timeout, or Aurora
+	// shutting down) rather than one that failed by itself.
+	stopped := func() string {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Sprintf("the restore ran out of time (%d minutes)", int(restoreTimeout.Minutes()))
+		}
+		return "the restore was stopped because Aurora is shutting down"
+	}
+
+	// Check the upload BEFORE the transaction takes any lock: that the
+	// client programs can run it safely, that every entry in the archive's
+	// table of contents can run inside one transaction, and that pg_restore
+	// can read the whole archive (`pg_restore -f /dev/null` decompresses the
+	// ENTIRE archive without connecting to the database; the leading-magic
+	// and min-size checks above only prove the first bytes look like a
+	// custom dump). A failure later would roll back too, but only after the
+	// rest of the server had waited on the transaction's locks. deep-debug H8.
+	if status, msg := programs.check(ctx, tmpPath); status != 0 {
+		if ctx.Err() != nil {
+			msg := stopped() + " while checking the file; the database was NOT modified"
+			slog.Warn("restore stopped while checking the archive (database NOT modified)", "ctx_err", ctx.Err())
+			// 500, not 503: the web app reads 502-504 as a proxy that gave
+			// up waiting, an answer that says nothing of the restore.
+			return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepChecking, database: restoreDBUnchanged}
+		}
+		slog.Warn("restore refused at its check (database NOT modified)", "message", msg)
+		return restoreResult{httpStatus: status, message: msg, step: restoreStepChecking, database: restoreDBUnchanged}
+	}
+
+	// The wipe and the load, in one transaction (admin_restore_pipeline.go).
+	// Nothing is committed until the whole backup has loaded, so the
+	// database stays as it was (for everyone else, waiting on the
+	// transaction's locks) until then, and any failure leaves it so.
+	//
+	// 2026-05-29 audit (MED): the conninfo carries no password; it travels
+	// via PGPASSWORD in the environment so it never lands on argv. See
+	// pgConnEnv.
+	connURL, pgEnv := pgConnEnv(h.databaseURL)
+	h.restores.step(run, restoreStepRestoring, restoreDBUnchanged)
+
+	// Close the routes that make or change sessions and credentials until
+	// the restore ends (admin_restore_gate.go), and wait for the ones already
+	// running: one that waited on the transaction's locks would land in the
+	// restored data with the old database's ids. A request that does not
+	// finish in time keeps the restore from starting.
+	drain := h.sessionDrain
+	if drain <= 0 {
+		drain = restoreSessionDrain
+	}
+	drained := h.sessionGate.shutAndDrain(ctx, drain)
+	defer h.sessionGate.open()
+	if !drained {
+		if ctx.Err() != nil {
+			slog.Warn("restore stopped before its transaction began (database NOT modified)", "ctx_err", ctx.Err())
+			return restoreResult{httpStatus: http.StatusInternalServerError, message: stopped() + " before it changed anything; the database was NOT modified",
+				step: restoreStepRestoring, database: restoreDBUnchanged}
+		}
+		msg := fmt.Sprintf("the restore did not start: a sign-in or a change to sign-in details was still running after %d seconds; try again — the database was NOT modified", int(drain.Seconds()))
+		slog.Warn("restore not started: session routes did not drain (database NOT modified)", "wait", drain)
+		return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepRestoring, database: restoreDBUnchanged}
+	}
+
+	out := programs.replace(ctx, connURL, pgEnv, tmpPath)
+	switch {
+	case out.committed:
+		slog.Info("restore succeeded — Aurora MUST be restarted to use new data", "psql_notes", out.stderr)
+		// In-memory state naming the old database's rows (pending device
+		// pairings) goes before the session routes open again.
+		for _, fn := range h.onRestored {
+			fn()
+		}
+		return restoreResult{ok: true, message: restoreSucceededMessage, database: restoreDBRestored}
+	case out.unknown:
+		msg := out.cause + ", so the database holds either what it held before or the backup — check which before going on"
+		if ctx.Err() != nil {
+			msg = stopped() + " as it committed; " + msg
+		}
+		if out.stderr != "" {
+			msg += " — " + out.stderr
+		}
+		slog.Error("restore cut off as it committed: the database holds either the old data or the backup",
+			"cause", out.cause, "ctx_err", ctx.Err(), "stderr", out.stderr)
+		return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepRestoring, database: restoreDBUnknown}
+	default:
+		msg := "the restore failed and was rolled back, so the database was NOT modified: " + out.cause
+		if ctx.Err() != nil {
+			msg = stopped() + "; it was rolled back, so the database was NOT modified (" + out.cause + ")"
+		}
+		if out.stderr != "" {
+			msg += " — " + out.stderr
+		}
+		slog.Error("restore failed and was rolled back (database NOT modified)",
+			"cause", out.cause, "ctx_err", ctx.Err(), "stderr", out.stderr)
+		return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepRestoring, database: restoreDBUnchanged}
+	}
 }

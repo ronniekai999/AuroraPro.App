@@ -24,6 +24,9 @@ const api = vi.hoisted(() => ({
   submitBugReport: vi.fn(),
 }))
 vi.mock('@/lib/api', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/lib/api')>()), ...api }))
+// The capture library: what a capture is asked for is what these tests read.
+const toBlob = vi.hoisted(() => vi.fn())
+vi.mock('html-to-image', () => ({ toBlob }))
 
 const MORGAN = { id: 1, username: 'morgan', email: 'morgan@example.test', role: 'user' }
 const ROBIN = { id: 2, username: 'robin', email: 'robin@example.test', role: 'user' }
@@ -197,8 +200,60 @@ describe('the error screen: reporting the problem', () => {
     expect(aside.textContent).not.toMatch(/never includes/i)
     // What a capture shows is said for this page: not the app's library or
     // what was playing, which are gone.
-    expect(aside).toHaveTextContent('A capture leaves this panel out. On a narrow window it may show only part of the page.')
+    expect(aside).toHaveTextContent('A capture shows the top of this page at the size of the window, with the space this panel takes left empty.')
     expect(aside.textContent).not.toMatch(/currently playing media/)
+  })
+
+  // On a narrow window the panel is under the page's text, and opening it
+  // moves the window down to it: a capture from there was mostly the
+  // panel's empty place. The dialog, over the page, captures the window.
+  // The button is disabled only once the capture library has loaded: a
+  // second press before then started a second capture over the first (its
+  // blanking of secret fields and its restore interleaved with the first's).
+  it('takes one capture for two presses made before the capture library has loaded', async () => {
+    toBlob.mockReset()
+    let release!: (blob: Blob | null) => void
+    toBlob.mockImplementation(() => new Promise(r => { release = r }))
+    render(<BugReportModal prefillName="morgan" onClose={() => {}} onSubmitted={() => {}} />)
+    const dialog = screen.getByRole('dialog')
+    const capture = within(dialog).getByRole('button', { name: /Capture this page/ })
+    fireEvent.click(capture)
+    fireEvent.click(capture)
+    await waitFor(() => expect(toBlob).toHaveBeenCalled())
+    // Time for a second capture to reach the library, or fail on its way.
+    await new Promise(r => setTimeout(r, 500))
+    expect(toBlob).toHaveBeenCalledTimes(1)
+    expect(dialog.querySelector('#bug-error')?.textContent ?? '').toBe('')
+    await act(async () => { release(null) })
+  })
+
+  it('takes a capture from the top of the page, where the dialog takes the window', async () => {
+    const user = userEvent.setup()
+    toBlob.mockReset()
+    toBlob.mockResolvedValue(null)
+    Object.defineProperty(window, 'scrollY', { configurable: true, value: 640 })
+    try {
+      signedIn()
+      const { unmount } = crash()
+      const aside = await openPanel(user)
+      await user.click(within(aside).getByRole('button', { name: /Capture this page/ }))
+      await waitFor(() => expect(toBlob).toHaveBeenCalledTimes(1))
+      const fromPanel = (toBlob.mock.calls[0][1] as { fontEmbedCSS: string }).fontEmbedCSS
+      expect(fromPanel).toContain('top:0px!important')
+      expect(fromPanel).not.toContain('top:-640px')
+      // The panel's place is kept in the picture, and nothing of it drawn.
+      const keep = toBlob.mock.calls[0][1].filter as (node: Node) => boolean
+      expect(keep(aside)).toBe(true)
+      expect(keep(within(aside).getByLabelText(/^Title/))).toBe(false)
+      unmount()
+
+      render(<BugReportModal prefillName="morgan" onClose={() => {}} onSubmitted={() => {}} />)
+      await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: /Capture this page/ }))
+      await waitFor(() => expect(toBlob).toHaveBeenCalledTimes(2))
+      expect((toBlob.mock.calls[1][1] as { fontEmbedCSS: string }).fontEmbedCSS).toContain('top:-640px!important')
+    } finally {
+      Object.defineProperty(window, 'scrollY', { configurable: true, value: 0 })
+    }
   })
 
   // What is sent is what is shown: the lines under "What the app saw", as

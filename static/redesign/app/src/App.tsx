@@ -2543,15 +2543,16 @@ export default function App() {
   // whenever the socket reopens for a new profile or admin powers
   // (realtimeKey), dropping what was read for the previous one: the server
   // leaves the admin alerts out for a session without the admin powers. The
-  // WS keeps it live thereafter; resetUserState clears it on explicit logout.
+  // WS keeps it live thereafter; clearUserState clears it on a sign-out and
+  // when the session expires.
   //
-  // markedAllReadRef is reset HERE, not only in resetUserState, because
-  // session expiry (SESSION_EXPIRED_EVENT below) drops to the auth screen
-  // via a bare setUser(false) — it does not call resetUserState, and the
-  // subsequent re-login calls setUser(u) directly too. Without this reset,
-  // a mark-all-read from the PRIOR session would permanently pin the badge
-  // to its last value across that relogin, discarding every real unread
-  // count the new session's seed fetch reports.
+  // markedAllReadRef is reset HERE too, not only in clearUserState, because a
+  // /me check that fails without the server ending the session (a network
+  // error, a 5xx) still drops to the auth screen with a bare setUser(false)
+  // (see the signed-out effect), and the re-login calls setUser(u) directly.
+  // Without this reset, a mark-all-read from the PRIOR session would
+  // permanently pin the badge to its last value across that relogin,
+  // discarding every real unread count the new session's seed fetch reports.
   useNotificationSeed({
     enabled: realtimeReady,
     sessionKey: `${realtimeUserId}:${realtimeKey}`,
@@ -2595,11 +2596,12 @@ export default function App() {
   // Android launcher) — see lib/pwa.ts:syncAppBadge for why this is
   // needed on top of the push payload's own badge write in sw.js.
   //
-  // Forced to 0 whenever realtimeUserId is null (logged out, including
-  // session expiry — which unmounts the authed subtree via a bare
-  // setUser(false) rather than resetUserState, leaving unreadCount's last
-  // value sitting around): without this, an OS-level badge would keep
-  // showing a signed-out user's stale unread count at the login screen.
+  // Forced to 0 whenever realtimeUserId is null (signed out). A sign-out and
+  // an expiry clear unreadCount with the user (clearUserState), but a /me
+  // check that fails otherwise drops to the auth screen with a bare
+  // setUser(false), leaving unreadCount's last value sitting around: without
+  // this, an OS-level badge would keep showing a signed-out user's stale
+  // unread count at the login screen.
   useEffect(() => {
     syncAppBadge(realtimeUserId == null ? 0 : unreadCount)
   }, [unreadCount, realtimeUserId])
@@ -2825,8 +2827,9 @@ export default function App() {
     // Made by lib/posterTravel, which runs it exactly once: at once, as it
     // always was, unless a plain press on this title's card is behind it and
     // the browser can draw that card's poster travelling to the title
-    // page's. Then it runs one frame later, inside the browser's
-    // transition. Never while a player or a party's panel is over the page,
+    // page's while the two pages cross-fade. Then it runs one frame later,
+    // inside the browser's transition, and a press that begins before that
+    // transition ends does nothing. Never while a player or a party's panel is over the page,
     // and only when the title page can draw its poster at once (its code is
     // here and the title has one).
     travelToTitle(m.id, open, { blocked: travelBlockedRef.current, arrives: detailModule !== null && !!m.poster })
@@ -3298,19 +3301,6 @@ export default function App() {
     // one is actually open).
   }, [playerTarget, playerLoading, playerSurface, searchQuery, view, handleBack, contextMenu, addToListMedia, closeAddToList, user, profilesGateOpen, pinTarget, onboardingOpen, closePlayer, clearSearch, handleNavigate])
 
-  // Session expiry. /api/auth/me is validated once at mount (below), so a
-  // long-lived tab whose session expired mid-session never re-checked: it kept
-  // rendering as logged-in and kept polling with dead credentials — 8,562
-  // requests at user_id=0 in the production logs, one storm running for hours
-  // on 2026-07-24. api.ts now fires this event when the server definitively
-  // rejects a refresh; dropping to the auth screen unmounts the authed
-  // subtree, and with it every poller, socket and interval.
-  useEffect(() => {
-    const onExpired = () => setUser(false)
-    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired)
-    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired)
-  }, [])
-
   // Auth boot. deep-debug H10 — tokens are httpOnly cookies (invisible to JS),
   // so a cached user is our auth signal: optimistically render with it while
   // validating via /api/auth/me (the cookie authenticates the call). The
@@ -3676,12 +3666,24 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
-  // Full state reset on logout. Must clear every per-user cache
-  // (rails, library, detail, player, …) — on a shared browser, a
-  // missed field briefly leaks the previous user's data to the next
-  // login. Hoisted above the storage useEffect so both the explicit
-  // logout and the cross-tab path can share it.
-  const resetUserState = useCallback(() => {
+  // What App keeps for whoever is signed in, cleared when the tab stops
+  // having a signed-in user by a sign-out here or in another tab
+  // (resetUserState, below) or a session that expires (the expiry listener
+  // below). Not by a /me check that fails without the session ending: that
+  // is a bare setUser(false) (see the signed-out effect). Must clear every
+  // per-user cache (rails, grids, detail, player, …): on a shared browser a
+  // missed field shows the previous user's data to the next one to sign in
+  // on the tab. An expiry used to be a bare
+  // setUser(false), and on an account the app knew no profile for little
+  // reset (the signed-out effect's hero, Continue Watching and search words,
+  // the toasts, a cold load of Home's rails): the next account to sign in
+  // was shown the last one's grids and their totals, the title it had open,
+  // its requests, its unread count, Home's rails until its own landed, and
+  // any menu or dialog left open, and the player booted the title it had
+  // been watching.
+  // Where the user was (the page, the grids' sorts) is not in here, nor is
+  // My Library's snapshot: see resetUserState.
+  const clearUserState = useCallback(() => {
     // A question left open, and the add-to-list sheet's last failure, are
     // whoever asked's: never the next session's.
     setConfirmAsk(null)
@@ -3690,19 +3692,23 @@ export default function App() {
     // stayed in the bar across a sign-out: the next person to sign in on
     // the tab found the last one's words there, a search ran for them under
     // the new account, and opening a result filed them in the new
-    // account's recent searches. (A session that expires does not come
-    // through here: the signed-out effect below clears them for both.)
+    // account's recent searches.
     setSearchQuery('')
     setSearchDescribe(null)
     forgetDescribedAnswer()
-    // "Connect a TV with a code" is the intent of whoever followed it.
-    forgetDeviceIntent()
     setLibraryServerFor(null)
     setHomeRails(undefined)
+    // A failure of the previous session's load (its last requests are
+    // refused as it ends) is not the next one's: Home would show it in place
+    // of the skeleton until the next load starts.
+    setHomeError(null)
     setHomeHero(null)
     // Clear hero pool too — without this, user A's personalized
     // blurb is briefly visible to user B after a cross-tab logout.
+    // A pool request still out is not landed for whoever signs in next.
+    heroLoadRef.current++
     setHeroPool([])
+    setHeroPersonalization(null)
     setHeroIndex(0)
     setHeroOnLead(true)
     setHeroPaused(false)
@@ -3714,8 +3720,9 @@ export default function App() {
     followingRailRef.current = []
     // And for every other rail buffer, and what says whose they are: a
     // background refresh recomposes from them, so the next account's first
-    // load must be cold (railsUserRef also catches a session that expired,
-    // which does not come through here).
+    // load must be cold, also when it is the same account again (railsUserRef
+    // alone makes another account's first load cold, but only in the load's
+    // effect, after the commits that drew the rails kept here).
     coreRailsRef.current = []
     discoverRailsRef.current = []
     anchorRailsRef.current = []
@@ -3741,13 +3748,8 @@ export default function App() {
     setShowsList(null)
     setMoviesTotal(null)
     setShowsTotal(null)
-    // Pagination state reset on logout. Sort preference is per-user
-    // so default it back; loading flags are per-session.
-    // What a grid opens with, not a sort of its own: after signing out and
-    // in again the grid opened on "Top rated" with Filters saying something
-    // was applied.
-    setMoviesSort(DEFAULT_BROWSE_SORT)
-    setShowsSort(DEFAULT_BROWSE_SORT)
+    // Pagination state; loading flags are per-session. (The sorts are where
+    // the user was: resetUserState.)
     setMoviesLoadingMore(false)
     setShowsLoadingMore(false)
     setMoviesNextPage(1)
@@ -3763,15 +3765,67 @@ export default function App() {
     setUnreadCount(0)
     markedAllReadRef.current = false
     seedResolvedRef.current = false
-    setLibrary([])
+    // An open title goes; its address stays (on an expiry), and the next
+    // sign-in reads it again under its own session (the /title/:id
+    // hydration), which leaves for Home if that session may not see it.
     setSelectedMedia(null)
     setDetailItem(null)
     setDetailEpisodes([])
     setDetailSeasons([])
     setDetailSelectedSeason(null)
     currentEpisodesSeasonRef.current = null
+    // The player too. It is mounted with the signed-in app, so a target kept
+    // here booted again at the next sign-in: another account was played the
+    // previous one's title, and the same account had it started before its
+    // profile was known, with progress writes naming no profile, which the
+    // server files under whichever one the new session is bound to (after a
+    // password sign-in, the default, before startup re-selects another).
     closePlayer()
     setPartyPanelOpen(false)
+    // Whatever was open over the page was opened by the session that has
+    // gone, and holds its things: a card's menu (its actions close over that
+    // title and profile), the add-to-list sheet, the watch-party composer,
+    // an admin's manual match, a PIN prompt naming one of its profiles, the
+    // collections dialog, the bell's and the server's panels, and the
+    // picker it was asked to open. App owns their state, so the sign-in page
+    // only hid them, and the next sign-in on the tab was shown them. (A PIN
+    // prompt left up also kept every switch and the live refreshes held for
+    // the next session: isSwitching.)
+    setContextMenu(null)
+    setAddToListMedia(null)
+    setAddToListLists(null)
+    setAddToListBusy(false)
+    setPartyComposer(null)
+    setIdentifyTarget(null)
+    setCollectionsModalOpen(false)
+    setNotifOpen(false)
+    setServerOpen(false)
+    setProfilesGateForced(false)
+    cancelPin()
+  }, [closePlayer, forgetHeroLeadWait, cancelPin])
+
+  // Full state reset on sign-out, here or in another tab: everything
+  // clearUserState clears, and where the user was. Hoisted above the storage
+  // useEffect so both the explicit logout and the cross-tab path can share
+  // it. A session that expires runs clearUserState only (see the expiry
+  // listener for why).
+  const resetUserState = useCallback(() => {
+    clearUserState()
+    // "Connect a TV with a code" is the intent of whoever followed it. Not
+    // in clearUserState: the sign-in page sets it for the next sign-in, and
+    // an expiry's second clear can run after that page is up.
+    forgetDeviceIntent()
+    // My Library's list is cleared by its key going to null on every path;
+    // here the save effect also writes this empty list under the outgoing
+    // key, so a sign-out forgets this browser's snapshot of it. An expiry
+    // leaves the snapshot, as it leaves the recent searches (handleLogout):
+    // the same person most likely signs in again.
+    setLibrary([])
+    // What a grid opens with, not a sort of its own: after signing out and
+    // in again the grid opened on "Top rated" with Filters saying something
+    // was applied.
+    setMoviesSort(DEFAULT_BROWSE_SORT)
+    setShowsSort(DEFAULT_BROWSE_SORT)
     setView('home')
     // QA BUG-001 follow-up — also drop the URL back to root.
     // Without this, the URL stayed at /v2/admin (or wherever)
@@ -3781,7 +3835,80 @@ export default function App() {
     // were admin) before our auth checks fired. Server-side guards
     // prevent data leakage, but the UX reads as a permissions bug.
     navigate('/')
-  }, [navigate, closePlayer, forgetHeroLeadWait])
+  }, [clearUserState, navigate])
+
+  // Session expiry. /api/auth/me is validated once at mount (above), so a
+  // long-lived tab whose session expired mid-session never re-checked: it kept
+  // rendering as logged-in and kept polling with dead credentials — 8,562
+  // requests at user_id=0 in the production logs, one storm running for hours
+  // on 2026-07-24. api.ts now fires this event when the server definitively
+  // rejects a refresh; dropping to the auth screen unmounts the authed
+  // subtree, and with it every poller, socket and interval.
+  //
+  // What App keeps for the user goes too (clearUserState), and the watch
+  // party is left, as on a sign-out: the party hook lives above the auth
+  // screen, so its sockets, opened under the session that ended, stayed in
+  // the room, and whoever signed in next on the tab was in it as the
+  // previous user. Leaving now files it under that user's "Recently in" for
+  // a rejoin. The address is kept, unlike a sign-out's: the expiry also
+  // fires at a cold load that finds the stored session dead, where the
+  // address is a link just followed (a title, a TV's /device?code=) that the
+  // sign-in then opens, and for the person whose session it was, the page
+  // they were on. (A party link is not among them: the magic-link join
+  // above takes its code out of the address at the optimistic render,
+  // before the expiry.) It cannot tell who signs in next: another
+  // account lands on the previous one's address too, with everything on it
+  // asked for again under its own session. (Every other open tab of the app
+  // already takes this event as a sign-out, address included: endSession
+  // clears the stored user, which is the cross-tab logout signal below.)
+  const leaveParty = party.leave
+  const [expiries, setExpiries] = useState(0)
+  // The second clear below runs once per expiry, never because
+  // clearUserState's identity changed: that follows closePlayer, which
+  // follows `user`, so a clear keyed on it would run again at the next
+  // sign-in and at every /me another tab's stored-user write brings,
+  // closing the signed-in account's player and dropping its page.
+  const clearUserStateRef = useRef(clearUserState)
+  useLayoutEffect(() => { clearUserStateRef.current = clearUserState }, [clearUserState])
+  const expiriesClearedRef = useRef(0)
+  // Whether anyone is signed in, for the listener below. An expiry can be
+  // announced while the sign-in page is already up: another tab's sign-out
+  // put it there, and then one of this tab's own requests had its refresh
+  // refused (api.ts announces once per sign-in, per tab). There is nothing
+  // left to clear then, and running again forgot what the page had recorded
+  // for the next sign-in since ("Connect a TV with a code").
+  const signedInRef = useRef(false)
+  useLayoutEffect(() => { signedInRef.current = !!user }, [user])
+  useEffect(() => {
+    const onExpired = () => {
+      if (!signedInRef.current) return
+      leaveParty()
+      setUser(false)
+      clearUserState()
+      // Now, not in the second clear below: the sign-in page may record a
+      // new one before that runs (see resetUserState).
+      forgetDeviceIntent()
+      setExpiries(n => n + 1)
+    }
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired)
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired)
+  }, [leaveParty, clearUserState])
+  // And again once the commit that drops the signed-in app has run every
+  // effect's cleanup, which marks what each had out as cancelled. The
+  // request whose refused refresh fired the expiry is still out when the
+  // handler runs: its own failure handler runs right after it, before that
+  // commit, while its effect still counts it as current, and put state back
+  // (My requests' list set empty, so never asked for again, and the next
+  // sign-in was told nothing had been requested). A sign-out has the same
+  // window and no second clear: nothing it starts lands in it every time,
+  // and an expiry one of its requests brings runs one only when announced
+  // before the sign-out's commit (after it, the tab is signed out and the
+  // listener ignores it).
+  useEffect(() => {
+    if (expiries === expiriesClearedRef.current) return
+    expiriesClearedRef.current = expiries
+    clearUserStateRef.current()
+  }, [expiries])
 
   // Cross-tab logout. A logout in another tab clears aurora_token
   // and fires a `storage` event here; we tear down the watch party
@@ -6009,18 +6136,22 @@ export default function App() {
     setHomeHero(null)
   }, [activeProfileId])
   // Nobody is signed in: the hero, Continue Watching and the hero's wait for
-  // it are nobody's. Sign out clears them in resetUserState, and on an
-  // account with profiles the profile going to null does (the effect above
-  // and the switch's reset). A session that EXPIRES while the app knows no
-  // profile for the account comes through neither: expiry is a bare
-  // setUser(false), and the profile is null before and after. Whoever
-  // signed in next on the tab was then handed all of it: the hero led at
-  // once with the title the last Continue Watching answer named (or, for
-  // another account, once its own slow answer outran the wait), over picks
-  // the rotation had kept turning while nobody was signed in.
+  // it are nobody's. A sign-out and a session that expires clear them with
+  // the rest of the user's state (clearUserState), and on an account with
+  // profiles the profile going to null does too (the effect above and the
+  // switch's reset). This effect is for the one way left that comes through
+  // neither: a /me check (at startup, or after another tab changed the
+  // stored user) that fails without the server ending the session drops to
+  // the auth screen with a bare setUser(false). It covers only what is here,
+  // not everything clearUserState does. It was also the expiry's only
+  // clearing once: on an account the app knew no profile for, whoever signed
+  // in next on the tab was handed all of this: the hero led at once with the
+  // title the last Continue Watching answer named (or, for another account,
+  // once its own slow answer outran the wait), over picks the rotation had
+  // kept turning while nobody was signed in.
   useEffect(() => {
     if (user !== false) return
-    // The search field's words too (see resetUserState): nobody is signed
+    // The search field's words too (see clearUserState): nobody is signed
     // in, so they are nobody's. The address is left where it was, as on any
     // page a session expires on: on /search the next sign-in finds the page
     // with nothing typed. (A described ask needs no clearing here: it is

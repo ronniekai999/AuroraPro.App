@@ -30,7 +30,8 @@ const api = vi.hoisted(() => ({
 vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof import('@/lib/api')>()), ...api }))
 
 import AdminView from './AdminView'
-import { resetRestoreOutcomeForTest, setRestorePollForTest } from './restoreOutcome'
+import { resetRestoreOutcomeForTest } from './restoreOutcome'
+import { resetRestoreRecordForTest } from '@/hooks/useRestoreRecord'
 
 type User = ReturnType<typeof userEvent.setup>
 const LIB: Library = { id: 1, name: 'Movies', type: 'movie', paths: ['/media/movies'], scan_interval_minutes: 0, owner_id: 1, created_at: '', updated_at: '' }
@@ -41,10 +42,11 @@ let fetchAnswer: (url: string) => Promise<Response>
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
 beforeEach(() => {
+  // A restore's ticket is kept in localStorage, which outlives a test.
+  localStorage.clear()
+  resetRestoreRecordForTest()
   // A restore's outcome outlives the page by design: each test starts clean.
   resetRestoreOutcomeForTest()
-  // A restore is followed by reading its status: quickly, here.
-  setRestorePollForTest(10)
   fetchAnswer = async () => json(503, { error: 'unavailable' })
   vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => fetchAnswer(String(url))))
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
@@ -62,11 +64,7 @@ beforeEach(() => {
   api.getAIRematchStatus.mockResolvedValue({ enabled: true })
   api.listFlaggedItems.mockResolvedValue([])
 })
-afterEach(() => { resetRestoreOutcomeForTest(); vi.unstubAllGlobals() })
-
-/** A restore job's status as the server reports it. */
-const RUN = { id: 'j1', file: 'aurora.dump', phase: 'validating', started_at: '2026-11-13T10:00:00Z' }
-const ENDED = { id: 'j1', file: 'aurora.dump', started_at: '2026-11-13T10:00:00Z', ended_at: '2026-11-13T10:05:00Z', succeeded: true, phase: 'replacing', database: 'restored', message: 'Restore complete.' }
+afterEach(() => vi.unstubAllGlobals())
 
 async function openSection(user: User, name: string) {
   const view = render(<MemoryRouter><AdminView currentAdminId={1} /></MemoryRouter>)
@@ -128,12 +126,9 @@ describe('results said once in their panel', () => {
 describe('what the admin still has to do', () => {
   it('keeps the restart notice after a restore, across the page’s sections, until it is dismissed', async () => {
     const user = userEvent.setup()
-    let started = false
-    fetchAnswer = async url => {
-      if (url === '/api/admin/restore') { started = true; return json(202, { running: RUN, last: null }) }
-      if (url === '/api/admin/restore/status') return json(200, started ? { running: null, last: ENDED } : { running: null, last: null })
-      return json(503, { error: 'unavailable' })
-    }
+    fetchAnswer = async url => url === '/api/admin/restore'
+      ? json(200, { status: 'ok' })
+      : json(503, { error: 'unavailable' })
     const view = await openSection(user, 'Backup and restore')
     await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
     await user.click(screen.getByRole('button', { name: 'Restore database' }))
@@ -273,27 +268,31 @@ describe('failures said beside what failed', () => {
     expect(alertLines(await screen.findByRole('alert'))).toEqual(['A backup or restore is already running. Try again when it has finished.', 'The server said: another backup or restore is already in progress'])
   })
 
-  it('says a restore that failed, and that the database is as it was, beside the button that asked', async () => {
+  it('words the restore panel with its code names set off by spaces', async () => {
     const user = userEvent.setup()
-    // The upload is taken (202); the job then fails, as its status says.
-    let started = false
-    fetchAnswer = async url => {
-      if (url === '/api/admin/restore') { started = true; return json(202, { running: RUN, last: null }) }
-      if (url === '/api/admin/restore/status') {
-        return json(200, started
-          ? { running: null, last: { ...ENDED, succeeded: false, database: 'unchanged', message: 'the restore failed and its transaction was rolled back' } }
-          : { running: null, last: null })
-      }
-      return json(503, { error: 'unavailable' })
-    }
+    fetchAnswer = async () => json(503, { error: 'unavailable' })
+    const view = await openSection(user, 'Backup and restore')
+    // JSX drops the space at a line break next to an element.
+    const text = view.container.textContent ?? ''
+    expect(text).toContain('so pause aurora-update.timer first for a large backup. Legacy .sql.gz backups need to be restored via the command line: gunzip < file.sql.gz | psql $DATABASE_URL.')
+    expect(text).toContain('Once the file has been checked and until the restore ends, Aurora waits for it: pages hang (some fail after a minute) and signing in is paused.')
+  })
+
+  it('says a restore that failed was rolled back unless it was cut off as it committed, and keeps it in the panel once the dialog is put down', async () => {
+    const user = userEvent.setup()
+    fetchAnswer = async url => url === '/api/admin/restore'
+      ? json(500, { error: { code: 500, message: 'the restore failed and was rolled back, so the database was NOT modified: lock timeout' } })
+      : json(503, { error: 'unavailable' })
     const view = await openSection(user, 'Backup and restore')
     await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
     await user.click(screen.getByRole('button', { name: 'Restore database' }))
     const d = await screen.findByRole('alertdialog')
     await user.click(within(d).getByRole('button', { name: 'Restore database' }))
+    const said = 'The restore did not go through. Unless it was cut off as it was being committed, the database was not changed. Read what the server said before going on.'
+    expect(alertLines(await within(d).findByRole('alert'))).toEqual([said, 'The server said: the restore failed and was rolled back, so the database was NOT modified: lock timeout'])
+    await user.click(within(d).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
-    const said = 'The restore failed and everything it had done was undone, so the database is as it was. Read what the server said before trying again.'
-    expect(alertLines(await screen.findByRole('alert'))).toEqual([said, 'The server said: the restore failed and its transaction was rolled back'])
+    expect(screen.getByText(said)).toBeInTheDocument()
   })
 
   it('says a sweep that did not start, and a suggestion that could not be accepted, beside each', async () => {
@@ -478,14 +477,12 @@ describe('a restore’s other answers', () => {
     await user.click(within(d).getByRole('button', { name: 'Restore database' }))
     return alertLines(await within(d).findByRole('alert'))[0]
   }
-  const LOST = 'No answer came back from the server while the file was sent, so it is not known whether the restore started. If it did, it runs on the server: this page looks for it, and the server’s log says what happened.'
+  const LOST = 'The connection to the server was lost during the restore. If the upload had finished, the restore goes on on the server without this page: do not restart Aurora until you know how it ended, since a restart stops a restore still running. Admin, under Backup and restore, shows how it ends once Aurora can be asked, and so does the sign-in page in this browser.'
   it.each([
     ['no answer', () => Promise.reject(new TypeError('Failed to fetch')), LOST],
     ['a proxy that gave up (504)', async () => json(504, { error: 'gateway timeout' }), LOST],
     ['a proxy that gave up (502)', async () => new Response('<html>Bad gateway</html>', { status: 502, headers: { 'content-type': 'text/html' } }), LOST],
-    ['a proxy that gave up (503)', async () => json(503, { error: 'service unavailable' }), LOST],
-    ['a file refused (400)', async () => json(400, { error: { code: 400, message: 'upload is not a pg_dump custom archive' } }), 'The server refused this file, and the database was not changed.'],
-    ['a server error before the job (500)', async () => json(500, { error: { code: 500, message: 'failed to create temp file for upload' } }), 'The restore did not start, and the database was not changed. Read what the server said before trying again.'],
+    ['a proxy that gave up (Cloudflare’s 524)', async () => new Response('<html>A timeout occurred</html>', { status: 524, headers: { 'content-type': 'text/html' } }), LOST],
     ['another restore running (409)', async () => json(409, { error: { code: 409, message: 'another backup or restore is already in progress' } }), 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.'],
     ['a file too large (413)', async () => json(413, { error: { code: 413, message: 'upload exceeds the 50 GB limit' } }), 'The file is too large to restore from here, and the database was not changed.'],
   ])('says %s', async (_what, answer, says) => {

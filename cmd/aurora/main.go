@@ -551,16 +551,6 @@ func main() {
 	// picks it up on the next publish.
 	transcode.SetDrainExtraViewers(directPlay.ActiveCount)
 
-	// Database restores run as jobs on the server's lifecycle, not on the
-	// upload's request (internal/api/admin_restore_job.go). A running one
-	// counts in the drain snapshot, published at once when one starts or
-	// ends, so the deploy scripts wait for it as they wait for a viewer: a
-	// restart stops it, and its transaction rolls back to the old data. The
-	// shutdown does not wait for it; cancelling ctx stops it the same way.
-	restoreJobs := api.NewRestoreJobs(ctx)
-	restoreJobs.SetOnChange(transcode.PublishDrainState)
-	transcode.SetDrainRestoreRunning(restoreJobs.Running)
-
 	// embedItem is invoked after each successful enrichment path below. It
 	// regenerates the semantic-search vector so newly-imported content is
 	// findable by natural-language query immediately, not on the next backfill.
@@ -1015,7 +1005,6 @@ func main() {
 		SkipMarkers: skipWorker,
 		RootCtx:     ctx, // server-lifecycle ctx for background goroutines spawned in handlers
 		InFlight:    inFlight,
-		RestoreJobs: restoreJobs,
 	})
 
 	// HTTP Server

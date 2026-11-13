@@ -17,9 +17,12 @@ import { Link, useLocation } from 'react-router'
 import { AuroraWordmark } from '@/components/AuroraWordmark'
 import { AuroraMark } from '@/components/TopNav'
 import { Icon } from '@/components/Icon'
+import { RestoreRecordNote } from '@/components/RestoreRecordNote'
 import { Spinner } from '@/components/ui/spinner'
 import { APIError, getSetupStatus, login as apiLogin, register, type SetupStatus, type User as ApiUser } from '@/lib/api'
 import { rememberDeviceIntent, rememberDevicePairing } from '@/lib/devicePairing'
+import { useRestoreRecord } from '@/hooks/useRestoreRecord'
+import { failureReason } from '@/lib/failureWords'
 import { OAUTH_SIGN_IN_PROVIDERS, type OAuthProvider } from '@/lib/oauth'
 
 /** A field of the two forms, by the end of its id (`auth-<field>`). */
@@ -62,6 +65,15 @@ export function refusalSays(err: unknown, making: boolean): Refusal {
   if (err instanceof APIError) {
     // The rate limiter, whatever its words.
     if (err.status === 429) return { says: 'Too many tries. Wait a moment and try again.', field: null }
+    // A database restore closes signing in until it ends.
+    if (err.status === 503 && failureReason(err) === 'restore_running') {
+      return {
+        says: making
+          ? 'A database restore is running on this server, so accounts cannot be made until it has finished.'
+          : 'A database restore is running on this server, so signing in is paused until it has finished.',
+        field: null,
+      }
+    }
     for (const [status, sentence, says, field] of ANSWERS) {
       if (err.status === status && err.message === sentence) return { says, field }
     }
@@ -139,6 +151,12 @@ export default function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void
   // On a fresh install (no account in the database) the first person to
   // register becomes the admin and needs no invite code.
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
+  // A database restore this browser started: while its transaction runs the
+  // server's session checks wait on it (and can fail after a minute), and
+  // one that succeeds ends every sign-in, so the admin who started it can
+  // land here, the one page that can still say how it went (by its ticket;
+  // hooks/useRestoreRecord).
+  const restoreRecord = useRestoreRecord({})
   useEffect(() => {
     let cancelled = false
     void getSetupStatus().then(s => { if (!cancelled) setSetupStatus(s) }).catch(() => { /* the pages work without it */ })
@@ -254,6 +272,7 @@ export default function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void
                     : 'Choose a username and a password.'}
               </p>
             </div>
+            <RestoreRecordNote record={restoreRecord} />
             {inviteRequired && (
               <div className="auth-field">
                 <label htmlFor="auth-invite">Invite code</label>
@@ -316,6 +335,7 @@ export default function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void
               {pairing ? 'Sign in to connect your TV. Its code comes next.' : 'Sign in to your media server.'}
             </p>
           </div>
+          <RestoreRecordNote record={restoreRecord} />
           <div className="auth-field">
             <label htmlFor="auth-username">Username</label>
             <input id="auth-username" type="text" className="auth-input" value={username} onChange={e => setUsername(e.target.value)} autoComplete="username" autoCapitalize="none" spellCheck={false} disabled={submitting} />

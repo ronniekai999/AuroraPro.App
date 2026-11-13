@@ -220,6 +220,13 @@
        useExitTransition's 150ms unmount still lands as the animation ends. */
     --dur-enter: 280ms;
     --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+    /* A title opened from a poster (index.css "Travel"): the poster's travel
+       and the pages' cross-fade both take this long, and for this long plus
+       the frames the browser takes its pictures in, a press that begins
+       does nothing (a captured root takes every press). Shorter than an
+       entrance on purpose: long enough to be seen as a cross-fade, and no
+       longer. */
+    --dur-travel: 200ms;
     /* A 1px top highlight that makes a dark glass surface read as lit from
        above. Folded into the --glow-halo tokens (G1) and used directly on the
        ghost button family; an inset shadow paints under content, so on a
@@ -4059,19 +4066,38 @@ html:has(.player-cast-widget) .stage-shell {
 }
 
 /* Travel: the poster that was pressed moves to the title page's poster
-   (lib/posterTravel.ts gives the pressed card's picture this name for the
-   length of a view transition; the title page's poster has it here). The
-   browser draws one growing into the other. The root is NOT captured: while
-   a captured root's transition runs, Chromium sends every press to <html>
-   whatever pointer-events says, so Play, Back or a tab pressed in that time
-   did nothing. Uncaptured, the page under the poster is the live one, and
-   the title page fades in by its own entrance (.animate-fade-in). */
+   while the page it was pressed on cross-fades into the title page.
+   lib/posterTravel.ts gives the pressed card's picture the name
+   title-poster, and <html> the attribute data-title-travel, for the length
+   of a view transition; under that attribute, and only under it, the root
+   and the title page's poster are named here. So at rest nothing on either
+   page has a view-transition-name (the root's UA default is turned off
+   too), and during the transition the browser draws the two pages
+   cross-fading (the root) with the poster growing from one place into the
+   other over them.
+   THE COST, chosen by the owner: while a captured root's transition runs,
+   Chromium sends every press to <html> whatever pointer-events says, so a
+   press that begins in that time (Play, Back, a tab) does nothing, even one
+   that ends after it. --dur-travel keeps
+   that window short; docs/redesign-known-items.md (Motion) has the
+   measured figure. The title page's own entrance (.animate-fade-in) is
+   finished as it arrives, so the page is not faded twice. */
 :root { view-transition-name: none; }
-.stage-detail-poster { view-transition-name: title-poster; }
+:root[data-title-travel] { view-transition-name: root; }
+:root[data-title-travel] .stage-detail-poster { view-transition-name: title-poster; }
 ::view-transition-group(*),
 ::view-transition-old(*),
 ::view-transition-new(*) {
-  animation-duration: var(--dur-enter);
+  animation-duration: var(--dur-travel);
+}
+/* The cross-fade at an even rate: the two pages are seen together for most
+   of the window and the change is visible until it ends, so the window in
+   which presses do nothing is not spent on a tail too small to see. The
+   same curve on both halves keeps their sum whole (the browser adds them,
+   plus-lighter), so the page does not dim in the middle. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-timing-function: linear;
 }
 /* Clipped to the poster's corners: a captured picture is drawn without its
    card's clip and radius. */
@@ -4087,7 +4113,8 @@ html:has(.player-cast-widget) .stage-shell {
   height: 100%;
   object-fit: cover;
 }
-/* The overlay that holds the travelling poster takes no press either. */
+/* The overlay that holds the pictures takes no press (Chromium sends presses
+   to <html> while the root is captured, whatever this says). */
 ::view-transition { pointer-events: none; }
 /* The app's own Reduce effects (no transition is started under it either,
    lib/posterTravel.ts): stilled, so the page is simply replaced. The same

@@ -422,15 +422,16 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   is one visit's fact: a sign-out and a profile switch forget it, with the
   mark that the viewer is in the hero (`forgetHeroLeadWait`, called
   wherever Continue Watching's own answer is forgotten), so a return to the
-  same user and profile waits again. A session that expires is a bare
-  `setUser(false)`, not `resetUserState`, and while the app knows no
-  profile for the account no profile changes either, so one effect clears
-  the hero (its picks, its place in the slate, the catalog's stand-in),
-  Continue Watching and the wait whenever nobody is signed in: the next
-  sign-in on the tab used to be handed the last answer's title as the
-  hero's lead. That effect covers Tonight's hero only; what else that path
-  leaves in the tab is a gap older than this (see Known gaps). An answer
-  that arrives after the four seconds takes the hero over only while the
+  same user and profile waits again. A session that expires forgets it
+  too, with the rest of the user's state (`clearUserState`, see Known
+  gaps), and one effect also clears the hero (its picks, its place in the
+  slate, the catalog's stand-in), Continue Watching and the wait whenever
+  nobody is signed in, which covers the bare `setUser(false)` still left
+  (a `/me` check that fails without the session ending). An expiry used to
+  be that bare call too, and while the app knows no profile for the
+  account no profile changes either: the next sign-in on the tab was
+  handed the last answer's title as the hero's lead. An answer that
+  arrives after the four seconds takes the hero over only while the
   hero is still on the entry it opened on and the viewer has done nothing
   in it (pointer or focus in it, a pick chosen, the rotation paused).
   Otherwise the title comes up when the rotation next wraps round to it
@@ -461,10 +462,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   on sign-out), and holds the titles the server listed; a listed title's
   card can still be drawn from this browser's copy of it. Pinned by
   `App.tonight.test.tsx` and `App.profileSwitch.test.tsx`. Of what forgets
-  the wait, the switch's call and the signed-out effect are each pinned
-  alone (a switch away and back; an expiry on an account with no profile);
-  the call in `resetUserState` is not, since after a sign-out the other two
-  run as well.
+  the wait, the switch's call is pinned alone (a switch away and back); the
+  signed-out effect's and `clearUserState`'s are not, since an expiry (on an
+  account with no profile) and a sign-out each run both.
   When the binding cannot be read it shows no profile and opens
   the picker, which cannot be left without a pick, rather than guessing the
   default; if the profile list fails, nothing personalized loads at all. The
@@ -506,13 +506,14 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   title, a collection or My requests opened from the results
   (`keepSearch`), and go when the viewer leaves the search page any other
   way (a destination in the bar, Back out of the results), on a sign-out,
-  and when the session expires (`resetUserState` and the signed-out effect:
-  they used to outlive both, so the next account on the tab found them in
-  the bar and had a search run for them). The search effect starts after
-  the commit a key lands in, so until the answer for the words in the field
-  is in, asked the way they are being asked, the page is searching
-  (`settled`, `searching` in `SearchView`): it does not count the last
-  answer under the new words, show its failure, or offer anything for it.
+  and when the session expires (`clearUserState`, which both run, and the
+  signed-out effect: they used to outlive both, so the next account on the
+  tab found them in the bar and had a search run for them). The search
+  effect starts after the commit a key lands in, so until the answer for
+  the words in the field is in, asked the way they are being asked, the
+  page is searching (`settled`, `searching` in `SearchView`): it does not
+  count the last answer under the new words, show its failure, or offer
+  anything for it.
   Ctrl or Cmd K puts the focus in the search field (there is no palette;
   `lib/searchKeys.ts` moves the real focus through the results: Left and
   Right in drawn order, Down and Up by row on the page) and does nothing
@@ -992,21 +993,106 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     keeps writing progress for the outgoing profile and is refused.
   - The SPA does not re-read the session's profile after a 403
     `profile_restricted` on a data route.
-  - A session that expires (`SESSION_EXPIRED_EVENT`) signs the tab out with
-    a bare `setUser(false)`; `resetUserState` does not run. On an account
-    with profiles the profile going to null runs the switch's resets. While
-    the app knows no profile for the account (a new account before its
-    first progress write, or a tab that has not listed the profiles since)
-    nothing does, beyond Home's rails (`railsUserRef`), the notification
-    count, the search field's words, the toasts, and Tonight's hero,
-    Continue Watching and wait (the signed-out effects). What else App keeps for the previous user on that path (the
-    browse grids and their totals, an open title) has not been audited: the
-    next sign-in on the tab may be shown it until its own answers land. The
-    grids' totals are not kept per owner. What reads them: a grid's count
-    in the Library header and in the Filters sheet's "Show N movies"
-    button, the layout a grid opens with and whether it has an A to Z strip
-    (both by size), and Tonight's closing line, which falls back to them
-    while Home's own count has not answered.
+  - A session that expires (`SESSION_EXPIRED_EVENT`) leaves the watch party
+    and runs `clearUserState`: everything a sign-out clears except where the
+    user was. A sign-out's `resetUserState` is `clearUserState` plus that: the
+    address and the grids' sorts (a sign-out goes Home with the default sort),
+    and this browser's My Library snapshot, which a sign-out writes empty; an
+    expiry keeps all three, as it keeps the recent searches. The address is
+    kept because the expiry also fires at a cold load whose stored session is
+    dead, where it is a link just followed (a title, a TV's `/device?code=`)
+    that the sign-in then opens, and for the same person signing in again it
+    is the page they were on, its data asked for again (a grid from its first
+    page: Load More's depth is lost). The app cannot tell who signs in next,
+    so another account also lands on the previous one's address (its path can
+    name the title, collection or member page that one had open), sorts and
+    browser history for Back, with what is there asked for again under its own
+    session; a title it may not see sends it Home. The player is closed even
+    for the same person: mounted again at the sign-in, it booted the old title
+    before the profile was known. The same person is also out of the party (a
+    host hands it on; it is filed under their "Recently in" for a rejoin).
+    Every other open tab already took the expiry as a full sign-out, address
+    included (`endSession` clears the stored user, which is the cross-tab
+    logout signal). `clearUserState` also closes what is open over the page (a
+    card's menu, the add-to-list sheet, the watch-party composer, an admin's
+    manual match, a PIN prompt, the collections dialog, the bell's and the
+    server's panels, a forced picker): App owns their state, so the sign-in
+    page only hid them, after a sign-out in another tab too, and the next
+    account was shown them. Before this, an expiry was a bare
+    `setUser(false)`, and on an account the app knew no profile for little
+    reset (the signed-out effects' hero, Continue Watching, its wait, search
+    words and open questions, the toasts, and a cold load of Home's rails once
+    the next startup settled): the next account was shown the previous one's
+    grids and their totals (not asked for again until a live catalog update:
+    their effect fetches only a list not yet loaded), its open title, its
+    requests, its unread count, Home's rails until its own landed, and any
+    menu or dialog left open, had its title booted in the player, and was in
+    its watch party as it. When the next account had a profile, its startup
+    binding is not a switch, so the switch's resets did not run for it either.
+    An expiry clears once more after the commit that drops the signed-in app,
+    when every effect's cleanup has marked what it had out as cancelled: the
+    request whose refused refresh fires the expiry runs its own failure
+    handler right after the expiry's, before that commit, while its effect
+    still counts it as current, and it put state back (My requests' list set
+    empty, so never asked for again, and the next sign-in told nothing had
+    been requested). That second clear runs once per expiry, never because
+    `clearUserState` changed (it changes with every user object), or it would
+    run again for the account signed in next, at its sign-in and at every
+    `/me` another tab's write to the stored user brings. It also leaves alone
+    what the sign-in page records for the next sign-in, the TV intent: the
+    expiry forgets that at its moment, not in the second clear, which can run
+    after the page is up. An expiry announced while the tab is already signed
+    out is ignored (another tab's sign-out put the sign-in page up, then one
+    of this tab's requests had its refresh refused: api.ts announces once per
+    sign-in, per tab); running again, it forgot that intent. Pinned by
+    `App.sessionExpiry.test.tsx`, sampling every commit: an account with no
+    profile expires on Home, a grid, an open title or My requests, and another
+    account (with no profile, and with one) signs in; no commit shows the
+    first one's titles, request, grid total or unread count, and removing the
+    reset of the grids, the open title, the requests list (pinned only when
+    the next account has no profile: a profile changes the list's key), the
+    unread count or Home's rails fails it. Also pinned: a card's menu, the
+    composer and a PIN prompt open at the expiry are not drawn for the next
+    account; an expiry found by a request (opening My requests) leaves its
+    list to be asked for again, for either account; the account signed in
+    again keeps its player up when another tab writes the stored user; a TV
+    intent recorded as the sign-in page is first drawn survives the second
+    clear and a second announcement; the player is not booted again for either
+    account; the party's room is told the tab left; the same account is back
+    on its grid and its title with each asked for again; and a title link or a
+    `/device?code=` link followed at a cold load with a dead session opens
+    after the sign-in (the same-account and link cases fail if the expiry runs
+    `resetUserState`). Not pinned on this path, beyond what
+    `App.tonight.test.tsx` and `App.searchRequest.test.tsx` pin (the hero,
+    Continue Watching, its wait, the search field's words): the notification
+    list (the bell is never opened; the next sign-in's feed read also drops
+    it, after its first commit, or for an admin once its startup settles), the
+    rail buffers, the aborts, `libraryServerFor`, the described search's
+    answer, the hero's pause and pool generation, Home's error, the detail
+    fields, the party panel's flag and the other overlays. Still open: a
+    failure handler that navigates before that commit cannot be undone (a
+    title's hydration refused by the 401, on a Back or Forward to
+    `/title/:id`, goes Home, so the address kept is Home's). A sign-out has
+    the same window before its commit, with no request that lands in it every
+    time, and no second clear: an expiry one of its requests brings runs one
+    only when announced before the sign-out's commit (after it, the tab is
+    signed out and the expiry is ignored). A `/me` check that fails without
+    the server ending the session (a network error or a 5xx, at startup or
+    after another tab changed the stored user) drops to the sign-in page with
+    a bare `setUser(false)`: only the signed-out effects run (Tonight's hero,
+    Continue Watching and its wait, the search field's words, the open
+    questions, the toasts, the badge) and, on an account with profiles, the
+    resets of the profile going to null; the party is not left there. A push
+    subscription stays registered on the server for the expired account
+    (deleting it there needs the session that ended), so the device can keep
+    getting that account's pushes until the next sign-in, whose boot resync
+    posts the browser's subscription again and the server reassigns it to the
+    account now signed in (`ON CONFLICT (endpoint)`): that account gets pushes
+    on this device without having turned them on. True before this change too;
+    unsubscribing in the browser at the expiry would instead leave push off
+    for the same person after every expiry (the resync never subscribes). The
+    grids' genre filters and genre lists survive a sign-out and an expiry
+    alike.
 
 ### Member profiles and follows
 
@@ -1349,7 +1435,10 @@ count restarts).
   `aurora-update.sh`, `install.sh` and `redeploy.sh`
   (`scripts/drain-gate-test.sh` checks the copies, the hostile-file cases, that
   it reads the path `DefaultStreamStateFile` writes, and that each script waits
-  before its first live change). `install.sh` re-runs and `redeploy.sh` used not
+  before its first live change). A running database restore counts as one
+  held session in the snapshot (`restore`, inside `held_by_viewer`, which is
+  all the block reads), so the drain waits for it too, up to its limit; see
+  Admin page dialogs and the restore. `install.sh` re-runs and `redeploy.sh` used not
   to wait at all; they skip with `AURORA_SKIP_DRAIN=1` / `--no-drain`, and when
   the service is not running. `install.sh` stages and swaps its release files
   (binary, migrations, frontend) in `install_release_files`, on the line after
@@ -1367,19 +1456,6 @@ count restarts).
   an idle tick used to delete an install.sh re-run's staged frontend. The block reads
   numbers with `10#` and a length cap: the aurora user writes the snapshot, and
   an invalid-octal timestamp used to abort the updater under `set -e`.
-- A running database restore counts as one in the snapshot's `held_by_viewer`
-  (its own field, `restore`, beside it; published at once when a restore
-  starts or ends, `RestoreJobs.SetOnChange`), so all three scripts' drain
-  waits for it as for a viewer, with no change to the shared block, and
-  restarts anyway after its 5 minutes. A restart stops a restore, whose
-  transaction then rolls back: the old data stays, and the admin runs the
-  restore again (see "Admin page dialogs and the restore"); the restarted
-  server's migrations can wait a second or two for the stopped restore's
-  session to go. The updater's own lines outside the block name it: its log
-  says "held by viewers or a database restore" and "waiting for viewers (or
-  a database restore)", its status "Waiting for active stream sessions or a
-  database restore to finish". The block's comments and its function names
-  still speak of viewers only.
 
 ### Node build floor
 
@@ -1955,8 +2031,10 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   sentences with their statuses (`ANSWERS`, against
   `internal/api/auth_handlers.go`), never a word inside one: matched on
   "password", a 500 "failed to hash password" told its viewer how long a
-  password must be. A 429 is "too many tries" whatever its words; every 5xx
-  and anything unknown is "could not ... just now", about no field. Nothing
+  password must be. A 429 is "too many tries" whatever its words; a 503
+  with the reason `restore_running` says a database restore is running and
+  signing in (or making an account) is paused; every other 5xx and anything
+  unknown is "could not ... just now", about no field. Nothing
   checks the list against the Go source: a reworded server sentence falls
   back to that line. A refusal puts the focus in the field it is about (the
   form's first when none), and going between the two pages puts it on the
@@ -1965,7 +2043,7 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   comes back to the front page, so the tab keeps that the viewer was on
   their way to pair (`rememberDeviceIntent`: a time in sessionStorage and
   nothing from the address; the destination is fixed). The next sign-in
-  uses it once; a sign-out and ten minutes forget it.
+  uses it once; a sign-out, an expiry and ten minutes forget it.
 - A toast is said to whoever is acting when it is raised. Toasts are
   dropped when nobody is signed in and when the account changes. Each
   takes the acting profile with its id (`nextToastId`, from a layout-effect
@@ -2032,7 +2110,9 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
 - A failure is said in the app's own words, chosen by its kind, never the
   server's or the browser's text (`lib/failureWords`: lib/api's
   `NetworkError` for a request that got no answer, `APIError`'s status and
-  `error.reason`; an abort says nothing). "Just now" is said only of a 5xx,
+  `error.reason`; an abort says nothing). A 503 `restore_running` (the
+  session and credential routes while a restore runs) says a restore is
+  running, whatever was being done. "Just now" is said only of a 5xx,
   a lost connection and the app's own failure; a 404 says the same whether
   or not the thing exists. The server's text is for the Admin page only, as
   a secondary line (`serverSaidForAdmin`); what is not yet on the helper
@@ -2040,12 +2120,7 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   among them), the update trigger, the AI providers' test, the stream
   diagnosis and the referral question's save as their only line, the
   download clients' connection test after "Failed:", and the manual match
-  dialog after its own sentence (known gap). The same secondary line is
-  shown by `RestoreOutcomeAlert`, which App mounts outside the Admin page
-  for a session with the admin UI only. A restore's progress and outcome
-  are said by what its status reports (the phase, what the database was
-  left in, why the server stopped it), never by the server's sentence,
-  which follows as that line. The browser's own alert,
+  dialog after its own sentence (known gap). The browser's own alert,
   confirm and prompt boxes are not used: `noNativeDialogs.test.ts` reads
   every source file with a scanner that blanks comments only (it knows
   strings, template literals, regular expressions and both comment kinds;
@@ -2111,10 +2186,11 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
 ### Admin page dialogs and the restore (web app)
 
 Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
-`adminFailure.ts`, `restoreOutcome.ts`, `RestoreOutcomeAlert.tsx`) and
-`components/settings/ConfirmDialog.tsx`; the restore's server side in
-`internal/api/admin_backup.go`, `admin_restore_job.go` and
-`admin_restore_pipeline.go`.
+`adminFailure.ts`, `restoreOutcome.ts`, `RestoreOutcomeAlert.tsx`),
+`components/settings/ConfirmDialog.tsx`, and for the restore's record
+`lib/restoreStatus.ts`, `hooks/useRestoreRecord.ts`,
+`components/RestoreRecordNote.tsx`, `internal/api/admin_restore.go` and
+(the one transaction) `internal/api/admin_restore_pipeline.go`.
 
 - No native alert, confirm or prompt (the app-wide guard's allowlist is
   empty). Every confirmation is `ConfirmDialog` through
@@ -2139,166 +2215,286 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   said to have maybe happened. (The panel loads, two actions (the update
   trigger and the referral question's save) and two tests still show the
   server's text: see the failure-words bullet above.)
-- A restore runs as a job the server owns (`internal/api/admin_restore_job.go`,
-  pipeline in `admin_restore_pipeline.go`). `POST /api/admin/restore`
-  receives the upload, spills it to a temp file and runs the cheap checks
-  (the magic bytes, the size) on the request, then answers 202 with the
-  job's status; the request's going (a reload, a closed tab, a dropped
-  connection, a proxy that gives up) does not stop the job, which runs on a
-  context derived from the server's lifecycle (main builds `RestoreJobs` on
-  its root context and hands it to the router, `RouterDeps.RestoreJobs`),
-  bounded to 60 minutes. The backup/restore lock is held from the upload to
-  the job's end, however it ends (the job releases it and removes the temp
-  file); a second restore or a backup meanwhile is a 409.
-- The job validates (`validating`), touching nothing: pg_restore and psql
-  must be there and have the `\restrict` pair (`pg_restore --restrict-key`,
-  PostgreSQL 17.6, 16.10, 15.14, 14.19, 13.22; without it a crafted archive
-  could make psql run `\!` shell commands; checked also before the upload is
-  read, so a missing or old program is a 500 at once), the archive's table of contents may hold
-  only entry types that run inside a transaction (`restoreTOCAllowed`:
-  large objects, whose section pg_restore wraps in its own BEGIN and
-  COMMIT, a database, subscriptions and the like are refused), and the
-  whole archive is read (`pg_restore -f /dev/null`). Then it replaces
-  (`replacing`) in ONE transaction: one psql session reads, from one
-  stream, `BEGIN` and the wipe (the per-object drop that keeps extensions
-  such as `vector` and `pg_trgm`), then `pg_restore -f -`'s SQL (no owner,
-  no privileges, no comments, the random restrict key), then a COMMIT this
-  process writes only after pg_restore has exited 0, its whole output has
-  reached psql and the job is not being stopped. psql is never given
-  `--single-transaction` (which commits at the end of its input), so a
-  pg_restore that dies part way, an error (ON_ERROR_STOP), a lock timeout
-  (30 s per lock in the wipe) or a deadlock, a stop (SIGINT, or systemd's
-  SIGTERM to every process in the unit) or a dropped connection ends psql
-  without a COMMIT and PostgreSQL rolls everything back: the old data
-  stays and everyone stays signed in. The rollback, and with it the end of
-  the locks, is at once after psql's SIGINT (it cancels its statement); after
-  a killed psql (systemd's SIGTERM, an OOM kill, the job's SIGKILL 15 s after
-  its SIGINT) it waits for the statement in flight to notice the lost client,
-  which `client_connection_check_interval = 1s` (in the preamble, PostgreSQL
-  14+) makes about a second (`TestAKilledPsqlFreesTheLocksWithinSeconds`:
-  under a second here); without it, the session kept every lock until the
-  statement ended, and the long ones (the vector index build, the foreign-key
-  checks) are last, so the next start waited in its migrations. A failure
-  is reported by its cause: psql's own error first when psql stopped reading
-  (a lock timeout, a deadlock, a permission error), not pg_restore's death
-  that followed. psql prints a marker line on each side
-  of the COMMIT (to stderr), which decides `restored`; the job does not
-  interrupt a COMMIT psql has reached (it waits up to 60 s), though a stop's
-  SIGTERM from systemd reaches psql directly. Outcomes: `unchanged`
-  (any failure), `restored`, or `unknown`, only when psql was cut off after
-  sending the COMMIT and before saying how it ended (a lost connection, a
-  kill by the job after its 60 s grace or by a signal from outside; the
-  database is then the old data or the backup, never a mix and never empty).
-  No path leaves it empty. While the transaction runs it holds ACCESS
-  EXCLUSIVE locks on every table it dropped: the server's other queries on
-  them wait for it rather than fail, and once it ends they run against the
-  restored data (or the old, after a rollback), writes included (progress,
-  activity, a scan's inserts). Each waiting query holds one of the pool's
-  connections (10 by default), and they are soon all taken: then every
-  request that needs the database, `/api/health`'s ping included, waits
-  for a connection too. A request whose deadline passes (60 s on most
-  routes) or whose client leaves gives its connection back; the token
-  check in `RequireAuth` runs with no deadline of its own, so an
-  authenticated request whose 60 s token cache has lapsed waits until the
-  transaction ends or its client gives up. Pages and playback stall until
-  then, and the pool recovers when it ends. The old tables' files stay
-  until the COMMIT, so the database needs room for a second copy. A committed restore replaces the sessions with the backup's
-  (none): everyone is signed out. The server does not wait for a restore at
-  shutdown: a stop or an update's restart (after its drain's 5 minutes)
-  rolls it back, and the admin runs it again.
-- `GET /api/admin/restore/status`, behind the admin guard, answers the
-  running job (id, file, phase, start) and the last one's outcome
-  (succeeded, the phase it ended in, `database`, the server's sentence,
-  pg_restore's stderr and the tail of psql's, `stopped`
-  `shutdown`/`timeout`), in memory: a server restart forgets both. While the
-  transaction runs the guards' reads wait on its locks: once the token
-  check's 60 s cache has lapsed a read gets no answer until the restore
-  ends (or the client gives up; the page does at 75 s); with a fresh cache
-  the session check gives up at the admin group's 60 s and answers 500
-  (a 504 comes only from a proxy in front).
-- The web app follows the job by id (`restoreOutcome.ts`), kept in the
-  tab's sessionStorage so a reload, or a sign-out and sign-in in the tab,
-  goes on following it and says its outcome from `last`. The upload's
-  dialog stays up while the file is sent (the way out after 10 s, "Close and
-  keep it running", is unchanged) and closes on the 202; the panel then says
-  the step ("Restoring the database from X: checking the file / replacing
-  the data", a region that takes the focus) with the restore button
-  `disabled` until the job ends. The confirm, the panel and the progress
-  line say beforehand that a success signs everyone out, the admin
-  included, and that the outcome is shown after signing in again, before a
-  restart. Reads go one at a time, each given up after 75 s, every 3 s (10 s
-  while one cannot be read), only while the backup panel or
-  `RestoreOutcomeAlert` (mounted by App for `adminUI && user`) is mounted for
-  the following account, so a signed-out tab asks nothing; those reads hold
-  at most one of the server's connections per tab, and the scan bar's 4 s
-  poll goes one at a time and asks nothing while the tab follows a restore
-  (`restoreFollowed`). A read of a
-  followed restore that is slow (5 s), given up, or answered 504, 401 or
-  5xx is said as the wait it is ("The server has not answered yet. While
-  the restore replaces the database… Do not restart the server meanwhile:
-  that undoes the restore"), never as advice to sign in; no answer at all is
-  said as that. With none followed, each of the two looks on mount for a
-  running restore and follows it, looking again every 10 s while the look
-  fails (said in the panel: a restore may be running). The outcome is said
-  by the panel, or by the alert when no panel is mounted as it lands, to the
-  account that followed it in this tab; its words come from what it left
-  (did not start changing anything; failed and was undone; stopped by the
-  server and undone; not known whether it committed), with the server's
-  sentence and stderr as the second line; a followed restore the server has
-  no record of (it restarted) is said too. An upload refused for another
-  account in the tab does not drop the follow. An upload that got no answer
-  from Aurora (no answer, a 502, 503 or 504) may have started a restore, so
-  the page says so and looks for it. No leave-this-page prompt is held.
-  Pinned by `restoreOutcome.test.tsx` (the realistic sequence: 202, reads
-  that hang and are given up, a 401 from the check, the session ending at
-  the commit, the outcome after signing in; each step and outcome; no
-  record; the words before asking; a reload while following, done and
-  running; a page opened mid-restore in the panel and in the app; a failed
-  look retried; no answer; a refusal that is not the wait; the alert
-  elsewhere; no reads with no watcher; another account; another account's
-  refused upload; an upload with no answer), `scanProgressBar.test.tsx`
-  (one poll at a time; none while a restore is followed) and the
-  `AdminView.results`/`confirms`/`waiting` tests; server side by
-  `admin_restore_job_test.go` (the request's context cancelled while the
-  job runs, the lock for the job's life, the phases, the publish on start
-  and end, a stop, a validation stopped by a stop, the table-of-contents
-  types, programs missing or without the restrict key (in the job and
-  before the upload), psql's marker lines, the validation before the
-  transaction with the real `pg_restore`, the router's wiring and the
-  restricted refusal), the
-  `TEST_BACKUP_DATABASE_URL` tests in `admin_backup_test.go` (against
-  PostgreSQL: a request cancelled mid-transaction while the restore still
-  completes; a read during it waits and then sees the backup's rows; the
-  guard: a pg_restore that exits 1 after a stream that looks whole is
-  never committed, and a whole stream after the job was stopped is never
-  committed (both with stand-ins); pg_restore killed inside a COPY; psql,
-  run with the pipeline's own arguments, reaching the end of its input with
-  no COMMIT, cut between statements and inside a COPY; a killed psql in a
-  long last statement freeing the locks within seconds; a dropped
-  connection; a lock timeout, reported as psql's; large objects refused; a
-  truncated archive refused; a stop mid-transaction; each leaving every
-  table and the old rows) and `cmd/aurora/restore_shutdown_test.go` (main's wiring, read
-  from the source).
-- Known gaps: from the moment the transaction takes its locks until it
-  ends, the status route answers no one, so the page cannot say how far
-  the restore has got; the server's log has it. A successful restore signs
-  everyone out, and the admin is told after signing in again only while
-  the server has not restarted (the outcome is in memory), with the same
-  account id in the restored data or in a tab that followed it; whether
-  signing in works before the restart the restore asks for was not
-  checked (the server's own database connections can need it). A stop, an
-  update's restart or the 60-minute bound undoes a running restore, which
-  then has to be run again; after a killed psql the locks outlast it by
-  about a second, which the next start's migrations wait. A tab that never
-  saw the restore running (opened while the transaction held its locks, so
-  its look for one got no answer) is not told the outcome: after the commit
-  it finds nothing running and does not show `last`. An archive crafted to hold a COMMIT inside an
-  allowed entry could end the transaction early; only an admin can upload
-  one. Restoring needs pg_restore and psql from August 2025 or later. An
-  answer that lands after its section was left is said nowhere, except a
-  restore's outcome and the AI settings' restart notice; a dialog taller
-  than the window keeps its focused button in view and lets the title
-  scroll away. None of this was run in a real browser.
+- A restore outlives its request (`internal/api/admin_restore.go`, runbook
+  `docs/backup-restore.md`). Only the upload is the request's: once the file
+  is on disk the check and the transaction run on the server-lifecycle
+  context (`SetRootContext`) under the 60-minute `restoreTimeout`, on a
+  goroutine that owns `backupRestoreMu` (the 409 for a second backup or
+  restore) and the temp file, releasing both before it answers a client that
+  stayed. A client that left gets nothing (logged as 499); the restore runs
+  on. A shutdown still ends it (the lifecycle context, and systemd stops the
+  unit's processes), and so does the updater's deploy restart once its
+  drain has waited its five minutes; it is then rolled back. A panic on that
+  goroutine is recovered and recorded. The answers to a client that stayed
+  are 400/500/200 with their sentences; Aurora never answers a restore with
+  502-504, which the web app reads as a proxy giving up.
+- The wipe and the load are ONE transaction (`admin_restore_pipeline.go`):
+  one `psql` session reads `BEGIN`, `SET LOCAL`s, the wipe
+  (`restoreWipeSQL`) and then `pg_restore -f -`'s SQL, and Aurora writes the
+  `COMMIT` only when `pg_restore` exited 0, everything it wrote reached
+  psql, and the context has not ended (`replace`'s guard). psql is never run
+  with `--single-transaction`, which commits at the end of its input whatever
+  became of `pg_restore` (`restorePsqlArgs` is the one place its arguments
+  are built). Any failure, a stop, a crash or a lost connection rolls back:
+  `database` is `unchanged`. `unknown` only when Aurora cannot learn whether
+  its COMMIT took effect: psql ended after it was sent and before it reported
+  the result (markers `\warn`ed around it decide), psql reported nothing, or
+  a panic after the check (one while checking is `unchanged`). All of this is
+  for a backup Aurora made: a crafted archive can hold its own COMMIT or
+  ROLLBACK in an allowed entry (a partial commit, then misreported as rolled
+  back or as restored) or an unterminated `COPY ... FROM stdin` that swallows
+  the commit block (rolled back, reported `unknown`). Safety rests on `pg_restore
+  --restrict-key` (psql obeys backslash commands in the stream; without the
+  `\restrict` pair a crafted archive could run shell commands): a missing or
+  older client is refused before the upload is read (`ready`, a 500 that says
+  which). The check refuses, before the transaction takes a lock, an archive
+  `pg_restore -l` lists with an entry that cannot run in one transaction
+  (large objects, which `pg_restore` wraps in their own `BEGIN`/`COMMIT`;
+  database-level entries; anything unknown), one with no `TABLE` entry
+  (`pg_restore` reads some "PGDMP"-prefixed garbage as an empty archive and
+  restores it without an error: an empty database would have committed), and
+  one it cannot read in full. While the transaction runs it holds ACCESS
+  EXCLUSIVE locks on everything it dropped, so the rest of the server waits:
+  requests hang (those under a route's 60 s `middleware.Timeout` fail then;
+  the others, `GET /api/admin/restore/status` among them, wait until the
+  restore ends), and they can take every pool connection meanwhile. A query
+  that waited goes on after the COMMIT against the restored data with what
+  it read before, so a write keyed by the old database's ids lands there.
+  Two things stop that. Just before the COMMIT, from its own session (still
+  holding the locks), the restore ends every other session of the database
+  that its locks block (`restoreEndWaitersSQL`: `pg_terminate_backend` over
+  `pg_stat_activity` filtered by `pg_blocking_pids` containing its own pid,
+  which also catches a waiter queued but not yet reporting its wait); each
+  terminate and the scan as a whole sit in plpgsql exception blocks, so one
+  the role may not end (a superuser's, logged as a warning) or any error
+  cannot abort the transaction, and it commits. The app has no connection
+  that waits on a lock by design (no LISTEN, no dedicated connections; three
+  short `pg_advisory_xact_lock` waits), and pgxpool destroys a terminated
+  connection on release and opens another: the request in flight fails (a
+  500, or a 504 under a route timeout), a background job logs and moves on.
+  A session that starts waiting between that scan and the COMMIT still
+  lands. So the routes that make or change sessions and credentials do not
+  rely on it: they are closed for the whole transaction
+  (`admin_restore_gate.go`: login, register, refresh, the OAuth callback,
+  the device poll and approval, change-password, unlink, PIN writes and role
+  changes answer 503 `restore_running`; the restore shuts the gate after
+  the check and waits up to `restoreSessionDrain`, 10 s, for those already
+  past it, else does not start; the gate opens when the restore ends), and
+  a restore that commits drops the in-memory device grants (`OnRestored`),
+  which name the old database's user id and token version. The old table
+  files stay until COMMIT, so the disk needs room for both copies; nothing
+  checks first, and a disk full while PostgreSQL writes its WAL makes it
+  PANIC and restart (every connection drops; the transaction's new files may
+  be orphaned). The wipe waits 30 s for locks (`restoreLockTimeout`), then
+  fails, rolled back; a write that meets the wipe half way can deadlock with
+  it, and PostgreSQL aborts one of the two. `client_connection_check_interval
+  = '1s'` frees a killed psql's locks within about a second (the long
+  statements, the vector index build and the foreign keys, come last); it is
+  set through `restoreSetIfSupported` (a plpgsql block that swallows the
+  error), since PostgreSQL 13 lacks it and 14 off Linux, and Windows on
+  every version, refuse a non-zero value: set plainly it failed every
+  restore there. A stop sends SIGINT before the committing marker
+  (SIGKILL after 15 s), and leaves a COMMIT already sent up to 60 s; the
+  programs run in their own process groups (`Setpgid`), signalled as groups,
+  and on Linux `restoreProcs.wait` (waitid with WNOWAIT) keeps a group's pid
+  from being signalled after it is reaped (elsewhere a plain `Wait`).
+- The deploy drain waits for a running restore: the tracker's `running`
+  feeds the stream-state snapshot (`SetDrainRestoreRunning`, wired by
+  `NewAdminHandler` through `wireRestoreDrain`; `restore` and
+  `held_by_viewer` count it as one), which is published at once when a
+  restore begins and ends (`PublishDrainState`), so the updater,
+  `install.sh` and `redeploy.sh` wait for it as for a viewer, at most their
+  five minutes, without a change to the shared drain block. The scan bar
+  polls one request at a time and asks nothing while a restore may be
+  running (this tab's request out, or the kept ticket last read running
+  within the upload window plus `restoreTimeout`), since each read would
+  hold a pool connection until the restore ended.
+- The record (`restoreTracker`, memory only, so a restart forgets it): the
+  latest restore that got past its upload (refusals of the upload itself
+  record nothing): `state` none/running/succeeded/failed, `step`
+  checking/restoring, `database` unchanged/unknown/restored (`unchanged`
+  through the transaction and after any failure; `unknown` as above),
+  file, times, message, and `restart_required` (a restore succeeded since
+  boot; a later refusal does not clear it). Two reads of it:
+  `GET /api/admin/restore/status` behind `requireAdmin`, and
+  `GET /api/restore/status` outside every session check, answered only to the
+  latest restore's ticket (`X-Aurora-Restore-Ticket`, 32-128 base64url
+  characters the client chose and sent with the upload; kept as SHA-256,
+  compared in constant time; any other value is the same 404
+  `restore_unknown`; without `message`, which can quote a row of the failing
+  table and the ticket outlives the restore in that browser). The ticket read exists because the admin read cannot
+  serve the person who started the restore when it matters: while the
+  transaction runs `RequireAuth`'s token-version check and the admin guard
+  wait on its locks (the guard fails after 60 s), and a success restores no
+  sessions (dumps exclude `refresh_tokens` rows), so the admin guard answers
+  `session_ended`. The ticket read touches no database. A malformed ticket on the upload
+  is a 400 before the lock.
+- The web app makes a ticket per restore (`lib/restoreStatus.ts`), keeps it in
+  localStorage before the upload starts (put back on a 409, so another
+  restore's ticket is not lost), sends it, and reads the record
+  (`hooks/useRestoreRecord`): by ticket when one is kept (no session, so it
+  works signed out and never sets off the session-expiry path), else through
+  the admin route on the Admin page, which also asks it after a kept ticket
+  the server no longer knows (so a restore running now is said and holds the
+  button); again every 5 s while running, while a kept ticket gets no answer,
+  and while one not yet seen has no record and was kept less than 66 minutes
+  ago (`RESTORE_UPLOAD_WINDOW_MS`, past the route's 65-minute read deadline:
+  another tab may still be uploading it, so it is waiting, not lost), unless
+  its request ended in this browser without an answer (`ended`, set on a
+  lost answer, and for an upload a reload cut off through a sessionStorage
+  marker, `settleInterruptedUpload`): then one more look, and lost. A success
+  read by ticket is read again every 30 s, so the restart clears it. Failed
+  reads are asked again with a doubling wait up to a minute: ticket reads
+  always, a refused admin read only while a restore was running or this
+  tab's own got no answer (`keepAsking`). The ticket read sends same-origin
+  cookies, for a proxy in front of Aurora. Dismiss forgets only
+  the ticket the record was read with; on a note still waiting it only sets
+  the ticket aside in this tab. The sign-in page shows it
+  (`RestoreRecordNote`), since a reload during or after a restore lands
+  there. The Admin page reads it once for every section (`AdminView`); the
+  backup panel says it when this tab has no answer of its own
+  (`restoreOutcome`'s outcome, with `lost` for no answer or a 502-504), and
+  always while a restore runs, with the restore button and file input
+  disabled, and in place of this tab's own answer when the record says more
+  (`unknown`: a restore cut off as it committed) or says otherwise (running or
+  succeeded where this tab heard it failed); the other sections say a running
+  restore and, when this tab has no answer and no request out, one the admin
+  must act on (urgent words, or a lost ticket). The panel says nothing of the
+  record while a restore request from this tab is out (`restoreOutcome`'s
+  `out`, which outlives a remount): its ticket is kept before the server has
+  a record of it. The page reads the record when it mounts and when this
+  tab's restore ends, not when a section is opened. An answer is Aurora's
+  only when it is its JSON error: any other 5xx (Cloudflare's 524, an HTML
+  502) is a proxy that gave up, said as no answer (`restoreFailure`'s
+  `fromAurora`), since the restore may be running still. `RestoreOutcomeAlert` titles an answer that never came "No answer
+  came back about the restore from …", never "did not go through": it may
+  still be running, and a restart now would stop it. The server's text (`message`) is shown on the Admin page only
+  (`restoreServerLine`); the sign-in page uses the page's words. The
+  outcome of this tab's request still goes to the module store keyed by the
+  account id from before the restore; the backup panel says it, or
+  `RestoreOutcomeAlert` (mounted by App for `adminUI && user`) does when no
+  backup panel is mounted as it lands. Nothing holds the page any more (the
+  leave-this-page prompt is gone).
+- Known gaps: a restart (a deploy by the auto-updater included, once its
+  drain has waited five minutes, so the dialog and panel tell the admin to
+  pause `aurora-update.timer` for a large backup) still stops a running
+  restore, which rolls back and has to be run again, and forgets the record,
+  so the browser that started it can say only that Aurora has no record of
+  it; while the transaction runs the whole server waits on it (pages hang,
+  the 60 s route timeouts fail some, and nothing bounds how many requests
+  pile up on the pool); a scan, enrichment or other background job running
+  at the COMMIT carries on into the restored data with ids it read before
+  until Aurora restarts (the page and the runbook say to start a restore
+  with no scan running and to restart at once); a write that starts waiting
+  between the end-of-restore terminate and the COMMIT lands (sessions and
+  credentials excepted, by the gate); the gate covers the listed routes
+  only, so other writes keyed by ids rely on the terminate; access tokens
+  are not tied to a database, so one minted before a restore from another
+  install's backup acts, for its lifetime, as whoever has its user id and
+  token version in the restored data on the routes that check nothing else
+  (pre-existing; a restart does not end it); a restore needs disk for two
+  copies of the data, with no precheck (see the WAL PANIC above); on
+  shutdown the transcode manager's close clears the drain snapshot and the
+  restore's finish then publishes it again (harmless: the scripts ignore a
+  snapshot older than 90 s); the early 500 for old programs, like the 409,
+  can reach a browser still sending a large file as a dropped connection;
+  the outcome reads psql's English `ERROR:` lines, so a server with
+  non-English `lc_messages` reports a failed COMMIT as `unknown`
+  (conservative); no test drives `unknown` through `replace`; a backup with
+  large objects cannot be restored from the page
+  (the runbook's shell restore can); systemd's stop sends SIGTERM to psql
+  and pg_restore with Aurora, so a stop that lands just as the COMMIT is
+  sent can leave `unknown` with no record (a restart forgets it), which the
+  runbook tells the admin to check by looking at the data; the
+  waitid guard is Linux-only (elsewhere a reaped pid could in principle be
+  reused before its group is signalled); a restore cannot be cancelled; the ticket lives in one
+  browser's localStorage (a private window or cleared site data loses it,
+  and then only the admin read is left); a client older than the ticket
+  restores without one; this tab's own outcome is still memory only and keyed
+  by the pre-restore account id; the sign-in page's note is in no committed
+  browser check (`verify-signed-out.mjs` keeps no ticket): it was rendered by
+  hand once, at 390x844 and 1440x900 with its longest words, and on a phone
+  as small as 320x568 it pushes the form's first field and button below the
+  first screenful; a ticket kept in a browser has no expiry, so whoever uses
+  that browser later can read the restore's state, step and file name (not
+  its message) until it is dismissed or Aurora restarts; an answer
+  that lands after its section was left is said nowhere, except a restore's
+  outcome and the AI settings' restart notice; a dialog taller than the
+  window keeps its focused button in view and lets the title scroll away.
+
+### "Capture this page" (web app)
+
+Code: `lib/pageCapture.ts` (html-to-image), called by
+`components/BugReportForm.tsx`. Pinned by `scripts/verify-bug-capture.mjs`
+(in `audit:checks`: the built app under the production CSP, captures made
+through the form compared pixel by pixel with screenshots, mutation-tested)
+and `lib/pageCapture.test.ts`. The check runs the browser with font hinting
+and subpixel anti-aliasing off (its own fontconfig file and
+`--disable-lcd-text`) and leans on headless's hidden scrollbars: a visible
+scrollbar is drawn in the screenshot and not in the copy, and both font
+settings change the copy's text against the screen's (see the known gaps).
+The headless shell on the dev box is a wrapper that already passes
+`--font-render-hinting=none --disable-lcd-text`, and its fontconfig turns
+hinting off, which hid CI's failure there; the unwrapped
+`chrome-headless-shell.real` with a stock fontconfig reproduces CI.
+
+- The copy is laid out again inside an SVG image, which loads nothing. The
+  families the document has loaded go in as data: URLs read with `fetch`
+  (`cache: 'force-cache'`, allowed by connect-src 'self'), never
+  `skipFonts`: in a fallback face a large heading wrapped and was drawn
+  over the text under it. A file that cannot be read leaves its face out
+  of that capture and is tried again next time. The CSP is unchanged.
+- html-to-image shrinks every copied font size (`floor - 0.1px`);
+  `keepFontSizes` wraps `window.getComputedStyle` for the length of
+  `toBlob` so `font-size` reaches it unshrunk, and puts it back in
+  `finally`.
+- A `data-screenshot-exclude` part in the page's flow is copied as an empty
+  box drawn as nothing (nothing inside it is copied), so the page does not
+  move into its place; a fixed or absolutely placed one is left out, and so
+  is any excluded canvas, video, svg or iframe, whose copy html-to-image
+  does not make as the element itself (a canvas or video becomes an <img>
+  without the mark, an svg is copied whole). The filter reads the mark as
+  each node is copied, so a part that appears mid-capture is left out. An
+  excluded field's box is copied, so the form blanks its value first, in
+  `beforeCopy`, which runs after the fonts are read (a re-render while the
+  fields waited blank could put a value back). One capture runs at a time
+  from the press (`captureRunningRef`); `keepFontSizes` also holds if two
+  overlap.
+- The copy's body is moved by the scroll with `position: relative` and
+  `top`/`left`, and `overflow: visible`, in the copy's own style sheet with
+  `!important`: the copied logical insets win over plain `top`/`left`, and
+  the body's `overflow-x: hidden` made it a window-high scroll box that cut
+  off the picture's lower part on every scrolled page. A transform would
+  carry window-fixed parts (the phone's tab bar) with the page; sticky
+  parts stick in the copy as on screen.
+- The error screen's panel captures from the top of the page
+  (`captureFrom: 'top'`; opening it moves a phone's window down to it), the
+  dialog from where the window is.
+- Known gaps: an image `fetch` cannot read under the CSP (TMDB posters on
+  the request pages) is drawn as nothing; html-to-image reads every image
+  in the page, those below the window and lazy ones never loaded included,
+  so a capture of a long grid takes seconds (200 titles: about 16 s, as
+  before); an inner scroll box is drawn at its start (a rail scrolled
+  sideways shows its first cards); a backdrop blur picks up a faint tint at
+  its edges; fonts are matched by family only; checked in Chromium only,
+  not Safari or Firefox. The copy's text is always greyscale: on a screen
+  whose text has subpixel (colour-fringed) anti-aliasing, as on CI's runner
+  and many Linux desktops, the capture's text lacks the fringes (CI failed
+  the error screen at 390px by 1.7% on that, its paragraph and buttons as
+  much as anything). Text in a system font (the system's monospace:
+  the error screen's "What the app saw" block, party and device codes, some
+  admin text; fallback glyphs such as CJK or symbols outside the embedded
+  latin subsets) cannot be embedded, and on a Linux machine that hints its
+  fonts medium or full, at a device scale of 2, the copy (laid out at 1 and
+  scaled up) gives it other glyph widths than the screen: the error
+  screen's monospace lines end early (2.2% of that capture). Every box
+  keeps its size, so a line that came out wider could wrap and be drawn
+  over the text under it (not seen in today's app). The check turns both
+  off and sees neither. Laying the copy out at the
+  device scale (CSS `zoom`) was tried and made the embedded fonts' text
+  differ instead. The check's font coverage leans on the Bricolage
+  headings: where Inter is installed on the machine, a copy without
+  embedded fonts still draws Inter text right.
 
 ### Nullable database columns
 

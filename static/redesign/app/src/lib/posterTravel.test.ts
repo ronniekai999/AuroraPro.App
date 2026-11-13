@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 //
-// Travel: the pressed poster moves to the title page's. This DOM has no view
-// transitions (so the rest of the suite runs the open made at once, as it
-// always was); here the browser's API is stood in for by a stub that hands
-// back its update callback and its promises, so each thing a browser can do
-// with a transition is done to this code in turn.
+// Travel: the pressed poster moves to the title page's while the pages
+// cross-fade. This DOM has no view transitions (so the rest of the suite runs
+// the open made at once, as it always was); here the browser's API is stood
+// in for by a stub that hands back its update callback and its promises, so
+// each thing a browser can do with a transition is done to this code in turn.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CALLBACK_WAIT_MS, TRAVEL_NAME, dropWaitingOpen, lessMotionAsked, travelToTitle, watchCardPresses } from './posterTravel'
+import postcss from 'postcss'
+import css from '../index.css?raw'
+import { CALLBACK_WAIT_MS, TRAVELLING, TRAVEL_NAME, dropWaitingOpen, lessMotionAsked, travelToTitle, watchCardPresses } from './posterTravel'
 
 interface Started {
   /** The browser's "next frame": runs the update callback. */
@@ -20,8 +22,14 @@ interface Started {
   namedAtStart: string[]
 }
 const browser = { started: [] as Started[], mode: 'ok' as 'ok' | 'throws', skipped: 0 }
-const namedNow = () => [...document.querySelectorAll<HTMLElement>('[style*="view-transition-name"]')]
-  .map(el => `${el.id}=${el.style.getPropertyValue('view-transition-name')}`)
+/** What is named now: 'root' while <html> carries the attribute under which
+ *  index.css names the page itself (the cross-fade), and each element named
+ *  inline. */
+const namedNow = () => [
+  ...(document.documentElement.hasAttribute(TRAVELLING) ? ['root'] : []),
+  ...[...document.querySelectorAll<HTMLElement>('[style*="view-transition-name"]')]
+    .map(el => `${el.id}=${el.style.getPropertyValue('view-transition-name')}`),
+]
 function withViewTransitions(on = true) {
   const doc = document as unknown as { startViewTransition?: unknown }
   if (!on) { doc.startViewTransition = undefined; return }
@@ -79,8 +87,10 @@ const titlePage = (posterReady: boolean | null) => () => {
 const tick = () => new Promise<void>(done => setTimeout(done, 0))
 let stop: () => void
 
-beforeEach(() => { browser.started = []; browser.mode = 'ok'; browser.skipped = 0; withViewTransitions(); media(true); page(); stop = watchCardPresses() })
-afterEach(() => { stop(); withViewTransitions(false); vi.unstubAllGlobals(); vi.useRealTimers(); document.documentElement.removeAttribute('data-effects'); document.body.innerHTML = '' })
+// dropWaitingOpen first: an open a test left waiting would otherwise be
+// dropped by the next test's first open, and counted in its skips.
+beforeEach(() => { dropWaitingOpen(); browser.started = []; browser.mode = 'ok'; browser.skipped = 0; withViewTransitions(); media(true); page(); stop = watchCardPresses() })
+afterEach(() => { stop(); withViewTransitions(false); vi.unstubAllGlobals(); vi.useRealTimers(); document.documentElement.removeAttribute('data-effects'); document.documentElement.removeAttribute(TRAVELLING); document.body.innerHTML = '' })
 
 describe('the open is made exactly once, whatever the browser does with the transition', () => {
   it('in the transition\'s update callback, one frame after the press', () => {
@@ -166,11 +176,11 @@ describe('the open is made exactly once, whatever the browser does with the tran
     const first = vi.fn(), second = vi.fn(titlePage(true))
     click('open7')
     travelToTitle(7, first)
-    expect(namedNow()).toEqual([`pic7=${TRAVEL_NAME}`])
+    expect(namedNow()).toEqual(['root', `pic7=${TRAVEL_NAME}`])
     click('open8')
     travelToTitle(8, second)
     // The first card's name is off before the second transition's picture.
-    expect(browser.started[1].namedAtStart).toEqual([`pic8=${TRAVEL_NAME}`])
+    expect(browser.started[1].namedAtStart).toEqual(['root', `pic8=${TRAVEL_NAME}`])
     // The browser runs the superseded callback as well as the new one.
     browser.started[0].frame()
     browser.started[1].frame()
@@ -187,6 +197,10 @@ describe('the open is made exactly once, whatever the browser does with the tran
     // An open with no press behind it (a notification, say).
     expect(travelToTitle(8, second)).toBe(false)
     expect(second).toHaveBeenCalledTimes(1)
+    // The earlier transition has nothing left to show: it is skipped, so the
+    // captured page does not hold presses over a cross-fade of itself.
+    expect(browser.skipped).toBe(1)
+    expect(namedNow()).toEqual([])
     browser.started[0].frame()
     await vi.advanceTimersByTimeAsync(CALLBACK_WAIT_MS * 3)
     expect(first).not.toHaveBeenCalled()
@@ -265,15 +279,16 @@ describe('which presses start a transition', () => {
   })
 })
 
-describe('what travels: one name, on one element in each of the browser\'s two pictures', () => {
-  it('a loaded 2:3 poster, named for the first picture and not for the second, with the title page\'s poster left to its own name', async () => {
+describe('what travels: one name, on one element in each of the browser\'s two pictures, over the page cross-fading', () => {
+  it('a loaded 2:3 poster, named for the first picture and not for the second, with the title page\'s poster left to its own name; the page itself in both; nothing after', async () => {
     click('open7')
     travelToTitle(7, titlePage(true))
-    expect(browser.started[0].namedAtStart).toEqual([`pic7=${TRAVEL_NAME}`])
+    expect(browser.started[0].namedAtStart).toEqual(['root', `pic7=${TRAVEL_NAME}`])
     browser.started[0].frame()
-    // The second picture: nothing named inline. The title page's poster has
-    // the name from the stylesheet, and it is not held back.
-    expect(namedNow()).toEqual([])
+    // The second picture: the page itself, and nothing named inline. The
+    // title page's poster has the name from the stylesheet (under the
+    // attribute), and it is not held back.
+    expect(namedNow()).toEqual(['root'])
     browser.started[0].finish()
     await tick()
     expect(namedNow()).toEqual([])
@@ -340,11 +355,11 @@ describe('what travels: one name, on one element in each of the browser\'s two p
     travelToTitle(7, () => {})
     click('open7')
     travelToTitle(7, titlePage(true))
-    expect(browser.started[1].namedAtStart).toEqual([`pic7=${TRAVEL_NAME}`])
+    expect(browser.started[1].namedAtStart).toEqual(['root', `pic7=${TRAVEL_NAME}`])
     browser.started[0].frame()
     browser.started[0].finish()
     await tick()
-    expect(namedNow()).toEqual([`pic7=${TRAVEL_NAME}`])
+    expect(namedNow()).toEqual(['root', `pic7=${TRAVEL_NAME}`])
   })
 
   // The callback has not come in time: the open is made without it, and the
@@ -363,13 +378,16 @@ describe('what travels: one name, on one element in each of the browser\'s two p
 
   // Back, a destination or Play elsewhere before the browser's next frame:
   // the waiting open is not made over where the viewer went.
-  it('drops a waiting open when something leaves the page first', async () => {
+  it('drops a waiting open when something leaves the page first, and skips its transition', async () => {
     vi.useFakeTimers()
     const change = vi.fn()
     click('open7')
     travelToTitle(7, change)
     dropWaitingOpen()
     expect(namedNow()).toEqual([])
+    // Nothing is to change: the captured page must not hold presses while
+    // the browser cross-fades it into itself.
+    expect(browser.skipped).toBe(1)
     browser.started[0].frame()
     await vi.advanceTimersByTimeAsync(CALLBACK_WAIT_MS * 3)
     expect(change).not.toHaveBeenCalled()
@@ -381,7 +399,7 @@ describe('what travels: one name, on one element in each of the browser\'s two p
     click('open7')
     travelToTitle(7, titlePage(false))
     browser.started[0].frame()
-    expect(namedNow()).toEqual(['dest=none'])
+    expect(namedNow()).toEqual(['root', 'dest=none'])
     browser.started[0].finish()
     await tick()
     expect(namedNow()).toEqual([])
@@ -391,7 +409,7 @@ describe('what travels: one name, on one element in each of the browser\'s two p
     click('open7')
     travelToTitle(7, titlePage(null))
     browser.started[0].frame()
-    expect(namedNow()).toEqual([])
+    expect(namedNow()).toEqual(['root'])
   })
 
   it('leaves no name behind for the next press on the same page', async () => {
@@ -404,7 +422,78 @@ describe('what travels: one name, on one element in each of the browser\'s two p
     await tick()
     click('open8')
     travelToTitle(8, () => {})
-    expect(browser.started[1].namedAtStart).toEqual([`pic8=${TRAVEL_NAME}`])
+    expect(browser.started[1].namedAtStart).toEqual(['root', `pic8=${TRAVEL_NAME}`])
+  })
+})
+
+// The cross-fade brings the title page in; its own entrance (the app's page
+// entrance, .animate-fade-in's fadeIn) run under it as well would fade the
+// page's content twice. As the browser would report the entrance: the
+// animations getAnimations hands back.
+describe('the title page fades in once', () => {
+  const animation = (animationName: string, finish = vi.fn()) => ({ animationName, finish })
+  let entrance: ReturnType<typeof animation>, picture: ReturnType<typeof animation>, stuck: ReturnType<typeof animation>, menu: ReturnType<typeof animation>
+  const animations = (id: string, list: unknown[]) => { (document.getElementById(id) as unknown as { getAnimations: () => unknown[] }).getAnimations = () => list }
+  const titlePageWithEntrance = () => () => {
+    titlePage(true)()
+    document.body.insertAdjacentHTML('afterbegin', '<div class="stage-detail animate-fade-in" id="entrance"><div class="animate-fade-in" id="stuck"></div></div><div class="animate-fade-in" id="menu"></div>')
+    entrance = animation('fadeIn')
+    // A picture's own fade as it loads is the picture's, not the page's.
+    picture = animation('heroFadeIn')
+    // One inside the page the browser cannot finish (it throws): the open goes on.
+    stuck = animation('fadeIn', vi.fn(() => { throw new DOMException('no', 'InvalidStateError') }))
+    // Something arriving outside the title page (a menu) keeps its own.
+    menu = animation('fadeIn')
+    animations('entrance', [entrance, picture])
+    animations('stuck', [stuck])
+    animations('menu', [menu])
+  }
+
+  it('inside the transition its entrance is finished as it arrives, before the second picture', () => {
+    click('open7')
+    travelToTitle(7, titlePageWithEntrance())
+    expect(() => browser.started[0].frame()).not.toThrow()
+    expect(entrance.finish).toHaveBeenCalledTimes(1)
+    expect(stuck.finish).toHaveBeenCalledTimes(1)
+    expect(picture.finish).not.toHaveBeenCalled()
+    expect(menu.finish).not.toHaveBeenCalled()
+  })
+
+  it('an open made at once, or without the callback, keeps its entrance: no cross-fade brings it in', async () => {
+    // No press behind it.
+    travelToTitle(7, titlePageWithEntrance())
+    expect(entrance.finish).not.toHaveBeenCalled()
+    // The callback did not come: the transition is skipped.
+    vi.useFakeTimers()
+    page()
+    click('open7')
+    travelToTitle(7, titlePageWithEntrance())
+    await vi.advanceTimersByTimeAsync(CALLBACK_WAIT_MS)
+    expect(entrance.finish).not.toHaveBeenCalled()
+  })
+})
+
+// At rest nothing on either page has a view-transition-name: the stylesheet
+// names the page itself and the title page's poster only under the
+// attribute this module puts on <html> for the length of a transition.
+describe('the stylesheet names nothing at rest', () => {
+  const sheet = postcss.parse(css)
+  const naming = [] as { selectors: string[]; value: string; top: boolean }[]
+  sheet.walkDecls('view-transition-name', d => {
+    const rule = d.parent as postcss.Rule
+    naming.push({ selectors: rule.selectors.map(x => x.trim()), value: d.value.trim(), top: rule.parent?.type === 'root' })
+  })
+
+  it('turns the root\'s own name off, and names anything only under the attribute', () => {
+    expect(naming).toContainEqual({ selectors: [':root'], value: 'none', top: true })
+    const named = naming.filter(n => n.value !== 'none')
+    expect(named.length).toBeGreaterThan(0)
+    for (const n of named) for (const sel of n.selectors) expect(sel.startsWith(`:root[${TRAVELLING}]`)).toBe(true)
+  })
+
+  it('names the page itself and the title page\'s poster under it, with the travelling picture\'s name', () => {
+    expect(naming).toContainEqual({ selectors: [`:root[${TRAVELLING}]`], value: 'root', top: true })
+    expect(naming).toContainEqual({ selectors: [`:root[${TRAVELLING}] .stage-detail-poster`], value: TRAVEL_NAME, top: true })
   })
 })
 

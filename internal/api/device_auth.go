@@ -58,6 +58,15 @@ func newDeviceGrants() *deviceGrants {
 		budgets: make(map[string]deviceBudget), now: time.Now}
 }
 
+// forgetAll drops every pending and approved grant (a restore replaced the
+// accounts they name); the rate budgets stay.
+func (g *deviceGrants) forgetAll() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.byToken = make(map[[32]byte]deviceGrant)
+	g.byCode = make(map[string][32]byte)
+}
+
 func (g *deviceGrants) pruneLocked(now time.Time) {
 	for token, grant := range g.byToken {
 		if !now.Before(grant.Expires) {
@@ -193,6 +202,13 @@ type DeviceAuthHandler struct {
 	activity      *ActivityLogger
 	secureCookies bool
 }
+
+// ForgetGrants drops every pairing in progress. A restore calls it once it
+// has committed: an approved grant names a user id and token version of the
+// database it replaced, and collected afterwards it would sign the device in
+// as whoever has that id now (after a restore from another install's backup,
+// someone else). The device's next poll says its code expired.
+func (h *DeviceAuthHandler) ForgetGrants() { h.grants.forgetAll() }
 
 func NewDeviceAuthHandler(svc *auth.Service, queries *db.Queries, activity *ActivityLogger, secure bool) *DeviceAuthHandler {
 	return &DeviceAuthHandler{grants: newDeviceGrants(), sessions: queries, authSvc: svc, activity: activity, secureCookies: secure}

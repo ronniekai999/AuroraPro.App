@@ -29,6 +29,7 @@ vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof 
 
 import AdminView from './AdminView'
 import { resetRestoreOutcomeForTest } from './restoreOutcome'
+import { resetRestoreRecordForTest } from '@/hooks/useRestoreRecord'
 
 type User = ReturnType<typeof userEvent.setup>
 
@@ -52,13 +53,15 @@ const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
 beforeEach(() => {
+  // A restore's ticket is kept in localStorage, which outlives a test.
+  localStorage.clear()
+  resetRestoreRecordForTest()
   // A restore's outcome outlives the page by design: each test starts clean.
   resetRestoreOutcomeForTest()
   vi.stubGlobal('fetch', fetchMock)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   fetchMock.mockClear()
-  // The server has the file and has started the restore as a job.
-  restoreAnswer = async () => json(202, { running: { id: 'j1', file: 'aurora.dump', phase: 'validating', started_at: '2026-11-13T10:00:00Z' }, last: null })
+  restoreAnswer = async () => json(200, { status: 'ok', message: 'Restore complete. RESTART AURORA NOW.' })
   for (const fn of Object.values(api)) fn.mockReset()
   for (const fn of [api.getAdminDashboard, api.getEmbeddingStatus, api.getSkipMarkerStatus, api.getLibraryHealth]) fn.mockRejectedValue(new Error('off'))
   api.listLibraries.mockResolvedValue([LIB])
@@ -250,9 +253,8 @@ const CASES: Case[] = [
     },
     refusal: { status: 400, says: 'The server refused this file, and the database was not changed.' },
     succeed: () => { /* the default answer */ },
-    // The button that asked is disabled while the restore it started runs:
-    // the line that follows the restore takes the focus.
-    focusAfter: () => screen.getByRole('region', { name: 'Restore in progress' }),
+    // The button that asked is locked once the restore is done.
+    focusAfter: () => screen.getByRole('region', { name: 'Restart Aurora now' }),
   },
 ]
 

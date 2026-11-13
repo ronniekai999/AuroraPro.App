@@ -37,21 +37,13 @@ Fix or file each item, and delete it here when it is no longer true.
   pins. Playback health cannot tell a playback whose page the browser set
   aside from one that ended well, nor a window where nothing was watched from
   a measured 0% of buffering; it says so, and the missing denominators are
-  server work. A restore runs as a job on the server, in one transaction, and
-  the page follows it by id through a status route behind the admin guards,
-  which read the session from the database: while the transaction holds its
-  locks those reads wait, so the page cannot say how far the restore has got
-  (it says the server will answer when the restore is done). A successful
-  restore ends every session, so the admin is told after signing in again
-  (not checked: whether signing in works before the restart the restore asks
-  for), only while the server has not restarted (the status is in its
-  memory); a tab that never saw it running (opened while the transaction
-  held its locks) is not told the outcome at all. A stop, an update's restart
-  or the 60-minute bound undoes a running restore, which leaves the old data
-  and has to be run again. While it runs, every request that needs the
-  database waits, and the server's connections are soon all waiting. On the
-  Admin page, an answer that lands after its section has been left is said
-  nowhere, except a restore's outcome and the AI settings' restart notice (shown when that
+  server work. This tab's own answer about a restore is kept for the account's id
+  from before the restore, so after a restore from another install's backup
+  the admin may not be told it in the tab; the server's record of the restore
+  (read by ticket on the sign-in page, and on the Admin page) is what survives
+  a reload, until Aurora restarts. On the Admin page,
+  an answer that lands after its section has been left is said nowhere, except
+  a restore's outcome and the AI settings' restart notice (shown when that
   section is opened again). The server's approve checks a request's status and
   then writes it with nothing atomic between, so two approves of one request
   at once could both pass and send it to the downloader twice (server, older
@@ -94,12 +86,8 @@ Fix or file each item, and delete it here when it is no longer true.
   request is out still warms the rails; back in the details while a first
   write is still out, an age changed to one that sets no limit is refused on
   every Try again once that write lands (Skip works; older than the redesign).
-- Error screen and the bug report form: a capture ("Capture this page") is
-  drawn without the app's fonts, so a large heading can wrap onto the text
-  under it (older than the redesign, on every page), and from the crash
-  screen's panel on a phone the lower part of the picture can be blank; the
-  note under the button says so, and a fix is suggested as its own change. "A
-  report is sent from that account" does not name the account.
+- Error screen and the bug report form: "A report is sent from that account"
+  does not name the account.
 - Signed out, toasts and My Library writes: a My Library write that comes due
   after a switch to a profile with a content limit is refused by the server
   and lost with nothing said (after a switch to a profile without one it is
@@ -124,11 +112,62 @@ Fix or file each item, and delete it here when it is no longer true.
   not run). The written position leaves the card while the receiver buffers.
   While the picker is open the chat ticker can be drawn over the card. No real
   cast session was rendered.
-- Motion: a waiting open is dropped by the app's Back, a destination or Play,
-  but not by the browser's own Back, Resume on a card or a profile switch
-  inside the one frame before it lands. A poster inside a rail's faded edge
-  travels without the fade. The motion audit cannot see a guard that asks the
-  wrong way round, an alias, or a later rule that restores an animation. App's
+- Motion: opening a title from a poster cross-fades the whole page into the
+  title page while the poster travels, and a press that begins during it does
+  nothing: with the page captured, Chromium sends every press to `<html>`.
+  That is the owner's choice of trade-off. The window, from the press to the
+  first press that lands on the title page, was measured in headless Chromium
+  in the build container (software rendering, no GPU), with the 200 ms
+  `--dur-travel` and presses whose down and up came together: median about 360
+  ms at 1440x900 (326 to 411 over sixteen opens) and 362 ms at 1024x768 (317
+  to 380 over six); every press in it went to `<html>`. A press is judged by
+  where it begins: one that begins inside the window is lost even when it ends
+  after it (its click goes to `<html>`: in one open the window was 369 ms, and
+  a tap that went down on Back at 324 ms and up at 478 ms did not reach it).
+  So a tap has to begin after the window, and what a person feels is about the
+  measured figure plus their own press, roughly 80 to 150 ms: with 100 ms
+  taps, Back was reached about 460 ms after the opening press (457 to 476 over
+  four opens). A 1 ms transition still cost about 155 ms there (the frames the
+  browser takes its pictures in, and slow first frames in software), so a
+  GPU-composited browser should do better; that was not measured. Only opens
+  that travel cross-fade (from 1024px, a plain press on a loaded 2:3 poster);
+  everything else, every open below 1024px wide (phones, most tablets held
+  upright) included, opens at once as before, with no window. If the browser
+  skips a transition after the title page is in (a name used twice), the page
+  appears without any fade: its own entrance was finished for the cross-fade.
+  A waiting open is dropped by the app's Back, a destination or Play, but not
+  by the browser's own Back, Resume on a card or a profile switch inside the
+  one frame before it lands. A poster inside a rail's faded edge travels
+  without the fade. The motion audit cannot see a guard that asks the wrong
+  way round, an alias, an animation given to a view-transition pseudo-element
+  from outside `index.css` or under a name written with a CSS escape, or a
+  later rule that restores an animation anywhere but on a view-transition
+  pseudo-element. Its older checks (1 to 4) read property names in lower case
+  only, so `ANIMATION:` is not seen, and Check 1 reads only the `animation`
+  shorthand, so an animation set with the `animation-name` longhand is never
+  checked for a reduced-motion null. On view-transition pseudo-elements in
+  `index.css`, nested or not and in every selector of a list, Check 5c refuses
+  any animation on `::view-transition-image-pair` or the `::view-transition`
+  overlay, which nothing stills; any `!important` animation on a
+  view-transition pseudo-element; and any `@view-transition` rule, nested or
+  not. It reads names (pseudo-elements, properties, at-rules) in any letter
+  case and `-webkit-animation` and `-webkit-animation-name` as the aliases
+  they are; judges each rule by the declaration that wins its animation-name
+  within that rule (an `!important` one over any other, then the later), not
+  by cascading rules together, which errs toward refusing; and counts as an
+  animation any value but `none`, `initial` or `unset` alone, or a shorthand
+  whose every part is a time, a number, an easing function or one of its
+  keywords, so a quoted or escaped name, `var()`, `attr()`, `inherit` and
+  `revert` all count. A keyframes name that repeats a shorthand keyword in its
+  layer (`animation: ease ease 1s` with `@keyframes ease`, or `forwards
+  backwards` with `@keyframes backwards`) is read as no animation, though
+  Chromium runs it under that name, so that form gets past 5c. Check 5b reads the stilling's selectors with names in
+  any letter case and the attribute's value exactly, so
+  `[data-effects="REDUCED"]` is not taken for `"reduced"`, and recognises a
+  stilling only written as those six selectors (spaced or quoted otherwise,
+  the check fails rather than passes). Both check their reading against known
+  answers on every run (27 for 5c, 6 for 5b); a break that none of those
+  answers exercises still passes, and so would deleting the self-test. App's
   wiring of the travel has no test (jsdom has no view transitions), and
   Firefox and Safari were not run.
 - Failure words: a step back can still be taken twice in the few milliseconds
@@ -157,11 +196,17 @@ Fix or file each item, and delete it here when it is no longer true.
   tab keeps for the previous user on that path (the browse grids and their
   totals, which Tonight's closing line falls back to until its own count
   answers; an open title) was not audited in the redesign.
-- Share image (server, older than the redesign, found by reading and not
-  reproduced): the server builds a TMDB address from a party's stored poster
-  path assuming it starts with a slash, and the web app stores it without one,
-  so the share image of a party started from the web app is composed without
-  its poster. Server code, so not changed in the redesign.
+- Share image poster (server, resolved): the share image and the share card
+  build a TMDB address from a party's stored poster path, and used to assume
+  it started with a slash. That was never reachable from the web app:
+  `POST /api/parties` does not read the `media_poster` the web app sends
+  (stripped of its slash) and stores the title's own `/abc.jpg` path, and the
+  web app's change-media sends that stored value back. An API client could
+  store a bare path through change-media or a room's party start; the server
+  now takes either form (`shareTMDBPosterURL`). Still open: a poster fetch
+  that fails (TMDB down, a timeout) leaves the image or card without its
+  poster until the party ends or changes title, since the result is cached;
+  the failure is now logged at Warn.
 - Search: a description search cannot tell "nothing found" from "not set up on
   this server" (the server does not say), so the page says either may be the
   case. The results held while the next words are out keep their headings. On

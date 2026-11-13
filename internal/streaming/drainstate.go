@@ -103,7 +103,7 @@ func (tm *TranscodeManager) SetDrainExtraViewers(fn func() int) {
 }
 
 // SetDrainRestoreRunning registers whether a database restore is running, for
-// the deploy drain gate (the api package's RestoreJobs.Running). Passing nil
+// the deploy drain gate (the api package's restore record). Passing nil
 // clears it.
 func (tm *TranscodeManager) SetDrainRestoreRunning(fn func() bool) {
 	tm.mu.Lock()

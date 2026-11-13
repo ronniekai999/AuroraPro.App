@@ -210,16 +210,13 @@ The viewer drain and any Ollama model pull now run before the first live file
 changes. They used to run after the swap, so for up to five minutes the old
 backend served the new frontend.
 
-A database restore started from the Admin page runs as a job on the server, in
-one transaction, and a restart stops it: the transaction rolls back, the old
-data stays, and the admin has to run the restore again. The rolled-back
-session lets go of its locks about a second after its psql is killed, so the
-restarted server's migrations can wait that long. The server counts a running
-restore as one in the drain snapshot's `held_by_viewer` (and in its own
-`restore` field), so the drain waits up to its five minutes for it, as for a
-viewer, before restarting; the updater's log says "held by viewers or a
-database restore", and its status "Waiting for active stream sessions or a
-database restore to finish".
+The drain also waits for a database restore the server is running: the server
+counts one as a held session in `stream-state.json` (`"restore": 1`, included
+in `held_by_viewer`), and publishes the snapshot when the restore begins and
+ends. The status line then reads "Waiting for active stream sessions or a
+database restore to finish". Like a viewer, a restore is waited for five
+minutes at most; the restart then stops it, and it rolls back and has to be run
+again (see `backup-restore.md`). A server older than this counts no restore.
 
 Browser tabs left open across a deploy run the build they loaded, and the
 previous build's chunks are deleted. The SPA compares the build id it was loaded

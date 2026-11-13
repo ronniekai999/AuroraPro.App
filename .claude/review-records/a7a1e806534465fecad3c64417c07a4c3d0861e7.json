@@ -1,0 +1,10 @@
+{
+  "sha": "a7a1e806534465fecad3c64417c07a4c3d0861e7",
+  "verdict": "clean",
+  "summary": "Independent read-only agents reviewed a98a841..a7a1e80 in rounds: first FIX-FIRST (overlays kept across an expiry: fixed in f79d9c1), then LOWS-ONLY (a request's failure handler putting state back: fixed in 3a572f1), LOWS-ONLY (eslint error, unpinned once-per-expiry clear: fixed in 4b5e951, which also fixed a double-announcement that wiped the TV intent), LOWS-ONLY (sign-out wording: fixed in a7a1e80), final CLEAN. Mutation-checked each pinned claim; remaining gaps documented in CLAUDE.md.",
+  "reviewer": "claude-fresh-context-review-agent",
+  "findings": "0",
+  "diff_digest": "4b20cd483f88aa351d695435d90c69031439be3c2f2679d6e3f746db5a0de4ad",
+  "branch": "claude/dreamy-edison-exprtt",
+  "recorded_at": "2026-11-13T17:42:56Z"
+}

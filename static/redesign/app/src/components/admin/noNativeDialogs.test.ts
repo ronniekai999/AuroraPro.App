@@ -7,9 +7,9 @@
 // A lint of source text, not of behaviour: it does not see a call made
 // through another name (`const ask = window.confirm; ask('…')` is caught only
 // at the assignment, and `const w = window; w.confirm(…)` not at all) or
-// from a file outside this folder. Nor does it look at the browser's own
-// leave-this-page check (a `beforeunload` listener), which no admin source
-// holds now: a restore runs on the server and outlives the page.
+// from a file outside this folder. The browser's own leave-this-page check
+// (a `beforeunload` listener) is not one of these boxes and is not matched
+// here; the page no longer uses one (a restore outlives its page).
 import { describe, expect, it } from 'vitest'
 
 const SOURCES = import.meta.glob(['./**/*.ts', './**/*.tsx', '!./**/*.test.ts', '!./**/*.test.tsx'], {

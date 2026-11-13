@@ -79,6 +79,12 @@ export function failureWords(err: unknown, doing: string, overrides: FailureOver
   const reason = failureReason(err)
   const byReason = reason ? own(overrides.reason, reason) : null
   if (byReason) return byReason
+  // A database restore closes signing in and changes to sign-in details
+  // (passwords, PINs, linked accounts, device pairing, roles) until it ends
+  // (internal/api/admin_restore_gate.go).
+  if (reason === 'restore_running' && err instanceof APIError && err.status === 503) {
+    return 'A database restore is running on this server. Try again once it has finished.'
+  }
   if (err instanceof NetworkError) return 'Could not reach the server. Check the connection and try again.'
   if (err instanceof APIError) {
     const byStatus = own(overrides.status, err.status)

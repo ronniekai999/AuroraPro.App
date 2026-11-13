@@ -649,10 +649,19 @@ func TestIsShareImageHostAllowed(t *testing.T) {
 	}
 }
 
+// The rejection must come from the allowlist, before any request: without
+// the recorder this passed with the check deleted, because the real
+// network request to the unresolvable host failed too.
 func TestFetchPosterImage_RejectsNonAllowlistedURL(t *testing.T) {
+	rec := newPosterRecorder(t)
 	h := newCardTestHandler(t, &fakeCardManager{}, &fakeCardQueries{})
-	if _, err := h.fetchPosterImage("https://evil.example.com/poster.jpg"); err == nil {
-		t.Fatal("expected an allowlist rejection")
+	h.posterTransport = rec
+	_, err := h.fetchPosterImage("https://evil.example.com/poster.jpg")
+	if err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("error = %v; want the allowlist rejection", err)
+	}
+	if len(rec.got) != 0 {
+		t.Fatalf("made %d request(s) to a host off the allowlist; want none", len(rec.got))
 	}
 }
 

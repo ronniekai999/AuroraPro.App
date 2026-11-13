@@ -2,10 +2,6 @@
 // not there to (restoreOutcome.ts says when that happens). Mounted by App for
 // a session that has the admin UI, so a profile with a limit is never shown
 // it; it waits until an admin session in this tab has the admin UI again.
-// While mounted it also keeps the restore's status read (the restore runs on
-// the server, and the tab follows it from wherever the admin is), takes up a
-// restore this tab followed before a reload, and with none followed looks for
-// one already running.
 //
 // Kept out of the Admin page's chunk: App loads it with the rest of the app.
 
@@ -16,11 +12,10 @@ import {
 import { buttonVariants } from '@/components/ui/button'
 import { useReturnFocus } from '@/lib/returnFocus'
 import { FailureText } from './AdminNotes'
-import { markRestoreSeen, useRestoreOutcome, useRestoreWatch } from './restoreOutcome'
+import { markRestoreSeen, useRestoreOutcome } from './restoreOutcome'
 
 export function RestoreOutcomeAlert({ accountId }: { accountId: number }) {
   const { outcome, seen } = useRestoreOutcome()
-  useRestoreWatch(accountId)
   const returnFocus = useReturnFocus()
   // Said once, and only to the account whose restore it was (another
   // account signed in on this tab never sees it). A backup panel that is up
@@ -33,7 +28,14 @@ export function RestoreOutcomeAlert({ accountId }: { accountId: number }) {
           <>
             <AlertDialogHeader>
               <AlertDialogTitle className="font-display text-[22px] leading-tight">
-                {outcome.ok ? 'Restart Aurora now' : `The restore from ${outcome.file} did not go through`}
+                {outcome.ok
+                  ? 'Restart Aurora now'
+                  // No answer is not a failure: the restore may still be
+                  // running on the server, and a restart now would stop it
+                  // (it would roll back, and have to be run again).
+                  : outcome.lost
+                    ? `No answer came back about the restore from ${outcome.file}`
+                    : `The restore from ${outcome.file} did not go through`}
               </AlertDialogTitle>
               <AlertDialogDescription asChild>
                 <div className="text-[15px] leading-relaxed text-ink-2">

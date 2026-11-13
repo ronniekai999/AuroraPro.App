@@ -12,7 +12,8 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ScanProgressBar } from './ScanProgressBar'
-import { followRestore, resetRestoreOutcomeForTest } from './admin/restoreOutcome'
+import { beginRestore, finishRestore, resetRestoreOutcomeForTest } from './admin/restoreOutcome'
+import { noteRestoreSeen, rememberRestore } from '@/lib/restoreStatus'
 
 const listLibraries = vi.hoisted(() => vi.fn())
 const getScanStatus = vi.hoisted(() => vi.fn())
@@ -26,7 +27,7 @@ beforeEach(() => {
   listLibraries.mockResolvedValue([LIB])
   getScanStatus.mockReset()
 })
-afterEach(() => { cleanup(); vi.useRealTimers(); resetRestoreOutcomeForTest() })
+afterEach(() => { cleanup(); vi.useRealTimers(); resetRestoreOutcomeForTest(); localStorage.clear() })
 
 /** Advance past one 4s poll tick and let its promises settle. */
 const tick = async () => {
@@ -202,9 +203,10 @@ describe('ScanProgressBar — scan completion signal', () => {
     rerender(<ScanProgressBar isAdmin />)
   })
 
-  // A database restore holds locks the scan-status read waits on. A poll
-  // every 4 s used to stack requests, each holding one of the server's
-  // database connections until the restore ended.
+  // A database restore's transaction holds locks the scan-status read (and
+  // the session check before it) waits on. A poll every 4 s used to stack
+  // requests, each holding one of the server's database connections until
+  // the restore ended.
   it('polls one at a time: a poll still out holds the next back', async () => {
     getScanStatus.mockReturnValue(new Promise(() => {}))
     render(<ScanProgressBar isAdmin onScanComplete={() => {}} />)
@@ -215,16 +217,46 @@ describe('ScanProgressBar — scan completion signal', () => {
     expect(getScanStatus).toHaveBeenCalledTimes(1)
   })
 
-  it('asks nothing while this tab follows a database restore, and goes on after it', async () => {
+  it('lists the libraries one at a time too', async () => {
+    listLibraries.mockClear()
+    listLibraries.mockReturnValue(new Promise(() => {}))
+    render(<ScanProgressBar isAdmin onScanComplete={() => {}} />)
+    await waitFor(() => expect(listLibraries).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(95_000)
+    expect(listLibraries).toHaveBeenCalledTimes(1)
+  })
+
+  it('asks nothing while this tab has a restore out, and goes on after it', async () => {
     getScanStatus.mockResolvedValue(status('idle'))
-    followRestore(1, { id: 'j1', file: 'aurora.dump', phase: 'validating', started_at: '' })
+    render(<ScanProgressBar isAdmin onScanComplete={() => {}} />)
+    await waitFor(() => expect(getScanStatus).toHaveBeenCalledTimes(1))
+    beginRestore()
+    await tick()
+    await tick()
+    expect(getScanStatus).toHaveBeenCalledTimes(1)
+    finishRestore({ accountId: 1, file: 'aurora.dump', ok: true })
+    await tick()
+    expect(getScanStatus).toHaveBeenCalledTimes(2)
+  })
+
+  it('asks nothing while the restore this browser keeps was last read running, until it is read ended', async () => {
+    getScanStatus.mockResolvedValue(status('idle'))
+    rememberRestore('t'.repeat(43), 'aurora.dump')
+    noteRestoreSeen('t'.repeat(43), 'running')
     render(<ScanProgressBar isAdmin onScanComplete={() => {}} />)
     await waitFor(() => expect(listLibraries).toHaveBeenCalled())
     await tick()
     await tick()
     expect(getScanStatus).not.toHaveBeenCalled()
-    resetRestoreOutcomeForTest()
+    noteRestoreSeen('t'.repeat(43), 'succeeded')
     await tick()
+    expect(getScanStatus).toHaveBeenCalled()
+  })
+
+  it('does not hold back for a restore last read running longer ago than one can run', async () => {
+    getScanStatus.mockResolvedValue(status('idle'))
+    localStorage.setItem('aurora.restore', JSON.stringify({ ticket: 't'.repeat(43), file: 'aurora.dump', seen: 'running', at: Date.now() - 127 * 60_000 }))
+    render(<ScanProgressBar isAdmin onScanComplete={() => {}} />)
     await waitFor(() => expect(getScanStatus).toHaveBeenCalled())
   })
 })

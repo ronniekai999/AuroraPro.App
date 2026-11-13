@@ -29,6 +29,12 @@
 // Note the scope honestly: this reads index.css only. Animations declared in JSX
 // via Tailwind's `animate-*` utilities resolve to the same keyframes, but a
 // utility's reduced-motion behaviour is Tailwind's business, not this file's.
+// Checks 1 to 4 read declarations with regular expressions over the
+// comment-blanked text: they see `-webkit-animation` (and a style object's
+// `WebkitAnimation`), but property names in lower case only, so `ANIMATION:`
+// is not seen; and Check 1 reads only the `animation` shorthand, so an
+// animation set with the `animation-name` longhand is never checked for a
+// reduced-motion null. Check 5's stylesheet half parses instead (see there).
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -121,7 +127,7 @@ if (!rmBodies.length) {
 }
 
 const declared = new Set()
-for (const m of css.matchAll(/(?:^|[;{])\s*animation:\s*([^;]+);/g)) {
+for (const m of css.matchAll(/(?:^|[;{])\s*(?:-webkit-)?animation:\s*([^;]+);/g)) {
   const value = m[1].trim()
   if (value === 'none' || value.startsWith('none')) continue
   // First identifier that is not a time, timing function or keyword.
@@ -449,7 +455,7 @@ const INLINE_COVERED = new Map([
         for (; i < sheet.length && depth > 0; i++) { if (sheet[i] === '{') depth++; else if (sheet[i] === '}') depth-- }
         safe.push([q.index, i])
       }
-      for (const a of sheet.matchAll(/(?<![\w-])animation\s*:\s*(?!none)/g)) {
+      for (const a of sheet.matchAll(/(?<![\w-])(?:-webkit-)?animation\s*:\s*(?!none)/g)) {
         if (safe.some(([lo, hi]) => a.index > lo && a.index < hi)) continue
         bad++
         console.log(`  ***     ${file}:${lineOf(sm.index + 9 + a.index)} injected <style> declares an animation outside a prefers-reduced-motion: no-preference block`)
@@ -457,7 +463,7 @@ const INLINE_COVERED = new Map([
     }
     // Style objects: `animation: '…'` / `animation: \`…\`` (a quoted value — CSS
     // text and arbitrary classes have none).
-    for (const m of text.matchAll(/(?<![\w[-])animation(Name)?\s*:\s*[`'"]/g)) {
+    for (const m of text.matchAll(/(?<![\w[-])(?:animation|WebkitAnimation)(Name)?\s*:\s*[`'"]/g)) {
       const cover = INLINE_COVERED.get(file)
       const esc = cover && cover.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       if (cover && new RegExp(String.raw`${esc}\s*(,[^{]*)?\{[^}]*animation:\s*none\s*!important`).test(rmText)) {
@@ -499,7 +505,7 @@ const INLINE_COVERED = new Map([
   for (const m of css.matchAll(/\{([^{}]*)\}/g)) {
     const body = m[1]
     const line = css.slice(0, m.index).split('\n').length
-    for (const d of body.matchAll(/(?:^|;)\s*animation\s*:\s*([^;]*)/g)) {
+    for (const d of body.matchAll(/(?:^|;)\s*(?:-webkit-)?animation\s*:\s*([^;]*)/g)) {
       for (const layer of d[1].split(/,(?![^(]*\))/)) {
         if (!/\binfinite\b/.test(layer)) continue
         for (const tok of layer.trim().split(/\s+/)) if (keyframeProps.has(tok) && !forever.has(tok)) forever.set(tok, line)
@@ -540,14 +546,57 @@ const INLINE_COVERED = new Map([
 //      start and the call, behind an `if (…lessMotionAsked(…)…) { …return… }`
 //      before it; and lessMotionAsked asks both questions;
 //   b. in the stylesheet, parsed (postcss, so an enclosing at-rule is seen):
-//      the three animated pseudo-elements are stilled with
-//      `animation: none !important` inside a top-level
+//      the three animated pseudo-elements are stilled (an !important
+//      declaration that wins and leaves no animation name, `animation: none
+//      !important` as written) inside a top-level
 //      `@media (prefers-reduced-motion: reduce)`, and again in top-level
-//      rules for `html[data-effects="reduced"]`.
+//      rules for `html[data-effects="reduced"]`;
+//   c. and nothing in the stylesheet gets round that: an animation the
+//      stylesheet gives a view-transition pseudo-element is on one of those
+//      three (not on ::view-transition-image-pair or the ::view-transition
+//      overlay, which nothing stills) and is not `!important` (an important
+//      one on a named pseudo-element, ::view-transition-old(root) say,
+//      outranks the system setting's `(*)`, whose argument counts for
+//      nothing); and there is no `@view-transition` rule, which starts a
+//      transition between documents with no script, so with no guard. The
+//      title page's open captures the root, so the whole page cross-fades:
+//      a cross-fade written on the image pair, or forced with `!important`,
+//      would run under both settings, and (a) and (b) would still pass.
+//   How (b) and (c) read the stylesheet, erring toward refusing:
+//      - names in any letter case: pseudo-elements, elements, attribute
+//        names, properties, at-rules; an attribute's value exactly, as
+//        Chromium matches `[data-effects="reduced"]` (so "REDUCED" is not
+//        it);
+//      - `-webkit-animation` and `-webkit-animation-name` as `animation` and
+//        `animation-name`;
+//      - each rule by the declaration that wins its animation-name within
+//        that rule (an !important one over any other, then the later), so
+//        `animation: none !important` followed by an important
+//        `animation-name` is an animation, not a stilling; a later rule is
+//        judged by itself, not cascaded with an earlier one;
+//      - a value as naming an animation unless it is `none`, `initial` or
+//        `unset` alone, or a shorthand whose every part is a time, a number,
+//        an easing function or one of its keywords: a quoted or escaped
+//        name, a function (var(), attr()), inherit and revert all count;
+//      - in (c), rules and at-rules wherever they are nested, and every
+//        selector of a list; (b) wants its stillings where (b) says.
+//      (b) sees a stilling only as the six selectors written exactly, up to
+//      letter case; spaced or quoted otherwise it is not seen, and the check
+//      fails rather than passes. Both check that reading first against known
+//      answers (B_STILLS and B_NOT for (b), C_REFUSED and C_ALLOWED for (c)),
+//      so a reading that stops seeing one of them fails here instead of
+//      passing the real stylesheet. That pins the reading only as far as the
+//      answers reach: a break none of them exercises still passes, and so
+//      does deleting the self-test or its effect on the count.
 // There is no list of exceptions. What this still cannot see: a call made
 // through an alias that never spells the name (a function handed the
-// document's method by something else), and a guard that is an `if` with a
-// `return` but returns on the wrong answer.
+// document's method by something else), a guard that is an `if` with a
+// `return` but returns on the wrong answer, an animation given to a
+// view-transition pseudo-element from outside index.css (a style element
+// or an inline style written by script), and a pseudo-element, property or
+// at-rule name written with a CSS escape (`::view\-transition-old`).
+// (Judging each rule by itself errs the other way: an animation on the image
+// pair is refused even where a later rule stills it.)
 {
   console.log('\n## Check 5 — view transitions are removed by both "less motion" settings')
   const strip = src => src.replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' ')).replace(/(^|[^:'"`])\/\/[^\n]*/g, (m, lead) => lead + ' '.repeat(m.length - lead.length))
@@ -601,8 +650,9 @@ const INLINE_COVERED = new Map([
       console.log(`  ok      ${file}:${line} (${top[1]}) returns before it starts one when less motion is asked`)
     }
   }
-  const viewNames = /view-transition-name\s*:\s*(?!none)[\w-]+/.test(css)
-  if (named || viewNames) {
+  const viewNames = /view-transition-name\s*:\s*(?!none)[\w-]+/i.test(css)
+  const crossDocument = /@view-transition\b/i.test(css)
+  if (named || viewNames || crossDocument) {
     // a. What "less motion asked" means, where it is defined.
     const src = fs.existsSync(HOME) ? strip(fs.readFileSync(HOME, 'utf8')) : ''
     const def = /export function lessMotionAsked\b[\s\S]*?\n}\n/.exec(src)?.[0] ?? ''
@@ -616,24 +666,175 @@ const INLINE_COVERED = new Map([
     const { default: postcss } = await import('postcss')
     const sheet = postcss.parse(cssRaw)
     const PSEUDOS = ['::view-transition-group(*)', '::view-transition-old(*)', '::view-transition-new(*)']
-    const stilled = rule => rule.nodes?.some(d => d.type === 'decl' && d.prop === 'animation' && d.value.trim() === 'none' && d.important)
-    const covered = new Set()
-    sheet.walkRules(rule => {
-      if (!stilled(rule)) return
-      const parent = rule.parent
-      const underSystem = parent?.type === 'atrule' && parent.name === 'media' && /^\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)$/.test(parent.params.trim()) && parent.parent?.type === 'root'
-      const atTop = parent?.type === 'root'
-      for (const sel of rule.selectors.map(x => x.trim())) {
-        for (const pseudo of PSEUDOS) {
-          if (underSystem && sel === pseudo) covered.add('system ' + pseudo)
-          if (atTop && sel === 'html[data-effects="reduced"]' + pseudo) covered.add('app ' + pseudo)
-        }
+    // What a value of `animation` (the shorthand) or `animation-name` names:
+    // the animations it starts, none for `none`. Erring toward an animation:
+    // in the longhand anything but `none` is a name; in the shorthand any
+    // token that is not a time, a number, an easing function or a keyword
+    // the shorthand knows is one, so a quoted or escaped name, a function
+    // (var(), attr()) and inherit or revert (the UA's own fade, for old and
+    // new) all count. Only initial and unset, alone, are no animation.
+    const KEYWORDS = new Set(['none', 'infinite', 'normal', 'reverse', 'alternate', 'alternate-reverse', 'forwards', 'backwards', 'both', 'running', 'paused', 'linear', 'ease', 'ease-in', 'ease-out', 'ease-in-out', 'step-start', 'step-end', 'auto'])
+    const NUMBER = String.raw`[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?`
+    const notAName = t => KEYWORDS.has(t.toLowerCase()) || new RegExp(`^${NUMBER}(?:s|ms)?$`, 'i').test(t) || /^(?:cubic-bezier|steps|linear)\(.*\)$/i.test(t)
+    // Split at the top level only, not inside brackets: an easing
+    // function's commas and spaces are its own. Quotes and escapes need no
+    // care: however a quoted or escaped name is split, its pieces are not
+    // keywords, so it still counts as a name.
+    const splitTop = (str, sep) => {
+      const out = []
+      let cur = '', depth = 0
+      for (const c of str) {
+        if (c === '(') depth++
+        else if (c === ')') depth = Math.max(0, depth - 1)
+        if (depth === 0 && sep.test(c)) { out.push(cur); cur = ''; continue }
+        cur += c
       }
-    })
+      out.push(cur)
+      return out.map(x => x.trim()).filter(Boolean)
+    }
+    const namesIn = (prop, value) => {
+      const v = value.trim()
+      if (/^(initial|unset)$/i.test(v)) return []
+      const layers = splitTop(v, /,/)
+      if (prop === 'animation-name') return layers.filter(x => x.toLowerCase() !== 'none')
+      return layers.flatMap(layer => splitTop(layer, /\s/).filter(t => !notAName(t)))
+    }
+    // The declaration that decides a rule's animation-name: an important one
+    // over any other, then the later; the shorthand and the longhand, with or
+    // without -webkit- (an alias), in any case.
+    const winner = rule => {
+      let win = null
+      for (const d of rule.nodes ?? []) {
+        if (d.type !== 'decl') continue
+        const prop = d.prop.toLowerCase().replace(/^-webkit-/, '')
+        if (prop !== 'animation' && prop !== 'animation-name') continue
+        if (win?.decl.important && !d.important) continue
+        win = { decl: d, names: namesIn(prop, d.value) }
+      }
+      return win
+    }
+    const stilled = rule => { const w = winner(rule); return !!w && w.decl.important && w.names.length === 0 }
+    // A selector as Chromium compares it here: element, attribute and pseudo
+    // names in any case, an attribute's value exactly. (Written otherwise,
+    // with other spacing or quotes, a stilling is not recognised, and the
+    // check fails rather than passes.)
+    const selectorKey = sel => sel.trim().replace(/\[([^\]=~|^$*\s]+)([^\]]*)\]|[^[]+/g, (m, name, rest) => name === undefined ? m.toLowerCase() : `[${name.toLowerCase()}${rest}]`)
+    // Which of the six stillings (three pseudo-elements, two settings) a
+    // parsed stylesheet holds.
+    const stillings = root => {
+      const covered = new Set()
+      root.walkRules(rule => {
+        if (!stilled(rule)) return
+        const parent = rule.parent
+        const underSystem = parent?.type === 'atrule' && parent.name.toLowerCase() === 'media' && /^\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)$/i.test(parent.params.trim()) && parent.parent?.type === 'root'
+        const atTop = parent?.type === 'root'
+        for (const sel of rule.selectors.map(selectorKey)) {
+          for (const pseudo of PSEUDOS) {
+            if (underSystem && sel === pseudo) covered.add('system ' + pseudo)
+            if (atTop && sel === 'html[data-effects="reduced"]' + pseudo) covered.add('app ' + pseudo)
+          }
+        }
+      })
+      return covered
+    }
+    // Known answers for that reading, checked before the real stylesheet:
+    // what must read as all six stillings, and what must not read as the
+    // one named.
+    const B_STILLS = [
+      ['the stilling as index.css writes it', '@media (prefers-reduced-motion: reduce) { ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; } } html[data-effects="reduced"]::view-transition-group(*), html[data-effects="reduced"]::view-transition-old(*), html[data-effects="reduced"]::view-transition-new(*) { animation: none !important; }'],
+      ['the stilling with its names in capitals', '@MEDIA (PREFERS-REDUCED-MOTION: REDUCE) { ::VIEW-TRANSITION-GROUP(*), ::View-Transition-Old(*), ::view-transition-new(*) { ANIMATION: NONE !IMPORTANT; } } HTML[DATA-EFFECTS="reduced"]::view-transition-group(*), Html[data-effects="reduced"]::VIEW-TRANSITION-OLD(*), html[Data-Effects="reduced"]::view-transition-new(*) { -webkit-animation: none !important; }'],
+    ]
+    const B_NOT = [
+      ['an attribute value in capitals, which "reduced" does not match', 'app ::view-transition-old(*)', 'html[data-effects="REDUCED"]::view-transition-old(*) { animation: none !important; }'],
+      ['a stilling a later !important animation-name undoes', 'system ::view-transition-new(*)', '@media (prefers-reduced-motion: reduce) { ::view-transition-new(*) { animation: none !important; animation-name: fadeIn !important; } }'],
+      ['a stilling that is not !important', 'system ::view-transition-group(*)', '@media (prefers-reduced-motion: reduce) { ::view-transition-group(*) { animation: none; } }'],
+      ['a stilling under another media query', 'system ::view-transition-old(*)', '@media (prefers-reduced-motion: no-preference) { ::view-transition-old(*) { animation: none !important; } }'],
+    ]
+    let bSelfBad = 0
+    for (const [what, text] of B_STILLS) {
+      const got = stillings(postcss.parse(text))
+      if (got.size !== 6) { bSelfBad++; console.log(`  ***     known answer not read as all six stillings (${what}): read ${got.size} — this check is broken, not passing.`) }
+    }
+    for (const [what, key, text] of B_NOT) {
+      if (stillings(postcss.parse(text)).has(key)) { bSelfBad++; console.log(`  ***     known answer read as a stilling (${what}): ${text} — this check is broken, not passing.`) }
+    }
+    if (!bSelfBad) console.log(`  ok      the stilling is read right in its ${B_STILLS.length + B_NOT.length} known answers`)
+    bad += bSelfBad
+    const covered = stillings(sheet)
     if (PSEUDOS.every(x => covered.has('system ' + x))) console.log('  ok      index.css stills the view-transition pseudo-elements inside a top-level @media (prefers-reduced-motion: reduce)')
     else { bad++; console.log('  ***     index.css does not still ::view-transition-group/old/new(*) inside a top-level @media (prefers-reduced-motion: reduce) (animation: none !important on all three).') }
     if (PSEUDOS.every(x => covered.has('app ' + x))) console.log('  ok      index.css stills them under Reduce effects, in top-level rules')
     else { bad++; console.log('  ***     index.css does not still html[data-effects="reduced"]::view-transition-group/old/new(*) in top-level rules (animation: none !important on all three).') }
+    // c. Nothing gets round the stilling: what in a parsed stylesheet does.
+    const STILLED_KINDS = ['view-transition-group', 'view-transition-old', 'view-transition-new']
+    const roundTheStilling = root => {
+      const found = []
+      root.walkRules(rule => {
+        const vt = rule.selectors.map(x => x.trim()).filter(x => /::view-transition\b/i.test(x))
+        if (!vt.length) return
+        const w = winner(rule)
+        if (!w || !w.names.length) return
+        const { decl } = w
+        const line = decl.source?.start?.line
+        for (const sel of vt) {
+          const kind = (/::(view-transition(?:-[a-z]+)*)/i.exec(sel)?.[1] ?? '').toLowerCase()
+          if (!STILLED_KINDS.includes(kind)) found.push({ line, text: `gives ${sel} an animation (${decl.prop}: ${decl.value}${decl.important ? ' !important' : ''}): nothing stills ::${kind} under either setting, so it would run under both.` })
+          else if (decl.important) found.push({ line, text: `gives ${sel} an !important animation (${decl.prop}: ${decl.value}): it outranks the stilling of ::${kind}(*) under the system setting.` })
+        }
+      })
+      root.walkAtRules(at => {
+        if (at.name.toLowerCase() === 'view-transition') found.push({ line: at.source?.start?.line, text: `has an @${at.name} rule: it starts a transition between documents with no script, so no guard asks whether less motion was wanted.` })
+      })
+      return found
+    }
+    // Known answers: each of these alone must be refused, and the rules
+    // after them let through. The refused ones are ways a page cross-fade
+    // could be written round the stilling; each was once let through.
+    const C_REFUSED = [
+      ['an animation on the image pair', '::view-transition-image-pair(root) { animation: fadeIn 1s; }'],
+      ['an animation on the overlay', '::view-transition { animation: fadeIn 1s; }'],
+      ['an !important animation on a named pseudo-element', '::view-transition-old(root) { animation-name: fadeOut !important; }'],
+      ['-webkit-animation on the image pair', '::view-transition-image-pair(root) { -webkit-animation: fadeIn 1s; }'],
+      ['an !important -webkit-animation-name on a named pseudo-element', '::view-transition-new(root) { -webkit-animation-name: fadeIn !important; }'],
+      ['the image pair written in capitals', '::View-Transition-Image-Pair(root) { animation: fadeIn 1s; }'],
+      ['a stilled rule whose later !important animation-name wins', '::view-transition-image-pair(root) { animation: none !important; animation-name: fadeIn !important; }'],
+      ['@view-transition', '@view-transition { navigation: auto; }'],
+      ['@view-transition written in capitals', '@VIEW-TRANSITION { navigation: auto; }'],
+      ['the UA\'s fade put back with !important', '::view-transition-old(root) { animation: revert !important; }'],
+      ['a property name in capitals', '::view-transition-image-pair(root) { ANIMATION: fadeIn 1s; }'],
+      ['a plain animation a later !important one overrides', '::view-transition-old(root) { animation: fadeIn 1s; animation-name: fadeIn !important; }'],
+      ['a quoted name', '::view-transition-image-pair(root) { animation: "fadeIn" 1s; }'],
+      ['an escaped name', '::view-transition-image-pair(root) { animation: fade\\49n 1s; }'],
+      ['a name from attr()', '::view-transition-image-pair(root) { animation: attr(data-a type(<custom-ident>)) 1s; }'],
+      ['a quoted name, !important, on a stilled kind', '::view-transition-new(root) { animation: "fadeIn" 1s !important; }'],
+      ['a var() on the image pair', '::view-transition-image-pair(root) { animation: var(--a); }'],
+      ['a rule inside an at-rule', '@media (min-width: 1px) { ::view-transition-image-pair(root) { animation: fadeIn 1s; } }'],
+      ['a selector list', '.x, ::view-transition-image-pair(root) { animation: fadeIn 1s; }'],
+      ['@view-transition inside an at-rule', '@supports (display: grid) { @view-transition { navigation: auto; } }'],
+    ]
+    const C_ALLOWED = [
+      ['the stilling itself', '::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; } html[data-effects="reduced"]::view-transition-old(*) { -webkit-animation: none !important; }'],
+      ['timing on the stilled three', '::view-transition-group(*) { animation-duration: 200ms; } ::view-transition-old(root), ::view-transition-new(root) { animation-timing-function: linear; }'],
+      ['a plain animation on a stilled kind', '::view-transition-new(root) { animation: fadeIn 1s; }'],
+      ['an important animation that a later important none wins', '::view-transition-old(root) { animation-name: fadeIn !important; animation: none !important; }'],
+      ['an image-pair rule that animates nothing', '::view-transition-image-pair(root) { isolation: auto; animation-duration: 1s; }'],
+      ['initial and unset alone', '::view-transition-image-pair(root) { animation: initial; } ::view-transition { animation-name: unset; }'],
+      ['a shorthand with every part but a name', '::view-transition-image-pair(root) { animation: none 200ms cubic-bezier(0.2, 0, 0, 1) -.5s 2 alternate-reverse both running, 1e3ms steps(4, end) infinite reverse paused; }'],
+    ]
+    let selfBad = 0
+    for (const [what, text] of C_REFUSED) {
+      if (!roundTheStilling(postcss.parse(text)).length) { selfBad++; console.log(`  ***     known answer not refused (${what}): ${text} — this check is broken, not passing.`) }
+    }
+    for (const [what, text] of C_ALLOWED) {
+      const found = roundTheStilling(postcss.parse(text))
+      if (found.length) { selfBad++; console.log(`  ***     known answer refused (${what}): ${found[0].text} — this check is broken, not passing.`) }
+    }
+    if (!selfBad) console.log(`  ok      the check below refuses its ${C_REFUSED.length} known ways round the stilling and lets its ${C_ALLOWED.length} known stylesheets through`)
+    bad += selfBad
+    const around = roundTheStilling(sheet)
+    for (const f of around) console.log(`  ***     index.css:${f.line} ${f.text}`)
+    if (!around.length) console.log('  ok      no animation in index.css gets round that stilling, and no @view-transition starts one without the script')
+    bad += around.length
   } else {
     console.log('  no view transition is started and none is named.')
   }

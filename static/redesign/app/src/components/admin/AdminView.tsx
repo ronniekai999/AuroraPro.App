@@ -22,10 +22,16 @@ import { SettingRow, SettingSwitch } from '@/components/settings/controls'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { useReturnFocus } from '@/lib/returnFocus'
 import { ConfirmDialog } from '@/components/settings/ConfirmDialog'
-import { adminFailure, type Failure } from './adminFailure'
+import { adminFailure, restoreServerLine, type Failure } from './adminFailure'
 import { FailureNote, FailureText, StandingNotice, StatusLine, useSaid } from './AdminNotes'
 import { useConfirmedAction } from './useConfirmedAction'
-import { PHASE_WORDS, backupPanelMounted, clearRestoreOutcome, discoverRestore, finishRestore, followRestore, useRestoreOutcome, useRestoreWatch } from './restoreOutcome'
+import { backupPanelMounted, beginRestore, clearRestoreOutcome, finishRestore, useRestoreOutcome } from './restoreOutcome'
+import { RestoreRecordNote } from '@/components/RestoreRecordNote'
+import { useRestoreRecord, type RestoreRecord } from '@/hooks/useRestoreRecord'
+import {
+  RESTORE_TICKET_HEADER, endRestoreUpload, markRestoreRequestEnded, newRestoreTicket, noteRestoreSeen, putBackRestore,
+  rememberRestore, rememberedRestore, restoreWords, startRestoreUpload,
+} from '@/lib/restoreStatus'
 import {
   parseReferralOptionsSetting,
   serializeReferralOptions,
@@ -43,6 +49,7 @@ import {
   APIError,
   NetworkError,
   apiFetchResponse,
+  getAdminRestoreStatus,
   approveRequest,
   createInvite,
   createLibrary,
@@ -94,7 +101,6 @@ import {
   type Library,
   type LibraryHealthReport,
   type RetypePreview,
-  type RestoreStatus,
   type LLMSettings,
   type LLMTestResult,
   type LogEntry,
@@ -119,12 +125,13 @@ const REFERRAL_OPTIONS_KEY = 'referral_prompt_options'
 
 /* ─────────────────────── ADMIN VIEW ─────────────────────── */
 // Admin backup + restore card. Backup is a tokenized anchor
-// download; restore is a multipart upload guarded by a hard-confirm, which
-// starts a job on the server that the panel then follows (restoreOutcome).
-function AdminBackupRestore({ downloadBackup, accountId }: {
+// download; restore is a multipart upload guarded by a hard-confirm.
+function AdminBackupRestore({ downloadBackup, accountId, record }: {
   downloadBackup: () => Promise<Failure | null>
   /** The signed-in account: a restore's outcome is said to it only. */
   accountId: number
+  /** The server's record of the latest restore, read by the page. */
+  record: RestoreRecord
 }) {
   const [file, setFile] = useState<File | null>(null)
   const [doneBlocked, setDoneBlocked] = useState(false)
@@ -134,55 +141,82 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
   const restoreFlow = useConfirmedAction<File>(f => `restoring the database from ${f.name}`, { lateFailureInPanel: false })
   const [restoreSaid, sayRestore] = useSaid()
   const submitting = restoreFlow.busy
-  // The restore runs on the server; this tab follows it (restoreOutcome),
-  // and what came of it lives there too: the restore can end after the
-  // panel, or the whole Admin page, has gone. While the panel is up it says
-  // it, so the app's alert does not.
-  const { outcome, following, running, unreadable, checkFailed } = useRestoreOutcome()
+  // What came of the last restore lives outside this panel (restoreOutcome):
+  // the restore can end after the panel, or the whole Admin page, has gone.
+  // While the panel is up it says it, so the app's alert does not.
+  const { outcome, out } = useRestoreOutcome()
   useEffect(() => backupPanelMounted(), [])
-  useRestoreWatch(accountId)
-  const restoring = following && following.accountId === accountId ? following : null
-  const restored = outcome && outcome.accountId === accountId && outcome.ok ? outcome.file : null
+  // The server's own record of the latest restore (hooks/useRestoreRecord,
+  // read by the page). A restore no longer ends with its request, so after a
+  // reload, or for a restore this tab did not start or got no answer for,
+  // this is what says it is running or how it went.
+  const serverRunning = record.status?.state === 'running'
+  const mine = outcome && outcome.accountId === accountId ? outcome : null
+  // This tab's own answer, when it is one: Aurora said how the restore went.
+  const answered = !!mine && (mine.ok || !mine.lost)
+  const recordSays = (!!record.status && record.status.state !== 'none') || !!record.lost || !!record.waiting
+  // A record of a failure that may have reached the database (one cut off as
+  // it committed) says more than this tab's answer does (that the database
+  // holds the old data or the backup, and what to do), so it is said in its
+  // place.
+  const recordFailedUnknown = record.status?.state === 'failed' && record.status.database !== 'unchanged'
+  // A record that says the restore is running or succeeded outranks this
+  // tab's word that it failed: a proxy's own refusal can pass for Aurora's.
+  const recordContradicts = !!mine && !mine.ok && (record.status?.state === 'running' || record.status?.state === 'succeeded')
+  // The record is said unless this tab's answer already says the same
+  // restore; a restore running now is always said. Not while this tab has a
+  // restore out (`out`, which outlives a remount of this panel): its record
+  // does not exist until the upload ends.
+  const showRecord = out === 0 && recordSays && (serverRunning || !answered || recordFailedUnknown || recordContradicts)
+  const restored = mine?.ok ? mine.file : null
   // An outcome that lands while this panel is up is said in its status line,
   // whichever panel sent the restore (the admin may have left the section
-  // and come back): the notice itself is not read out. A restore that
-  // finished locks the button until the panel goes.
+  // and come back): the notice itself is not read out.
   const outcomeAtMount = useRef(outcome)
   useEffect(() => {
     if (!outcome || outcome === outcomeAtMount.current || outcome.accountId !== accountId) return
     outcomeAtMount.current = outcome
-    if (outcome.ok) {
-      sayRestore(`Restored the database from ${outcome.file}. Restart Aurora now.`)
-      setDoneBlocked(true)
-    }
+    if (outcome.ok) sayRestore(`Restored the database from ${outcome.file}. Restart Aurora now.`)
   }, [outcome, accountId, sayRestore])
-  const lastFailure = outcome && outcome.accountId === accountId && !outcome.ok ? outcome.failure : null
+  // A request that got no answer is said only until the record can say more,
+  // and this tab's failure not beside a record of it that says more.
+  const lastFailure = mine && !mine.ok && (!mine.lost || !recordSays) && !(showRecord && (recordFailedUnknown || recordContradicts)) ? mine.failure : null
   const restoreRef = useRef<HTMLButtonElement | null>(null)
   const noticeRef = useRef<HTMLDivElement | null>(null)
-  const progressRef = useRef<HTMLDivElement | null>(null)
-  // The upload can take minutes — guard against setState after unmount if
-  // the admin tabs away mid-upload.
+  // The restore POST can take minutes — guard against setState after
+  // unmount if the admin tabs away mid-upload.
   const mountedRef = useRef(true)
   useEffect(() => () => { mountedRef.current = false }, [])
 
-  const blocked = submitting || doneBlocked || !!restoring
   const onSubmit = () => {
-    if (!file || blocked) return
+    if (!file || submitting || doneBlocked || out > 0 || serverRunning) return
     restoreFlow.ask(file)
   }
 
-  // The dialog stays up while the file is sent (one answer, one upload)
-  // until it offers its way out. Once the server has the file it answers
-  // 202 and runs the restore as a job: the dialog closes and the panel
-  // follows the job. A refusal of the upload goes to restoreOutcome, so it
-  // is said wherever the admin is.
+  // The dialog stays up while the restore runs (one answer, one upload)
+  // until it offers its way out; the outcome goes to restoreOutcome either way.
   const restore = () => restoreFlow.run(async f => {
+    // Once the upload is done the server runs the restore to its end,
+    // whatever becomes of this page, so nothing holds the page. The ticket
+    // is kept before the upload starts: a reload at any point after can
+    // still read how the restore went, on the sign-in page too.
+    const previous = rememberedRestore()
+    const ticket = newRestoreTicket()
+    rememberRestore(ticket, f.name)
+    startRestoreUpload(ticket)
+    beginRestore()
+    // Whether a refusal is Aurora's own: its restore route answers every
+    // failure as JSON ({ error: { message } }). Anything else came from a
+    // proxy in front of it (Cloudflare's 524 after 100 s, an HTML 502), and
+    // says nothing of the restore, which may be running still.
+    let fromAurora = true
     try {
       const form = new FormData()
       form.append('backup', f)
       const res = await apiFetchResponse('/api/admin/restore', {
         method: 'POST',
         body: form,
+        headers: { [RESTORE_TICKET_HEADER]: ticket },
       })
       const ct = res.headers.get('content-type') || ''
       const body = ct.includes('application/json')
@@ -194,7 +228,7 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
         // use a flat string { error: "..." }. Without this extraction,
         // `new Error(body.error)` on the nested shape stringifies the
         // object to literally "[object Object]" — masking the real
-        // diagnostic (e.g. "upload is not a pg_dump custom archive").
+        // diagnostic (e.g. "permission denied to create extension").
         let errMsg = `HTTP ${res.status}`
         const errField = (body as Record<string, unknown>).error
         if (typeof errField === 'string') {
@@ -203,28 +237,37 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
           const nested = (errField as Record<string, unknown>).message
           if (typeof nested === 'string') errMsg = nested
         }
-        // An APIError, so the status and the reason reach the words below.
+        fromAurora = ct.includes('application/json') && !!errField && typeof errField === 'object' && typeof (errField as Record<string, unknown>).message === 'string'
+        // Another restore was running and this one never started: the
+        // ticket kept for that one (this browser's, maybe) goes back.
+        if (res.status === 409 && fromAurora) putBackRestore(ticket, previous)
+        // An APIError, so the status reaches the words below.
         throw new APIError(res.status, errMsg, body)
       }
-      const started = (body as RestoreStatus).running
-      if (started && typeof started.id === 'string') followRestore(accountId, started)
-      // Started, but its answer did not say which: the server has it.
-      else void discoverRestore(accountId)
+      noteRestoreSeen(ticket, 'succeeded')
+      finishRestore({ accountId, file: f.name, ok: true })
+      // Lock the button after success.
+      if (mountedRef.current) setDoneBlocked(true)
       return null
     } catch (e) {
-      console.error('[Aurora] Restore upload failed', e)
-      const failure = restoreFailure(e)
-      finishRestore({ accountId, file: f.name, ok: false, failure })
-      // No answer: the restore may have started. Look for it on the server.
-      if (isLost(e)) void discoverRestore(accountId)
+      console.error('[Aurora] Restore failed', e)
+      const { failure, lost } = restoreFailure(e, fromAurora)
+      // Aurora answered: this browser knows how it ended. Otherwise the
+      // request has ended here, and no record for it later means it never
+      // started (or Aurora restarted), not an upload still going.
+      if (lost) markRestoreRequestEnded(ticket)
+      else noteRestoreSeen(ticket, 'failed')
+      finishRestore(lost ? { accountId, file: f.name, ok: false, failure, lost } : { accountId, file: f.name, ok: false, failure })
       return failure
+    } finally {
+      endRestoreUpload(ticket)
     }
   })
 
   return (
     <div className="space-y-6">
       {restored && (
-        <StandingNotice ref={noticeRef} title="Restart Aurora now" onDismiss={clearRestoreOutcome}>
+        <StandingNotice ref={noticeRef} title="Restart Aurora now" onDismiss={() => { clearRestoreOutcome(); record.dismiss() }}>
           The database has been restored from {restored}. Until Aurora is restarted, the server goes on
           working from what it held before the restore, and what people see can be out of date.
         </StandingNotice>
@@ -268,20 +311,25 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
           state until you do.
         </p>
         <p className="text-ink-2 text-xs mb-4 leading-relaxed">
-          Once the file is uploaded, the restore runs on the server: closing or reloading this tab does
-          not stop it, and this page finds it again. It clears the old data and loads the backup in one
-          transaction: if anything fails, or the server is restarted or updated before it ends, nothing is
-          changed, and the restore has to be run again. While it runs the rest of Aurora waits for the
-          database, and the database needs room for a second copy of the data. When it succeeds everyone
-          is signed out, you included, since a backup holds no sessions: sign in again to see that it
-          finished, before restarting Aurora. Legacy <code>.sql.gz</code> backups need to be restored via
-          the command line: <code>gunzip &lt; file.sql.gz | psql $DATABASE_URL</code>.
+          Once the file is uploaded, the restore runs on the server to its end whether or not this
+          page stays open, and this browser shows how it went: here, or on the sign-in page. For a backup
+          made by Aurora, clearing the old data and loading the backup are one transaction: if anything
+          fails, the restore rolls back and the database is left as it was. Once the file has been checked
+          and until the restore ends, Aurora waits for it: pages hang (some fail after a minute) and signing
+          in is paused. The server needs free disk space for a second copy of the data meanwhile, and
+          nothing checks that first. Start it when no library scan is running: one that is carries on into
+          the restored data. Restarting Aurora stops a restore, and it then has to be run again; an
+          automatic update waits up to five minutes for it and then restarts anyway, so
+          pause <code>aurora-update.timer</code> first for a large backup.
+          Legacy <code>.sql.gz</code> backups need to be restored via the command
+          line: <code>gunzip &lt; file.sql.gz | psql $DATABASE_URL</code>.
         </p>
+        {showRecord && <RestoreRecordNote record={record} server={restoreServerLine(record.status)} className="mb-4" />}
         <div className="flex gap-3 flex-wrap items-center">
           <input
             type="file"
             accept=".dump,application/octet-stream"
-            disabled={blocked}
+            disabled={submitting || doneBlocked || serverRunning || out > 0}
             onChange={e => setFile(e.target.files?.[0] ?? null)}
             className="min-w-0 max-w-full text-sm text-ink-2 file:mr-3 file:px-3 file:py-1.5 file:rounded-chip file:border-0 file:bg-surface-raised-2 file:text-ink file:cursor-pointer hover:file:bg-action-soft"
           />
@@ -293,43 +341,23 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
               e.currentTarget.focus()
               onSubmit()
             }}
-            disabled={!file || blocked}
+            disabled={!file || submitting || doneBlocked || serverRunning || out > 0}
             className="stage-btn stage-btn-destructive"
           >
             <Icon name="refresh" size={16} /> {doneBlocked ? 'Restart Aurora to continue' : 'Restore database'}
           </button>
         </div>
-        {file && !doneBlocked && !restoring && (
+        {file && !doneBlocked && (
           <p className="text-ink-2 text-xs mt-2">
             Selected: {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)
           </p>
         )}
-        {restoring && (
-          <div ref={progressRef} tabIndex={-1} role="region" aria-label="Restore in progress" className="mt-3 min-w-0 text-[14px] leading-snug">
-            <p role="status" className="text-ink [overflow-wrap:anywhere]">
-              Restoring the database from {restoring.file}: {running ? PHASE_WORDS[running.phase] : 'asking the server how far it has got'}.
-              {' '}It runs on the server, and goes on if this tab is closed. When it succeeds everyone is signed
-              out, you included: sign in again to see that it finished, before restarting Aurora.
-            </p>
-            {unreadable && (
-              <div className="mt-2">
-                <p className="text-ink">{unreadable.says}</p>
-                {unreadable.server && <p className="mt-1 text-[13px] text-ink-2 [overflow-wrap:anywhere]">{unreadable.server}</p>}
-              </div>
-            )}
-          </div>
-        )}
-        {!restoring && checkFailed && (
-          <div className="mt-3 min-w-0 text-[14px] leading-snug">
-            <p className="text-ink">{checkFailed.says} A restore may be running on the server.</p>
-            {checkFailed.server && <p className="mt-1 text-[13px] text-ink-2 [overflow-wrap:anywhere]">{checkFailed.server}</p>}
-          </div>
-        )}
         <StatusLine said={restoreSaid} className="mt-3" />
         <div className="mt-3 empty:hidden">{restoreFlow.panelNotes}</div>
         {/* The last restore's failure, kept in the panel once its dialog is
-            put down (or said here first, when the dialog was left): one that
-            stopped part way can have left the database empty. */}
+            put down (or said here first, when the dialog was left): one cut
+            off as it committed leaves the admin to check which data the
+            database holds. */}
         {!restoreFlow.dialog.open && !restoreFlow.busy && <FailureNote failure={lastFailure} className="mt-3" />}
       </div>
 
@@ -342,47 +370,46 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
         destructive
         safeFirst
         onConfirm={() => { void restore() }}
-        // A restore that has started disables the button that asked: the
-        // line that follows it takes the focus, or the notice that says to
-        // restart.
-        fallbackFocus={() => noticeRef.current ?? progressRef.current ?? restoreRef.current}
+        // A restore that finished locks the button that asked: the notice
+        // that says to restart takes the focus.
+        fallbackFocus={() => noticeRef.current ?? restoreRef.current}
         details={submitting
-          ? <p role="status" className="text-[14px] leading-snug text-ink">Sending the file. Keep this tab open until it has been sent: closing or reloading it before then stops the upload, and nothing is changed. Once the server has the file, the restore runs there, and this tab can be closed.</p>
+          ? <p role="status" className="text-[14px] leading-snug text-ink">Uploading and restoring. This can take several minutes. Closing this tab before the upload has finished stops the restore before anything is changed; once it has, the restore goes on without this tab.</p>
           : undefined}
       >
         Everything Aurora holds now is replaced by what is in this file{restoreFlow.asked ? ` (${(restoreFlow.asked.size / 1024 / 1024).toFixed(1)} MB)` : ''}:
         accounts, profiles, libraries, watch history, lists and settings. What is there now cannot be brought
-        back except from another backup. When the restore succeeds everyone is signed out, you included, since a
-        backup holds no sessions: sign in again to see that it finished, then restart Aurora. Once the file is
-        uploaded the restore runs on the server, and closing or reloading this tab does not stop it. It replaces
-        everything in one step: if it fails, or the server is restarted or updated before it ends, nothing is
-        changed and it has to be run again. While it runs, the rest of Aurora waits for the database.
+        back except from another backup. Once the file is uploaded the restore runs on the server to its end:
+        reloading or closing this tab does not stop it, and this browser shows how it went, here or on the
+        sign-in page. Once the file has been checked and until the restore ends, Aurora waits for it: pages
+        hang and signing in is paused. Restarting Aurora stops it (nothing is then changed, and it has to be
+        run again), and so does an automatic update that has waited five minutes for it: pause
+        aurora-update.timer first for a large backup. If it fails, the database is left as it was. If it
+        succeeds, everyone is signed out; restart Aurora then.
       </ConfirmDialog>
     </div>
   )
 }
 
-/** A request that got no answer from Aurora: the connection, or a proxy in
- *  front of it that gave up (Aurora answers this route with none of 502, 503
- *  or 504). The restore may have started. */
-function isLost(e: unknown): boolean {
-  if (e instanceof NetworkError) return true
-  return e instanceof APIError && (e.status === 502 || e.status === 503 || e.status === 504)
-}
-
-/** What an upload that did not start a restore is said to have done. Every
- *  answer Aurora gives it comes before the job starts, so before anything is
- *  changed; only no answer leaves that open. */
-function restoreFailure(e: unknown): Failure {
-  const lost = 'No answer came back from the server while the file was sent, so it is not known whether the restore started. If it did, it runs on the server: this page looks for it, and the server’s log says what happened.'
-  return adminFailure(e, 'restore the database', {
-    502: lost, 503: lost, 504: lost,
-    400: 'The server refused this file, and the database was not changed.',
-    409: 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.',
-    413: 'The file is too large to restore from here, and the database was not changed.',
-    noAnswer: lost,
-    otherwise: 'The restore did not start, and the database was not changed. Read what the server said before trying again.',
-  })
+/** What a restore that did not finish is said to have done, and whether
+ *  Aurora answered at all (`lost`: the server's record then says more). The
+ *  old data is cleared and the backup loaded in one transaction, so a failure
+ *  leaves the database as it was, unless the restore was cut off as it
+ *  committed (the server's message then says so). */
+function restoreFailure(e: unknown, fromAurora = true): { failure: Failure; lost: boolean } {
+  // Aurora itself never answers a restore with 502, 503 or 504, and answers
+  // every failure as JSON: a 5xx that is not Aurora's own (`fromAurora`),
+  // like Cloudflare's 524, comes from a proxy in front of it that gave up
+  // waiting, while the restore may still be running. It is no answer, not a
+  // restore that failed. (A proxy's 4xx means the upload never reached
+  // Aurora: nothing started.)
+  const noAnswer = e instanceof NetworkError ||
+    (e instanceof APIError && e.status >= 500 && ([502, 503, 504].includes(e.status) || !fromAurora))
+  const lost = 'The connection to the server was lost during the restore. If the upload had finished, the restore goes on on the server without this page: do not restart Aurora until you know how it ended, since a restart stops a restore still running. Admin, under Backup and restore, shows how it ends once Aurora can be asked, and so does the sign-in page in this browser.'
+  return {
+    lost: noAnswer,
+    failure: adminFailure(e, 'restore the database', { ...(noAnswer && e instanceof APIError ? { [e.status]: lost } : {}), 502: lost, 503: lost, 504: lost, 400: 'The server refused this file, and the database was not changed.', 409: 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.', 413: 'The file is too large to restore from here, and the database was not changed.', noAnswer: lost, otherwise: 'The restore did not go through. Unless it was cut off as it was being committed, the database was not changed. Read what the server said before going on.' }),
+  }
 }
 
 function NowPlayingWidget() {
@@ -3198,6 +3225,27 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
   sectionAsk?: number
 }) {
   const [tab, setTab] = useState<AdminTab>(initialSection ?? 'dashboard')
+  // The server's record of the latest restore, read when the page opens and
+  // again when a restore this tab sent ends (hooks/useRestoreRecord): a
+  // restore no longer ends with its request, so a reload, another admin or a
+  // request that got no answer learns of it here.
+  const { outcome: restoreOutcomeNow, out: restoresOut, ended: restoresEnded } = useRestoreOutcome()
+  const restoreMine = restoreOutcomeNow && restoreOutcomeNow.accountId === currentAdminId ? restoreOutcomeNow : null
+  // A restore of this tab's that got no answer: keep asking until the server
+  // says how it went (the no-answer words promise it).
+  const restoreUnanswered = !!restoreMine && !restoreMine.ok && !!restoreMine.lost
+  const restoreRecord = useRestoreRecord({ adminRead: getAdminRestoreStatus, recheck: restoresEnded, keepAsking: restoreUnanswered })
+  // This tab's own answer is said by RestoreOutcomeAlert; the record is not
+  // said beside it, except for a restore running now, or one the record says
+  // succeeded where this tab heard it failed.
+  const restoreAnswered = !!restoreMine && (restoreMine.ok || !restoreMine.lost) &&
+    !(!restoreMine.ok && restoreRecord.status?.state === 'succeeded')
+  // A restore running is always said, this tab's own included. What the
+  // admin must act on is said when this tab has no answer of its own about
+  // it, and not while a request of this tab's is out (its record does not
+  // exist until the upload ends).
+  const restoreAside = restoreRecord.status?.state === 'running' || (restoresOut === 0 && !restoreAnswered &&
+    (!!restoreRecord.lost || (!!restoreRecord.status && !!restoreWords(restoreRecord.status)?.urgent)))
   useEffect(() => {
     if (initialSection) setTab(initialSection)
   }, [sectionAsk, initialSection])
@@ -3501,6 +3549,12 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
     // shows (the effects above key on `tab`): two of them poll, so nothing is
     // mounted that is not on screen.
     <AdminShell current={tab} onSection={setTab}>
+      {/* Every section but Backup and restore (which says the record
+          itself): a restore running, or one whose end the admin must act on,
+          that this tab has no answer of its own about. */}
+      {tab !== 'backup' && restoreAside && (
+        <RestoreRecordNote record={restoreRecord} server={restoreServerLine(restoreRecord.status)} className="mb-6" />
+      )}
       {tab === 'dashboard' && (
         <div>
           {statsErr && (
@@ -3935,7 +3989,7 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
       {tab === 'flagged' && <AdminFlaggedTab />}
       {tab === 'llm' && <AdminLLMTab restartNeeded={llmRestart} onRestartNeeded={() => setLLMRestart(true)} onDismissRestart={() => setLLMRestart(false)} />}
       {tab === 'oauth' && <AdminOAuthTab />}
-      {tab === 'backup' && <AdminBackupRestore downloadBackup={downloadBackup} accountId={currentAdminId} />}
+      {tab === 'backup' && <AdminBackupRestore downloadBackup={downloadBackup} accountId={currentAdminId} record={restoreRecord} />}
       {tab === 'health' && <PlaybackHealth />}
     </AdminShell>
   )
