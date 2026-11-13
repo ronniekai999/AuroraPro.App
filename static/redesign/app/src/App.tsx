@@ -1673,6 +1673,13 @@ export default function App() {
   // the load that follows it, so on a switch it saves the outgoing list
   // under its own key and never under the incoming one.
   const libraryOwnerRef = useRef<string | null>(null)
+  // The same key for the My Library writes' owner checks, mirrored in a
+  // layout effect like the session's profile and account
+  // (actingProfileRef, libraryUserRef), so all three move in one phase. The
+  // ref above trails to the passive load below, which it has to: the
+  // snapshot save keys on it.
+  const libraryWriteOwnerRef = useRef<string | null>(libraryCacheKey)
+  useLayoutEffect(() => { libraryWriteOwnerRef.current = libraryCacheKey }, [libraryCacheKey])
   useEffect(() => {
     const key = libraryOwnerRef.current
     if (!key) return
@@ -2920,7 +2927,7 @@ export default function App() {
     const settle = () => { if (pendingLibOpsRef.current.get(key) === mark) pendingLibOpsRef.current.delete(key) }
     // The list this change was made on. A switch before the answer swaps in
     // another profile's, which nothing here may edit.
-    const owner = libraryOwnerRef.current
+    const owner = libraryWriteOwnerRef.current
     // The account it was made for: a write whose turn comes after a sign-out
     // (or once another account has signed in) is not sent. Its 401 would end
     // whatever session the tab has by then.
@@ -2940,7 +2947,7 @@ export default function App() {
       // Another list is on screen (a switch, or a sign-out, since): it is
       // not this change's to edit, and what became of the change is not
       // said to whoever is acting now, by a title's name.
-      if (libraryOwnerRef.current !== owner) return
+      if (libraryWriteOwnerRef.current !== owner) return
       // The latest change is taken back on screen; an earlier one is left
       // to the read below, since what came after it is on screen too.
       if (last()) setLibrary(op === 'add' ? removeLocal : addLocal)
@@ -2951,9 +2958,9 @@ export default function App() {
       // A queue in which anything failed ends with the server's own list:
       // working out the title's state from the answers in order is what
       // left the screen saying saved for a title the server did not have.
-      if (!queue.failed || libraryOwnerRef.current !== owner) return
+      if (!queue.failed || libraryWriteOwnerRef.current !== owner) return
       getLibrary(profileId).then(items => {
-        if (libraryOwnerRef.current === owner) setLibrary(prev => mergeServerLibrary(prev, items, profileId))
+        if (libraryWriteOwnerRef.current === owner) setLibrary(prev => mergeServerLibrary(prev, items, profileId))
       }, () => {})
     })
   }, [mergeServerLibrary])
@@ -2966,7 +2973,7 @@ export default function App() {
   // screen (`owner`; lib/libraryUndo), with its write behind the removal's
   // (changeLibrary's queue).
   const restoreToLib = useCallback((m: Media, profileId: number, owner: string | null) => {
-    if (!undoMayRestore(libraryOwnerRef.current, owner, library, m.id)) return
+    if (!undoMayRestore(libraryWriteOwnerRef.current, owner, library, m.id)) return
     changeLibrary(m, 'add', profileId, (last) => {
       if (last) addToast(`Couldn't put "${m.title}" back — try again`, 'error')
     })
@@ -2986,7 +2993,7 @@ export default function App() {
     // The render-closure read only decides intent (changeLibrary dedupes).
     const wasSaved = library.some(i => i.id === m.id)
     const profileId = activeProfileId
-    const owner = libraryOwnerRef.current
+    const owner = libraryWriteOwnerRef.current
     // A removal can be taken back from its toast (once: a toast takes its
     // action once), for whoever removed the wrong one.
     let undone = false

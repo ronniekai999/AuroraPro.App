@@ -196,9 +196,16 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
       if (answered) await answered
       return new Response(null, { status: 204 })
     }
+    // A profile's own list, for the profile the address names, as the
+    // server answers it: a session acting as a restricted profile may name
+    // only that one (403), an unrestricted one any of the account's.
     if (/^\/api\/profiles\/\d+\/library$/.test(p)) {
-      if (listFails.has(asked)) return json({ error: 'unavailable' }, 503)
-      return json([sees.saved, ...(sharedSaved ? [SHARED] : [])].map(x => ({ media_item_id: x.id, title: x.title, type: 'movie', year: 2020 })))
+      const named = Number(p.split('/')[3])
+      if (named !== asked && profiles.find(x => x.id === asked)?.max_age_rating) {
+        return json({ error: { code: 403, message: 'profile is restricted', reason: 'profile_restricted' } }, 403)
+      }
+      if (listFails.has(named)) return json({ error: 'unavailable' }, 503)
+      return json([SEES[named].saved, ...(sharedSaved ? [SHARED] : [])].map(x => ({ media_item_id: x.id, title: x.title, type: 'movie', year: 2020 })))
     }
     if (p === '/api/me/hero') {
       heroPools.push(asked)
@@ -920,6 +927,59 @@ describe('a profile switch never commits the new name over the previous profileâ
     await new Promise(done => setTimeout(done, 200))
     expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104'])
   })
+
+  // A queue that ends failed reads its profile's list again. The Parent's
+  // removal is refused (500) with the Undo behind it, and the switch to an
+  // unrestricted Kid comes first: the server answers that read with the
+  // Parent's list, as it does for an unrestricted session, and it is not
+  // the Kid's list's to take.
+  it('with a queue that ends failed across a switch: the read of the previous profile\'s list is not merged into the new one\'s', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const commits = renderApp('/library')
+    const release = server.hold('library-write')
+    server.failLibraryWrites()
+    const said = await removeTheSavedTitle()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104']))
+    fireEvent.click(within(said.closest('.toast') as HTMLElement).getByRole('button', { name: 'Undo' }))
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    const before = commits.length
+    release()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104', 'POST /api/profiles/1/library']))
+    await new Promise(done => setTimeout(done, 300))
+    expect(commits.slice(before).every(c => c.label === 'Kid' && !c.parentTitles && c.kidSavedCard)).toBe(true)
+    expect(screen.queryByText(/Couldn't|Parentonly/)).toBeNull()
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toEqual(['Kidonly Saved'])
+  })
+
+  // The reverse of the shared title's case: the Kid's stored copy still has
+  // a title from before its limit, which the server's list for the Kid
+  // leaves out, and the Parent's save of that title is out across the
+  // switch. The Parent's mark is not the Kid's: once the Kid's list has
+  // answered, the title is not on the Kid's screen.
+  it('with a save out across a switch of a title the new profile\'s stored copy still holds: the server\'s list for it stands', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer()
+    const CATALOG = SEES[1].catalog
+    localStorage.setItem('aurora_my_library:1:2', JSON.stringify([{
+      id: CATALOG.id, title: CATALOG.title, year: 2020, rating: 7, duration: '', genre: '', type: 'movie', poster: '', backdrop: '', description: '',
+    }]))
+    const commits = renderApp('/')
+    const release = server.hold('library-write')
+    fireEvent.click((await screen.findAllByRole('button', { name: `More actions for ${CATALOG.title}` }, { timeout: 5000 }))[0])
+    fireEvent.click(within(await screen.findByRole('menu', { name: `Actions for ${CATALOG.title}` })).getByRole('menuitem', { name: 'Add to My Library' }))
+    await waitFor(() => expect(server.libraryWrites).toEqual(['POST /api/profiles/1/library']))
+    switchToKid()
+    await kidHeroUp()
+    // The Kid's own list has answered and is up on Tonight.
+    await waitFor(() => expect(document.querySelector(`[data-media-id="${SEES[2].saved.id}"]`)).not.toBeNull(), { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 200))
+    expect(document.querySelector(`[data-media-id="${CATALOG.id}"]`)).toBeNull()
+    expect(kidOverParent(commits)).toBe(0)
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { id: number }) => m.id)).not.toContain(CATALOG.id)
+    release()
+  }, 20_000)
 
   it('on My Library, into a restricted profile: the page goes with the switch', async () => {
     const commits = renderApp('/library')

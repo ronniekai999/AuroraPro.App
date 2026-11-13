@@ -1977,7 +1977,9 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   a title is taken back on screen and said ("Couldn't …"), and a queue in
   which any write failed ends with the profile's list read again from the
   server, which stands. After a switch or a sign-out a refusal does none of
-  this, and is not said (the list on screen is another's). The toast's Undo
+  this, and is not said (the list on screen is another's); that owner is a
+  layout-effect mirror (`libraryWriteOwnerRef`), as the profile and the
+  account are, so all three move in the switch's own commit. The toast's Undo
   only ever restores
   (`undoMayRestore`): nothing when the title is in the list, nothing on
   another profile's list. It was the toggle called again, which re-sent a
@@ -2007,7 +2009,10 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   and fails library writes), `App.profileSwitch.test.tsx` (a removal's toast
   and a refusal across a switch, every commit sampled; a queued Undo sent
   after one, taken or refused, and not sent after a sign-out; a title both
-  profiles have, with the Parent's removal out across a switch) and
+  profiles have, with the Parent's removal out across a switch; a title
+  the Kid's stored copy holds and its list leaves out, with the Parent's
+  save out across a switch; a queue that ends failed across a switch, its
+  read of the Parent's list kept off the Kid's) and
   `App.searchRequest.test.tsx` (a sign-out, an expiry, the TV intent).
 - Known gaps: the owner half of `undoMayRestore` is pinned at the function
   only (once toasts go at a switch no press reaches it in the app); a
@@ -2028,12 +2033,13 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   screen keeps what the queue's last answer left on it until the next
   library read; when a removal and its Undo are both refused, the read
   puts the title back and the Undo's "Couldn't put … back" is still said;
-  the layout-effect
-  mirrors (`buildCardMenuRef`, `restoreToLibRef`) have no deterministic
-  test (a press from a MutationObserver as a card is first drawn came after
-  React had run the passive effects, so it passed with the mirror made
-  passive); a password manager's handling of the two forms (one password
-  input whose `autocomplete` switches) was not tested.
+  the layout-effect mirrors (`buildCardMenuRef`, `restoreToLibRef`, and
+  the write owner `libraryWriteOwnerRef`) have no deterministic test: a
+  press from a MutationObserver as a card is first drawn came after React
+  had run the passive effects, so it passed with the mirror made passive,
+  and every test passes with the write owner made passive too; a password
+  manager's handling of the two forms (one password input whose
+  `autocomplete` switches) was not tested.
 
 ### Nullable database columns
 
