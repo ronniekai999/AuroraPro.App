@@ -167,6 +167,172 @@ for (const [width, height] of [[640, 360], [800, 360], [667, 375], [812, 375], [
   // From md, where the row exists at all, a viewer with no chip row keeps it.
   if (width >= 768 && solo.names === 'none') fail('the range names are hidden for a viewer with no chip row to clear')
 }
+
+// ── The minimised cast card ──────────────────────────────────────────────
+// While a cast runs the player is tucked away and a card stands at the
+// bottom right (`.player-cast-widget`), above the phone's tab bar, above the
+// party's mini dock when one is on screen (both span a phone's width), and
+// to the left of the party's rail when that is open (from 640px, where the
+// rail is a column; under it the rail is the window's width). The page
+// leaves room under its last row for the card and the dock while a card is
+// on the page (`html:has(.player-cast-widget) .stage-shell`, also for the
+// card with no title, which has no player surface), so nothing at the end
+// of a page is held under them. Measured here:
+//   - the card is 360px at most, 16px in from the right (or from the
+//     rail's left edge) and never wider than the room it has;
+//   - under 300px wide (a 320px phone; beside the rail at 640px) it does not
+//     write the position, and from 300px it does;
+//   - it is no taller than the height index.css publishes for it
+//     (--castcard-h), which the page's room and the toasts' lift use;
+//   - it ends above the tab bar where there is one, and at least 8px above
+//     the dock;
+//   - it does not touch the rail, and the middle of each of its buttons is
+//     the button itself (nothing drawn over it);
+//   - scrolled to the end, the page's last control is clear of the card
+//     and the dock;
+//   - on a touch screen (a coarse pointer), each button's target is 44px
+//     each way and no two targets overlap;
+//   - with the dock's reaction picker open (it opens upward from the dock,
+//     towards the card), the middle of each emoji is that emoji's button;
+//     and a dialog's scrim (`fixed inset-0 z-[70]`) over all of it still
+//     covers every emoji and every button of the card. The card goes under
+//     the dock for that, not the dock over the card: the picker can stay
+//     open while a dialog comes up, and raising the dock would put it over
+//     the scrim.
+// The CLASSES of every element of the card, of the dock's box, field, Send
+// button and reaction trigger, of the picker's row and its emoji, and of
+// the rail are read from the source, in the card's source order; the
+// fixture's STRUCTURE (which element holds which) and its words are this
+// file's model of the components, so a change of structure that keeps the
+// classes is not seen here.
+// MUTATION-TESTED: without the page's room the last control is under the
+// card at every width; without the lift the card is 56px into the dock;
+// with the card's old bottom (16px above the safe area) it is 40px over the
+// tab bar; without the rule for the rail the card is under the rail and its
+// buttons are not reachable; with 4px between its buttons their touch
+// targets overlap; without the rule that puts the card under an open
+// picker, emoji in the picker's bottom row are covered by the card; with
+// the dock raised over the card instead, the scrim no longer covers the
+// picker.
+const cardSrc = (() => {
+  const from = src.indexOf('{minimizedActive && (')
+  const to = src.indexOf('\n    )}\n', from)
+  if (from < 0 || to < 0) throw new Error(`verify: ${PLAYER} no longer renders the card under {minimizedActive && ( — this check is out of date, not passing`)
+  return src.slice(from, to)
+})()
+// The classes of the card's own elements: an icon component's (<Play
+// className=…>) is the icon's, not a box of the card's.
+const CARD = [...cardSrc.matchAll(/className="([^"]*)"/g)]
+  .filter(m => /^<[a-z]/.test(cardSrc.slice(cardSrc.lastIndexOf('<', m.index))))
+  .map(m => m[1])
+// card, progress line, its fill, row, text column, title, second line, its
+// words, the written time, then three buttons.
+if (CARD.length !== 12 || CARD[0] !== 'player-cast-widget' || CARD[1] !== 'player-cast-progress' || !CARD.slice(9).every(c => c.includes('w-10 h-10'))) {
+  throw new Error(`verify: the card in ${PLAYER} no longer has the twelve elements this check models (${CARD.length}) — this check is out of date, not passing`)
+}
+if (!cardSrc.includes('data-cast-position=""')) throw new Error(`verify: the card's written time no longer carries data-cast-position — this check is out of date, not passing`)
+const DOCK = classesOf('src/components/MiniDock.tsx', 'stage-party-minidock')
+const DOCK_FIELD = classesOf('src/components/MiniDock.tsx', 'stage-minidock-field')
+const DOCK_SEND = classesOf('src/components/MiniDock.tsx', 'bg-action-soft text-ink')
+const RAIL = classesOf('src/components/PartyPanel.tsx', 'stage-party-rail')
+// The picker: its trigger's dock variant, the row (a template literal, read
+// up to its first static class), and the emoji, as many as lib/reactions
+// lists.
+const PICKER_SRC = fs.readFileSync('src/components/ReactionOverlay.tsx', 'utf8')
+const TRIGGER = (PICKER_SRC.match(/'(stage-minidock-reaction [^']*)'/) ?? [])[1]
+const ROW_TAIL = (PICKER_SRC.match(/className=\{`absolute \$\{popoverV\} \$\{popoverAnchor\} ([^`]*)`\}/) ?? [])[1]
+const EMOJI = classesOf('src/components/ReactionOverlay.tsx', 'w-12 h-12')
+const QUICK = (fs.readFileSync('src/lib/reactions.ts', 'utf8').match(/QUICK_REACTIONS[^=]*=\s*\[([^\]]*)\]/) ?? [])[1]
+if (!TRIGGER || !ROW_TAIL || !QUICK || !PICKER_SRC.includes("const popoverAnchor = placement === 'left' ? 'left-0' : 'right-0'") || !PICKER_SRC.includes("const popoverV = vertical === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'")) {
+  throw new Error('verify: ReactionOverlay.tsx no longer builds the picker this check models — this check is out of date, not passing')
+}
+const EMOJI_COUNT = QUICK.split(',').length
+// The dialogs' scrim, as the app's dialogs draw it.
+const SCRIM = 'fixed inset-0 z-[70]'
+if (!fs.readFileSync('src/components/BugReportModal.tsx', 'utf8').includes(`className="${SCRIM} `)) throw new Error('verify: BugReportModal.tsx no longer draws its scrim at fixed inset-0 z-[70] — this check is out of date, not passing')
+const castPage = ({ dock, rail, tabbar, picker, scrim, surface = true }) => `<!doctype html>
+<html${surface ? ' data-player-surface="minimized"' : ''}${dock ? ' data-party-dock="open"' : ''}${rail ? ' data-party-rail="open"' : ''}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>${css}</style></head>
+<body style="margin:0">
+<main class="min-h-screen stage-shell"><div style="height:1400px"></div><button type="button" id="last" style="display:block;width:100%;height:44px">The page's last control</button></main>
+${tabbar ? '<nav id="tabbar" class="stage-tabbar"></nav>' : ''}
+<div id="card" class="${CARD[0]}"><div class="${CARD[1]}"><div class="${CARD[2]}" style="width:40%"></div></div><div class="${CARD[3]}">
+  <div class="${CARD[4]}"><p class="${CARD[5]}">Night Train to Meridian</p><p class="${CARD[6]}"><span class="${CARD[7]}">Casting to Living Room TV</span><span class="${CARD[8]}" data-cast-position="">· 1:41:07</span></p></div>
+  <button type="button" class="${CARD[9]}">P</button><button type="button" class="${CARD[10]}">E</button><button type="button" class="${CARD[11]}">X</button>
+</div></div>
+${dock ? `<div id="dock" class="${DOCK}"><div class="relative flex-none"><button type="button" class="${TRIGGER}"${picker ? ' data-open="true" aria-expanded="true"' : ' aria-expanded="false"'}>:)</button>${picker ? `<div id="picker" role="group" class="absolute bottom-full mb-1 left-0 ${ROW_TAIL}">${Array.from({ length: EMOJI_COUNT }, (_, i) => `<button type="button" class="${EMOJI}">${i}</button>`).join('')}</div>` : ''}</div><input type="text" class="${DOCK_FIELD}"><button type="button" class="${DOCK_SEND}">m</button></div>` : ''}
+${rail ? `<aside id="rail" class="${RAIL}"></aside>` : ''}
+${scrim ? `<div id="scrim" class="${SCRIM}"></div>` : ''}
+</body></html>`
+const measureCard = () => {
+  scrollTo(0, document.documentElement.scrollHeight)
+  const box = el => { if (!el) return null; const b = el.getBoundingClientRect(); return { left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width, height: b.height } }
+  const r = id => box(document.getElementById(id))
+  const centre = el => { const x = el.getBoundingClientRect(); return document.elementFromPoint(x.left + x.width / 2, x.top + x.height / 2) }
+  const buttons = [...document.querySelectorAll('#card button')].map(b => {
+    const x = b.getBoundingClientRect()
+    const before = getComputedStyle(b, '::before')
+    const grow = before.content !== 'none' && before.position === 'absolute' ? -parseFloat(before.top || '0') : 0
+    const at = centre(b)
+    return { left: x.left - grow, right: x.right + grow, top: x.top - grow, bottom: x.bottom + grow, reachable: !!at && b.contains(at), scrim: at?.id === 'scrim' }
+  })
+  const emoji = [...document.querySelectorAll('#picker button')].map(b => { const at = centre(b); return { reachable: !!at && b.contains(at), scrim: at?.id === 'scrim' } })
+  const published = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--castcard-h'))
+  const position = getComputedStyle(document.querySelector('#card [data-cast-position]')).display !== 'none'
+  return { position, card: r('card'), dock: r('dock'), tabbar: r('tabbar'), rail: r('rail'), last: r('last'), buttons, emoji, published, coarse: matchMedia('(pointer: coarse)').matches }
+}
+const checkCard = (m, width, { touch, picker, scrim }) => {
+  if (scrim) {
+    m.buttons.forEach((b, i) => { if (!b.scrim) fail(`with a dialog's scrim up, the card's button ${i + 1} is drawn over it`) })
+    m.emoji.forEach((e, i) => { if (!e.scrim) fail(`with a dialog's scrim up, emoji ${i + 1} of the open picker is drawn over it`) })
+    if (m.emoji.length !== EMOJI_COUNT) fail(`the picker has ${m.emoji.length} emoji, not ${EMOJI_COUNT}`)
+    return
+  }
+  const room = m.rail && width >= 640 ? m.rail.left - 16 : width - 16
+  if (!(m.published > 0)) fail('index.css publishes no --castcard-h: this check is out of date')
+  if (m.card.height > m.published + 0.5) fail(`the card is ${m.card.height}px high, taller than the ${m.published}px index.css publishes for it`)
+  if (m.card.width > 360.5) fail(`the card is ${Math.round(m.card.width)}px wide, over 360`)
+  if (m.position !== (m.card.width >= 300)) fail(`the card is ${Math.round(m.card.width)}px wide and ${m.position ? 'writes' : 'does not write'} the position (it is left out under 300px, where it took the device's name down to "Casting to…")`)
+  if (m.card.left < 15.5 || Math.abs(m.card.right - room) > 0.5) fail(`the card is not 16px in from ${m.rail && width >= 640 ? "the rail's left edge" : 'the right'} within the window (${Math.round(m.card.left)}-${Math.round(m.card.right)})`)
+  if (m.rail && width >= 640 && m.card.right > m.rail.left - 0.5) fail(`the card runs ${Math.round(m.card.right - m.rail.left)}px under the rail`)
+  if (!picker) m.buttons.forEach((b, i) => { if (!b.reachable) fail(`the card's button ${i + 1} has something drawn over its middle`) })
+  if (picker) {
+    if (m.emoji.length !== EMOJI_COUNT) fail(`the picker has ${m.emoji.length} emoji, not ${EMOJI_COUNT}`)
+    const covered = m.emoji.filter(e => !e.reachable).length
+    if (covered) fail(`${covered} of ${m.emoji.length} emoji in the open picker have something drawn over their middle`)
+  }
+  if (m.tabbar && m.card.bottom > m.tabbar.top + 0.5) fail(`the card ends ${Math.round(m.card.bottom - m.tabbar.top)}px over the tab bar`)
+  if (m.dock && m.card.bottom > m.dock.top - 8 + 0.5) fail(`the card ends ${Math.round(m.card.bottom - m.dock.top)}px from the dock's top (need 8px clear)`)
+  if (m.last.bottom > m.card.top + 0.5) fail(`the page's last control, scrolled to the end, is ${Math.round(m.last.bottom - m.card.top)}px under the card`)
+  if (m.dock && m.last.bottom > m.dock.top + 0.5) fail(`the page's last control, scrolled to the end, is under the dock`)
+  if (touch) {
+    if (!m.coarse) fail('the touch pass has no coarse pointer: this model is out of date')
+    m.buttons.forEach((b, i) => {
+      if (b.right - b.left < 43.5 || b.bottom - b.top < 43.5) fail(`the card's button ${i + 1} is a ${Math.round(b.right - b.left)}x${Math.round(b.bottom - b.top)}px target on a touch screen, under 44`)
+      const next = m.buttons[i + 1]
+      if (next && b.right > next.left + 0.5) fail(`the touch targets of the card's buttons ${i + 1} and ${i + 2} overlap by ${Math.round(b.right - next.left)}px`)
+    })
+  }
+}
+console.log('\n## The minimised cast card: its place, the rail, the picker, and the page\'s room for it')
+const PICKER_WIDTHS = [320, 390, 768]
+for (const [width, height, touch] of [[320, 640, true], [390, 844, true], [640, 800, true], [768, 1024, true], [1024, 768, false], [1440, 900, false]]) {
+  const cases = ['none', 'dock', 'rail', 'bare', 'picker', 'scrim']
+  for (const party of cases) {
+    if (party === 'rail' && width < 640) continue
+    if ((party === 'picker' || party === 'scrim') && !PICKER_WIDTHS.includes(width)) continue
+    if (party === 'bare' && width !== 390 && width !== 1440) continue
+    const picker = party === 'picker' || party === 'scrim'
+    const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1, ...(touch ? { hasTouch: true, isMobile: true } : {}) })
+    const tab = await context.newPage()
+    await tab.setContent(castPage({ dock: party === 'dock' || picker, rail: party === 'rail', tabbar: width < 768, picker, scrim: party === 'scrim', surface: party !== 'bare' }))
+    const m = await tab.evaluate(measureCard)
+    await context.close()
+    const label = { none: '', dock: ' with the dock', rail: ' with the rail', bare: ', no player surface', picker: ' with the picker open', scrim: ', picker open, under a scrim' }[party]
+    const where = `${width}x${height}${label}${touch ? ', touch' : ''}`
+    console.log(`── ${where.padEnd(44)} card ${Math.round(m.card.left)}-${Math.round(m.card.right)} x ${Math.round(m.card.top)}-${Math.round(m.card.bottom)}${m.rail ? `  rail from ${Math.round(m.rail.left)}` : ''}${m.dock ? `  dock from ${Math.round(m.dock.top)}` : ''}${m.tabbar ? `  tab bar from ${Math.round(m.tabbar.top)}` : ''}${m.emoji.length ? `  emoji reachable ${m.emoji.filter(e => e.reachable).length}/${m.emoji.length}` : ''}  last control ends ${Math.round(m.last.bottom)}`)
+    checkCard(m, width, { touch, picker, scrim: party === 'scrim' })
+  }
+}
 await browser.close()
 console.log(`\n${problems} player-lane problem(s).`)
 process.exit(problems ? 1 : 0)

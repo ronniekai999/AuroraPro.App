@@ -279,6 +279,7 @@
     --action: #ffffff;
     --on-action: #0e0f11;
     --action-soft: rgba(255, 255, 255, 0.1);
+    --action-soft-hover: rgba(255, 255, 255, 0.16); /* a soft fill's hover: one step above --action-soft */
     --track: rgba(255, 255, 255, 0.22);
     --ok: #4ade80;
     --warn: #fbbf24;
@@ -297,13 +298,8 @@
      a Subtle glow choice stored by an older build, which was the same
      lever). For weak or integrated GPUs: backdrop blur over playing video
      repaints every frame, so every surface that blurs drops to a flat
-     fill here. The rules that honour it sit beside the surfaces they
-     change, keyed on the same attribute. */
-  html[data-effects="reduced"] .aurora-glass-overlay {
-    backdrop-filter: none !important;
-    -webkit-backdrop-filter: none !important;
-    background: var(--surface-raised) !important;
-  }
+     fill. The rules that honour it sit beside the surfaces they change,
+     keyed on the same attribute. */
 
   body {
     @apply bg-background text-foreground;
@@ -3731,22 +3727,85 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 }
 
 /* The floating control for a cast or AirPlay session while the player itself
-   is tucked away. Bottom left, above the phone tab bar's reach. */
-/* Its place and height (16px up, 114px high: two 40px rows, 10px between,
-   12px of padding) are what the toasts and the update notice stack above
-   (.toast-stack, --corner-base); scripts/verify-mobile-layout.mjs checks
-   they clear it. */
+   is tucked away. Bottom right, above the phone's tab bar.
+   Where it stands is published on the root, so that what must stay clear of
+   it reads one set of figures: --castcard-bottom (its bottom edge, up from
+   the window's), --castcard-h (its height: 64px holds both of the player's
+   cards, 63px with the progress line and 60px without, each one row of
+   40px buttons and single-line text) and, while a card is on the page,
+   --castcard-top. The page's room for it is below; the toasts and the update
+   notice stand above it (.toast-stack); scripts/verify-player-lane.mjs and
+   scripts/verify-mobile-layout.mjs measure the real card against them. */
+html {
+  --castcard-h: 64px;
+  --castcard-bottom: calc(16px + var(--tabbar-space, 0px));
+}
+html:has(.player-cast-widget) {
+  --castcard-top: calc(var(--castcard-bottom) + var(--castcard-h));
+}
 .player-cast-widget {
   position: fixed;
-  left: 16px;
-  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  right: 16px;
+  bottom: var(--castcard-bottom);
   z-index: 70;
-  width: 300px;
-  max-width: calc(100vw - 32px);
-  padding: 12px;
+  width: 360px;
+  /* Percentages of a fixed box are of the window without its scrollbar;
+     100vw would count a classic scrollbar. */
+  max-width: calc(100% - 32px);
+  box-sizing: border-box;
+  overflow: hidden;
   border-radius: var(--radius-control);
   background: var(--surface-raised-2);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+/* Under 300px (beside the open rail from 640px to about 700px, and on a
+   320px phone) the card has too little room for both the device's name and
+   the written position: the position took the name down to "Casting to…".
+   It keeps the name; the progress line still shows how far it has played. */
+.player-cast-widget { container-type: inline-size; }
+@container (max-width: 299.5px) {
+  .player-cast-widget [data-cast-position] { display: none; }
+}
+/* The receiver's progress, along the card's top edge. */
+.player-cast-progress {
+  height: 3px;
+  background: var(--track);
+  overflow: hidden;
+}
+/* With the party's mini dock on screen (bottom centre, `data-party-dock`),
+   the card stands above it: on a phone both span the width. The dock is
+   8px of padding round a 40px row (44px on a touch screen). */
+html[data-party-dock] {
+  --castcard-bottom: calc(16px + var(--tabbar-space, 0px) + 60px + 12px);
+}
+/* With the party's rail open (`data-party-rail`), which is a 340px column
+   16px from the right from 640px and is drawn over anything at its layer,
+   the card stands to its left with the same 16px gap, and gives up width
+   where the two do not both fit. Under 640px the rail is the window's
+   width and covers either corner. */
+@media (min-width: 640px) {
+  html[data-party-rail] .player-cast-widget {
+    right: calc(16px + 340px + 16px);
+    width: min(360px, calc(100% - 16px - 340px - 16px - 16px));
+  }
+}
+/* The dock's reaction picker opens upward, about 116px, from a dock that is
+   a stacking context at z-index 67, so the picker cannot be drawn over the
+   card at 70 (12px above the dock) and the card hid its bottom row. While
+   the picker is open the card goes under the dock instead. The dock is not
+   raised: the picker stays open until its trigger, a pick or Escape closes
+   it, so it can still be open when a dialog's scrim (z-index 70) comes up,
+   and the scrim must cover it. */
+html:has(.stage-party-minidock .stage-minidock-reaction[aria-expanded="true"]) .player-cast-widget {
+  z-index: 66;
+}
+/* While a card is on the page (also the one with no title, which a
+   receiver rejoined after a reload shows with no player surface), the page
+   leaves room under its last row for it, and for the dock under it when a
+   party's is on screen, so nothing at the end of a page is held under
+   them: 16px clear of the card's top. */
+html:has(.player-cast-widget) .stage-shell {
+  padding-bottom: calc(var(--castcard-top) + 16px);
 }
 
 /* NOTE — no .stage-band / .stage-band-live here on purpose. The mockup
@@ -5220,11 +5279,13 @@ textarea:focus-visible {
   z-index: 58;
   bottom: var(--corner-base);
 }
-/* Two things of the player's are in this corner too.
-   Minimized while it casts, the player is a card here (.player-cast-widget:
-   16px from the bottom, 114px high, drawn under the toasts): the notice and
-   the toasts stack above it, 12px clear. A toast used to lie across its
-   pause button.
+/* Two things of the player's reach this corner.
+   Minimized while it casts, the player is a card at the bottom (right, and
+   at the left beside an open party rail from 640px to about 750px; the
+   window's width on a phone): while it is on the page the notice and the
+   toasts stand above its top edge (--castcard-top, published with the
+   card), 12px clear, at every width. A toast used to lie across its pause
+   button.
    In the window, the transport's play, skip and mute are in this corner
    (and audio, speed and full screen in the other, which the toasts covered
    before they moved here), and the lane above the timeline is the Skip
@@ -5233,7 +5294,7 @@ textarea:focus-visible {
    the same published figures. The notice is under the player there. */
 html:has(.player-cast-widget) .toast-stack,
 html:has(.player-cast-widget) .update-notice {
-  --corner-base: max(calc(16px + var(--tabbar-space, 0px)), calc(142px + env(safe-area-inset-bottom, 0px)));
+  --corner-base: calc(var(--castcard-top) + 12px);
 }
 html[data-player-surface="theater"] .toast-stack {
   bottom: calc(var(--theater-inset-y) + var(--player-timeline-top) + 88px + var(--player-dock-lift));
@@ -5617,6 +5678,19 @@ input.onboarding-field:not([type="range"]) {
   font-size: 17px;
 }
 input.onboarding-field:disabled { opacity: 0.5; cursor: not-allowed; }
+/* The party mini dock's quick reply: a 40px field on the page's colour
+   inside the raised dock (44px on a touch screen). The global field rule
+   would otherwise give it the raised fill and 12px padding; its focus rule
+   still wins over this one, so the field's focus border is unchanged. */
+input.stage-minidock-field:not([type="range"]) {
+  height: 40px;
+  padding: 0 12px;
+  font-size: 14px;
+  background: var(--surface-page);
+}
+@media (hover: none), (pointer: coarse) {
+  input.stage-minidock-field:not([type="range"]) { height: 44px; }
+}
 .onboarding-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));

@@ -136,6 +136,7 @@ import {
   type PlaybackDeliveryMode,
 } from '@/lib/partyPlayer'
 import { nextUpArmSecond, type ReceivedSeekPayload } from '@/lib/party'
+import { formatResumeTime } from '@/lib/format'
 
 // M10 Phase 4 — party-sync handle. When provided, the player mirrors
 // the party's playback state (pause/play/seek) and, for the host,
@@ -7016,7 +7017,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // belongs to whatever of the player's is open (lib/escapeLayers).
         data-escape-layers=""
       >
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 py-2.5 pl-3.5 pr-2">
           <Cast size={18} className="text-ink-2 shrink-0" />
           <div className="min-w-0 flex-1">
             <p className="text-[14px] font-semibold text-ink truncate">{cast.remote.title || 'Casting'}</p>
@@ -7026,7 +7027,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             type="button"
             onClick={() => { cast.stop(); onClose() }}
             aria-label="Stop casting"
-            className="w-10 h-10 grid place-items-center rounded-control text-ink-2 hover:text-danger-ink hover:bg-action-soft transition-colors"
+            className="stage-hit44 w-10 h-10 grid place-items-center rounded-control text-ink-2 hover:text-danger-ink hover:bg-action-soft transition-colors"
           >
             <StopCircle size={18} />
           </button>
@@ -7109,6 +7110,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     return anchor === null ? cast.remote.duration : cast.remote.duration + anchor
   }
   const widgetDurSec = cast.status.connected ? castAbsDurationSec() : realDurationSec
+  // The position the card writes out: only one the player can vouch for.
+  // On a receiver that is its reading turned absolute, which is null while
+  // the anchor is not known or the receiver's clock is not trusted (the bar
+  // above falls back to the raw reading; a written time does not). Under
+  // AirPlay it is the local element's, once it knows the file's length. An
+  // unknown position is left out, never written as 0:00.
+  const widgetKnownSec = cast.status.connected
+    ? recvToAbsSec(cast.remote.currentTime)
+    : realDurationSec > 0 ? currentSec : null
   const widgetToggle = () => {
     if (cast.status.connected) { resumeCast(); return }
     const v = videoRef.current
@@ -7889,60 +7899,62 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // belongs to whatever of the player's is open (lib/escapeLayers).
         data-escape-layers=""
       >
-        <div className="flex items-center gap-2">
-          {cast.status.connected ? (
-            <Cast size={18} className="text-ink-2 shrink-0" />
-          ) : (
-            <Airplay size={18} className="text-ink-2 shrink-0" />
-          )}
+        {/* How far it has played, along the card's top edge. Decorative:
+            the time is written beside the device's name. */}
+        <div className="player-cast-progress" aria-hidden="true">
+          <div
+            className="h-full bg-action"
+            style={{
+              width: `${
+                widgetDurSec > 0
+                  ? Math.min(100, Math.max(0, (widgetCurSec / widgetDurSec) * 100))
+                  : 0
+              }%`,
+            }}
+          />
+        </div>
+        <div className="flex items-center gap-2 py-2.5 pl-3.5 pr-2">
           <div className="min-w-0 flex-1">
             <p className="text-[14px] font-semibold text-ink truncate">{target.title}</p>
-            <p className="text-[12px] text-ink-2 truncate">
-              {cast.status.connected
-                ? `Casting to ${cast.status.deviceName ?? 'device'}`
-                : 'Playing via AirPlay'}
+            {/* Where it plays, in words ("Casting to", "via AirPlay"): the
+                card's width goes to the device's name. */}
+            <p className="flex items-center gap-1 text-[12px] text-ink-2">
+              <span className="min-w-0 truncate">
+                {cast.status.connected
+                  ? `Casting to ${cast.status.deviceName ?? 'device'}`
+                  : 'Playing via AirPlay'}
+              </span>
+              {widgetKnownSec !== null && (
+                <span className="shrink-0 tabular-nums" data-cast-position="">· {formatResumeTime(widgetKnownSec * 1000)}</span>
+              )}
             </p>
           </div>
+          <button
+            type="button"
+            onClick={widgetToggle}
+            aria-label={widgetPaused ? 'Play' : 'Pause'}
+            className="stage-hit44 w-10 h-10 grid place-items-center shrink-0 rounded-control text-ink hover:bg-action-soft transition-colors"
+          >
+            {widgetPaused ? <Play size={20} className="ml-0.5" fill="currentColor" strokeWidth={0} /> : <Pause size={20} fill="currentColor" strokeWidth={0} />}
+          </button>
           <button
             type="button"
             onClick={() => setMinimized(false)}
             title="Expand player"
             aria-label="Expand player"
-            className="w-10 h-10 grid place-items-center rounded-control text-ink-2 hover:text-ink hover:bg-action-soft transition-colors"
+            className="stage-hit44 w-10 h-10 grid place-items-center shrink-0 rounded-control text-ink hover:bg-action-soft transition-colors"
           >
-            <Maximize2 size={18} />
+            <Maximize2 size={20} />
           </button>
           <button
             type="button"
             onClick={widgetStopAndClose}
             title={cast.status.connected ? 'Stop casting' : 'Stop'}
             aria-label="Stop and close"
-            className="w-10 h-10 grid place-items-center rounded-control text-ink-2 hover:text-danger-ink hover:bg-action-soft transition-colors"
+            className="stage-hit44 w-10 h-10 grid place-items-center shrink-0 rounded-control text-ink hover:text-danger-ink hover:bg-action-soft transition-colors"
           >
-            <X size={18} />
+            <X size={20} />
           </button>
-        </div>
-        <div className="mt-2.5 flex items-center gap-3">
-          <button
-            type="button"
-            onClick={widgetToggle}
-            aria-label={widgetPaused ? 'Play' : 'Pause'}
-            className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-action text-action-on hover:brightness-95 shrink-0 transition-[filter]"
-          >
-            {widgetPaused ? <Play size={16} className="ml-0.5" fill="currentColor" strokeWidth={0} /> : <Pause size={16} fill="currentColor" strokeWidth={0} />}
-          </button>
-          <div className="h-[3px] flex-1 rounded-full bg-[var(--track)] overflow-hidden">
-            <div
-              className="h-full bg-action"
-              style={{
-                width: `${
-                  widgetDurSec > 0
-                    ? Math.min(100, Math.max(0, (widgetCurSec / widgetDurSec) * 100))
-                    : 0
-                }%`,
-              }}
-            />
-          </div>
         </div>
       </div>
     )}

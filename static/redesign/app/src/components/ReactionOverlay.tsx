@@ -164,9 +164,10 @@ interface PickerProps {
   // out mid-read in fullscreen.
   onOpenChange?: (open: boolean) => void
   // "player": the trigger is one of the player's own bar buttons (48px, no
-  // fill on the picture). Default: a compact trigger with its own fill, for
-  // the party panel's composer and the mini dock.
-  variant?: 'compact' | 'player'
+  // fill on the picture). "dock": a 40px button with no fill of its own,
+  // for the party's mini dock, which is the fill. Default: a compact
+  // trigger with its own fill, for the party panel's composer.
+  variant?: 'compact' | 'player' | 'dock'
 }
 
 export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', onOpenChange, variant = 'compact' }: PickerProps) {
@@ -223,7 +224,9 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', o
         onClick={() => setOpen(o => !o)}
         className={variant === 'player'
           ? 'stage-tr-btn grid text-[20px]'
-          : 'w-10 h-10 grid place-items-center rounded-control bg-action-soft text-[18px] hover:bg-white/[0.16] transition-colors'}
+          : variant === 'dock'
+            ? 'stage-minidock-reaction stage-hit44 w-10 h-10 grid place-items-center rounded-control text-[18px] hover:bg-action-soft data-[open]:bg-action-soft transition-colors'
+            : 'w-10 h-10 grid place-items-center rounded-control bg-action-soft text-[18px] hover:bg-white/[0.16] transition-colors'}
         data-open={open || undefined}
         aria-label="Send a reaction"
         aria-expanded={open}

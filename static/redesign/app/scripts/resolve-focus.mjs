@@ -213,8 +213,8 @@ const RUN_DIRECTLY = import.meta.url === pathToFileURL(process.argv[1] ?? '').hr
 if (RUN_DIRECTLY) {
 
 const CASES = [
-  { name: 'MiniDock chat input, focused (MiniDock.tsx:74)',
-    el: { tag: 'input', classes: ['focus:outline-none', 'border-0'], attrs: { type: 'text' }, states: [':focus', ':focus-visible'], ancestors: [] } },
+  { name: 'MiniDock chat input, focused (MiniDock.tsx, the quick reply)',
+    el: { tag: 'input', classes: ['stage-minidock-field', 'min-w-0', 'flex-1'], attrs: { type: 'text' }, states: [':focus', ':focus-visible'], ancestors: [] } },
   { name: 'BugReportModal input, focused (the Title field: no focus utilities of its own)',
     el: { tag: 'input', classes: ['w-full', 'disabled:opacity-50', 'read-only:opacity-60'], attrs: { type: 'text' }, states: [':focus', ':focus-visible'], ancestors: [] } },
   { name: 'a plain focused BUTTON with focus:outline-none and no ring',

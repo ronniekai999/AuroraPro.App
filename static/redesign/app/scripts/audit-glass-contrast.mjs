@@ -715,11 +715,9 @@ const SEARCH = 'src/components/SearchView.tsx'
 // text-purple-200/40); alpha stacked by a parent's opacity-*; class names
 // built at runtime; fills lighter than the floor surfaces (/50 holds 4.5:1 up
 // to about white/0.10); and translucent overlays over video. The party rail
-// (rgba(12,10,20,0.4)) and the mini dock (rgba(8,6,14,0.5)) sit on the
-// picture: over a white frame, /50 text measures 1.7 and 2.1:1, and even
-// full white only 2.7 and 3.8:1. /50 needs fills of about 0.85 and 0.83
-// there, near the opaque 0.92 the Subtle glow setting already uses, which is
-// a design decision rather than a contrast fix.
+// and the mini dock, which sit on the picture, were such overlays (over a
+// white frame their faint text measured about 2:1); both are now opaque
+// raised surfaces, the same as the panels measured below.
 
 const FLOOR_SURFACES = {
   'page ink --surface-page': [INK],

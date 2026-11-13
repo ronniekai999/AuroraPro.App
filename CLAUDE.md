@@ -1994,16 +1994,25 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   over the page too; a cast minimised covers nothing. The trailer, the
   player's menus and the party's leave question take the key first
   (`lib/escapeLayers`); so does the recap, which stops the key itself.
-- The toasts' corner (bottom left) is also the player's: its card while it
-  casts minimized (`.player-cast-widget`), and in the window its play, skip
-  and mute. The update notice and the toasts stack above the card
-  (`--corner-base`, by `html:has(.player-cast-widget)`; the card's 114px is
-  written into that rule), and with the player in the window a toast goes
-  to the row above the timeline's lane (`--player-timeline-top` + 88px, the
-  player's own `.player-lane-upper`). `scripts/verify-mobile-layout.mjs`
-  checks both against the built stylesheet, with the card's class lists
-  read from the player. A toast in the window can lie over the party's chat
-  ticker for its few seconds; no cast session was rendered.
+- The toasts' corner (bottom left) is reached by two things of the
+  player's. Its card while it casts minimized (`.player-cast-widget`) is at
+  the bottom right, the window's width on a phone (and above a party's
+  dock), and at the bottom left beside an open party rail from 640px to
+  about 750px; index.css publishes where it stands (`--castcard-bottom`,
+  `--castcard-h`, 64px for both of the player's cards, and, while a card
+  is on the page, `--castcard-top`), and the update notice and the toasts
+  stand 12px above `--castcard-top` at every width (`--corner-base`, by
+  `html:has(.player-cast-widget)`). In the window the player's play, skip
+  and mute are in the corner, and a toast goes to the row above the
+  timeline's lane (`--player-timeline-top` + 88px, the player's own
+  `.player-lane-upper`). `scripts/verify-mobile-layout.mjs` checks both
+  against the built stylesheet, the card's classes read from the player:
+  a toast and the notice clear of the card, alone, with the dock at phone
+  widths and beside the rail, and the card's buttons still reachable; the
+  card's height against `--castcard-h` is checked in
+  `scripts/verify-player-lane.mjs`. A toast in the window can lie over the
+  party's chat ticker for its few seconds; the renders put the card's
+  markup on a page, and no real cast session was rendered.
 - Pinned by `AuthView.test.tsx`, `Toast.test.tsx`, `lib/libraryUndo.test.ts`,
   `lib/devicePairing.test.ts`, `App.cardMenu.test.tsx` (a stub that holds
   and fails library writes), `App.profileSwitch.test.tsx` (a removal's toast

@@ -1040,3 +1040,59 @@ for(const reason of ['FINISHED','CANCELLED'] as const) it(`Independent 4cf first
   expect(ended).toHaveBeenCalledTimes(reason==='FINISHED'?1:0)
   expect(fake.cast.stop).toHaveBeenCalledOnce()
 })
+
+// The card writes out the receiver's position only when the player can
+// vouch for it: the receiver's reading on a trusted clock, made absolute by
+// the cast's anchor. An unknown position is left out, never shown as 0:00.
+describe('the cast card\'s written position', () => {
+  async function minimisedCast() {
+    const close = vi.fn(), ended = vi.fn(async () => false)
+    const element = () => <VideoPlayer target={movie} onClose={close} onEnded={ended} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
+    return { view, element }
+  }
+  const position = () => document.querySelector('[data-cast-position]')
+
+  it('is the receiver\'s reading made absolute, beside the device', async () => {
+    const { view, element } = await minimisedCast()
+    const card = screen.getByRole('dialog', { name: 'Cast controls' })
+    Object.assign(fake.cast.remote, { currentTime: 41, updateSeq: fake.cast.remote.updateSeq + 1, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1 })
+    view.rerender(element()); await settle()
+    expect(card).toHaveTextContent('Casting to TV')
+    expect(position()?.textContent).toBe('· 2:21')
+    // The bar carries no value of its own: it is drawn, not read.
+    expect(card.querySelector('.player-cast-progress')).toHaveAttribute('aria-hidden', 'true')
+  })
+
+  // A cast token that names no start: the anchor is not known, so the
+  // receiver's reading cannot be made absolute.
+  it('is left out when the cast token names no start', async () => {
+    const { start_sec: _unknown, ...noStart } = castTokenFor('cast-copy')
+    void _unknown
+    vi.mocked(createCastToken).mockReset().mockResolvedValue({ ...noStart, segment_format: 'fmp4' } as Awaited<ReturnType<typeof createCastToken>>)
+    const { view, element } = await minimisedCast()
+    Object.assign(fake.cast.remote, { currentTime: 41, updateSeq: fake.cast.remote.updateSeq + 1, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1 })
+    view.rerender(element()); await settle()
+    const card = screen.getByRole('dialog', { name: 'Cast controls' })
+    expect(card).toHaveTextContent('Casting to TV')
+    expect(position()).toBeNull()
+    expect(card.textContent).not.toMatch(/\d:\d\d/)
+  })
+
+  // The card's buttons, in the order the design gives them.
+  it('offers play or pause, expand and stop, in that order', async () => {
+    await minimisedCast()
+    const card = screen.getByRole('dialog', { name: 'Cast controls' })
+    expect(within(card).getAllByRole('button').map(b => b.getAttribute('aria-label'))).toEqual(['Pause', 'Expand player', 'Stop and close'])
+  })
+
+  it('is left out while the receiver\'s clock is not this media\'s', async () => {
+    const { view, element } = await minimisedCast()
+    Object.assign(fake.cast.remote, { clockContentId: null, currentTime: 41, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle()
+    expect(screen.getByRole('dialog', { name: 'Cast controls' })).toHaveTextContent('Casting to TV')
+    expect(position()).toBeNull()
+    expect(screen.getByRole('dialog', { name: 'Cast controls' }).textContent).not.toMatch(/0:00/)
+  })
+})
