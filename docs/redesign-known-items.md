@@ -2,7 +2,7 @@
 
 Gaps that the web app's redesign (pull request #558) knowingly leaves, by
 screen. Each was found by an independent review or by the builders, judged
-acceptable for this pull request, and left as described; where an item is
+acceptable for it, and left as described; where an item is
 older than the redesign, or needs server work, it says so. What could not be
 checked at all in the build environment is in
 [`redesign-device-checks.md`](redesign-device-checks.md).
@@ -39,12 +39,15 @@ Fix or file each item, and delete it here when it is no longer true.
   a measured 0% of buffering; it says so, and the missing denominators are
   server work. A restore's outcome is kept for the account's id from before
   the restore, so after a restore from another install's backup the admin may
-  not be told; it is kept in memory, so a reload loses it. An answer that
-  lands after its panel has gone is said nowhere, except a restore's.
-  Approving one request while another row's approve or deny is out can unlock
-  the first while it is still out, and the server's approve is not atomic
-  (older than the redesign; the page's guard is being fixed). The leave-page
-  check was not seen in a real browser.
+  not be told; it is kept in memory, so a reload loses it. On the Admin page,
+  an answer that lands after its section has been left is said nowhere, except
+  a restore's outcome and the AI settings' restart notice (shown when that
+  section is opened again). The server's approve checks a request's status and
+  then writes it with nothing atomic between, so two approves of one request
+  at once could both pass and send it to the downloader twice (server, older
+  than the redesign); the page no longer sends a second approve while one is
+  out. The browser's leave-this-page check, held while a restore is out, was
+  not seen in a real browser.
 - Report a bug: a pick from the picker that an unreadable startup binding
   opens is not counted as a switch, so a dialog opened in that moment stays
   open across it; a remembered title page that the profile may no longer see
@@ -122,14 +125,12 @@ Fix or file each item, and delete it here when it is no longer true.
 - Failure words: a step back can still be taken twice in the few milliseconds
   between a press on Back and the browser applying it. A request already out
   when a session ends still completes, and a toast it raises is shown to the
-  next session on the tab (as before the redesign). A 404 that lands while a
-  profile switch attempt is out is dropped; if the attempt ends on the same
-  profile (a cancelled PIN prompt), the dead title page stays up until
-  something reads the title again (a fix is under way). The closing of an open
-  question on a sign-out and on an expiry is pinned only together with the
-  switch's. The native-box test does not see `(window as any).confirm`, a
-  destructured alias or a computed key. Ask Previously's 409 says "Ask again"
-  also in the two cases where asking again cannot work (a fix is under way). A
+  next session on the tab (as before the redesign). The clear of an open
+  question in `resetUserState` is not pinned on its own: both of its callers
+  also sign the tab out, which runs the signed-out effect, whose clear is
+  pinned. The native-box test does not see a destructured alias, `.bind`, a
+  computed key, a name built at run time, or a call hidden behind JSX text
+  that contains `//` (to the end of its line) or `/*` (to the next `*/`). A
   party socket's error frames are still the server's bare strings (they carry
   no status or reason to word them by).
 - Session expiry (older than the redesign): a session that expires signs the
@@ -139,12 +140,12 @@ Fix or file each item, and delete it here when it is no longer true.
   and, now, Tonight's hero and Continue Watching are cleared. What else the
   tab keeps for the previous user on that path (the browse grids and their
   totals, which Tonight's closing line falls back to until its own count
-  answers; an open title) was not audited here.
+  answers; an open title) was not audited in the redesign.
 - Share image (server, older than the redesign, found by reading and not
   reproduced): the server builds a TMDB address from a party's stored poster
   path assuming it starts with a slash, and the web app stores it without one,
   so the share image of a party started from the web app is composed without
-  its poster. Server code, so not changed here.
+  its poster. Server code, so not changed in the redesign.
 - Search: a description search cannot tell "nothing found" from "not set up on
   this server" (the server does not say), so the page says either may be the
   case. The results held while the next words are out keep their headings. On
