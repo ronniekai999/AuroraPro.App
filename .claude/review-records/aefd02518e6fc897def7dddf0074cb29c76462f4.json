@@ -1,0 +1,10 @@
+{
+  "sha": "aefd02518e6fc897def7dddf0074cb29c76462f4",
+  "verdict": "lows-only",
+  "summary": "Page cross-fade into the title page while the poster travels (root captured only during a travelled open, 200 ms, entrance not doubled, dropped opens skip their transition, phones unchanged, reduced motion unchanged) and a motion audit that reads view-transition rules as Chromium does with self-tests. Three review rounds lows-only; last low (a keyframes name repeating a shorthand keyword gets past Check 5c) written down in docs/redesign-known-items.md",
+  "reviewer": "fresh-context-agent-a99f2937",
+  "findings": "1",
+  "diff_digest": "e11ee8a3c0ba614ea9269eed3227936def821d9daa4569b884358e84a6d1b5fc",
+  "branch": "claude/affectionate-faraday-zwoxvl-crossfade",
+  "recorded_at": "2026-11-13T17:32:25Z"
+}

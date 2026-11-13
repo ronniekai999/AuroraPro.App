@@ -111,11 +111,62 @@ Fix or file each item, and delete it here when it is no longer true.
   not run). The written position leaves the card while the receiver buffers.
   While the picker is open the chat ticker can be drawn over the card. No real
   cast session was rendered.
-- Motion: a waiting open is dropped by the app's Back, a destination or Play,
-  but not by the browser's own Back, Resume on a card or a profile switch
-  inside the one frame before it lands. A poster inside a rail's faded edge
-  travels without the fade. The motion audit cannot see a guard that asks the
-  wrong way round, an alias, or a later rule that restores an animation. App's
+- Motion: opening a title from a poster cross-fades the whole page into the
+  title page while the poster travels, and a press that begins during it does
+  nothing: with the page captured, Chromium sends every press to `<html>`.
+  That is the owner's choice of trade-off. The window, from the press to the
+  first press that lands on the title page, was measured in headless Chromium
+  in the build container (software rendering, no GPU), with the 200 ms
+  `--dur-travel` and presses whose down and up came together: median about 360
+  ms at 1440x900 (326 to 411 over sixteen opens) and 362 ms at 1024x768 (317
+  to 380 over six); every press in it went to `<html>`. A press is judged by
+  where it begins: one that begins inside the window is lost even when it ends
+  after it (its click goes to `<html>`: in one open the window was 369 ms, and
+  a tap that went down on Back at 324 ms and up at 478 ms did not reach it).
+  So a tap has to begin after the window, and what a person feels is about the
+  measured figure plus their own press, roughly 80 to 150 ms: with 100 ms
+  taps, Back was reached about 460 ms after the opening press (457 to 476 over
+  four opens). A 1 ms transition still cost about 155 ms there (the frames the
+  browser takes its pictures in, and slow first frames in software), so a
+  GPU-composited browser should do better; that was not measured. Only opens
+  that travel cross-fade (from 1024px, a plain press on a loaded 2:3 poster);
+  everything else, every open below 1024px wide (phones, most tablets held
+  upright) included, opens at once as before, with no window. If the browser
+  skips a transition after the title page is in (a name used twice), the page
+  appears without any fade: its own entrance was finished for the cross-fade.
+  A waiting open is dropped by the app's Back, a destination or Play, but not
+  by the browser's own Back, Resume on a card or a profile switch inside the
+  one frame before it lands. A poster inside a rail's faded edge travels
+  without the fade. The motion audit cannot see a guard that asks the wrong
+  way round, an alias, an animation given to a view-transition pseudo-element
+  from outside `index.css` or under a name written with a CSS escape, or a
+  later rule that restores an animation anywhere but on a view-transition
+  pseudo-element. Its older checks (1 to 4) read property names in lower case
+  only, so `ANIMATION:` is not seen, and Check 1 reads only the `animation`
+  shorthand, so an animation set with the `animation-name` longhand is never
+  checked for a reduced-motion null. On view-transition pseudo-elements in
+  `index.css`, nested or not and in every selector of a list, Check 5c refuses
+  any animation on `::view-transition-image-pair` or the `::view-transition`
+  overlay, which nothing stills; any `!important` animation on a
+  view-transition pseudo-element; and any `@view-transition` rule, nested or
+  not. It reads names (pseudo-elements, properties, at-rules) in any letter
+  case and `-webkit-animation` and `-webkit-animation-name` as the aliases
+  they are; judges each rule by the declaration that wins its animation-name
+  within that rule (an `!important` one over any other, then the later), not
+  by cascading rules together, which errs toward refusing; and counts as an
+  animation any value but `none`, `initial` or `unset` alone, or a shorthand
+  whose every part is a time, a number, an easing function or one of its
+  keywords, so a quoted or escaped name, `var()`, `attr()`, `inherit` and
+  `revert` all count. A keyframes name that repeats a shorthand keyword in its
+  layer (`animation: ease ease 1s` with `@keyframes ease`, or `forwards
+  backwards` with `@keyframes backwards`) is read as no animation, though
+  Chromium runs it under that name, so that form gets past 5c. Check 5b reads the stilling's selectors with names in
+  any letter case and the attribute's value exactly, so
+  `[data-effects="REDUCED"]` is not taken for `"reduced"`, and recognises a
+  stilling only written as those six selectors (spaced or quoted otherwise,
+  the check fails rather than passes). Both check their reading against known
+  answers on every run (27 for 5c, 6 for 5b); a break that none of those
+  answers exercises still passes, and so would deleting the self-test. App's
   wiring of the travel has no test (jsdom has no view transitions), and
   Firefox and Safari were not run.
 - Failure words: a step back can still be taken twice in the few milliseconds
