@@ -21,6 +21,11 @@ import { PlaybackHealth } from './PlaybackHealth'
 import { SettingRow, SettingSwitch } from '@/components/settings/controls'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { useReturnFocus } from '@/lib/returnFocus'
+import { ConfirmDialog } from '@/components/settings/ConfirmDialog'
+import { adminFailure, type Failure } from './adminFailure'
+import { FailureNote, FailureText, StandingNotice, StatusLine, useSaid } from './AdminNotes'
+import { useConfirmedAction } from './useConfirmedAction'
+import { backupPanelMounted, clearRestoreOutcome, finishRestore, holdPageForRestore, useRestoreOutcome } from './restoreOutcome'
 import {
   parseReferralOptionsSetting,
   serializeReferralOptions,
@@ -35,6 +40,7 @@ import {
 import {
   getAdminReferralSummary,
   type AdminReferralSummary,
+  APIError,
   apiFetchResponse,
   approveRequest,
   createInvite,
@@ -104,7 +110,7 @@ import {
 } from '@/lib/api'
 import { abortAfter } from '@/lib/catalogUpdates'
 
-// server_settings keys for the referral prompt (migration 046). Named here so
+// server_settings keys for the referral prompt, from migration 046. Named here so
 // the editor and the Go whitelist can't drift on a string literal.
 const REFERRAL_QUESTION_KEY = 'referral_prompt_question'
 const REFERRAL_OPTIONS_KEY = 'referral_prompt_options'
@@ -112,31 +118,57 @@ const REFERRAL_OPTIONS_KEY = 'referral_prompt_options'
 /* ─────────────────────── ADMIN VIEW ─────────────────────── */
 // Admin backup + restore card. Backup is a tokenized anchor
 // download; restore is a multipart upload guarded by a hard-confirm.
-function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) {
+function AdminBackupRestore({ downloadBackup, accountId }: {
+  downloadBackup: () => Promise<Failure | null>
+  /** The signed-in account: a restore's outcome is said to it only. */
+  accountId: number
+}) {
   const [file, setFile] = useState<File | null>(null)
-  const [submitting, setSubmitting] = useState(false)
-  const [status, setStatus] = useState<string>('')
   const [doneBlocked, setDoneBlocked] = useState(false)
+  const [downloadFailed, setDownloadFailed] = useState<Failure | null>(null)
+  // A refusal that lands after the dialog was left is said by the panel's
+  // record of the last restore (below), not a second time by the flow.
+  const restoreFlow = useConfirmedAction<File>(f => `restoring the database from ${f.name}`, { lateFailureInPanel: false })
+  const [restoreSaid, sayRestore] = useSaid()
+  const submitting = restoreFlow.busy
+  // What came of the last restore lives outside this panel (restoreOutcome):
+  // the restore can end after the panel, or the whole Admin page, has gone.
+  // While the panel is up it says it, so the app's alert does not.
+  const { outcome } = useRestoreOutcome()
+  useEffect(() => backupPanelMounted(), [])
+  const restored = outcome && outcome.accountId === accountId && outcome.ok ? outcome.file : null
+  // An outcome that lands while this panel is up is said in its status line,
+  // whichever panel sent the restore (the admin may have left the section
+  // and come back): the notice itself is not read out.
+  const outcomeAtMount = useRef(outcome)
+  useEffect(() => {
+    if (!outcome || outcome === outcomeAtMount.current || outcome.accountId !== accountId) return
+    outcomeAtMount.current = outcome
+    if (outcome.ok) sayRestore(`Restored the database from ${outcome.file}. Restart Aurora now.`)
+  }, [outcome, accountId, sayRestore])
+  const lastFailure = outcome && outcome.accountId === accountId && !outcome.ok ? outcome.failure : null
+  const restoreRef = useRef<HTMLButtonElement | null>(null)
+  const noticeRef = useRef<HTMLDivElement | null>(null)
   // The restore POST can take minutes — guard against setState after
   // unmount if the admin tabs away mid-upload.
   const mountedRef = useRef(true)
   useEffect(() => () => { mountedRef.current = false }, [])
 
-  const onSubmit = async () => {
-    if (!file) return
-    const sizeMB = (file.size / 1024 / 1024).toFixed(1)
-    const ok = window.confirm(
-      `RESTORE — destructive operation\n\n` +
-      `Overwrite ALL data with the contents of "${file.name}" (${sizeMB} MB)?\n\n` +
-      `Aurora MUST be restarted after the restore completes. This cannot be undone except by ` +
-      `restoring a different backup.`
-    )
-    if (!ok) return
-    setSubmitting(true)
-    setStatus('Uploading + restoring — may take a few minutes…')
+  const onSubmit = () => {
+    if (!file || submitting || doneBlocked) return
+    restoreFlow.ask(file)
+  }
+
+  // The dialog stays up while the restore runs (one answer, one upload)
+  // until it offers its way out; the outcome goes to restoreOutcome either way.
+  const restore = () => restoreFlow.run(async f => {
+    // The server runs the restore on this request: if the page goes (a
+    // reload, a closed tab), the restore is stopped part way. The browser is
+    // asked to check before the page is left, until the answer is in.
+    const release = holdPageForRestore()
     try {
       const form = new FormData()
-      form.append('backup', file)
+      form.append('backup', f)
       const res = await apiFetchResponse('/api/admin/restore', {
         method: 'POST',
         body: form,
@@ -160,29 +192,31 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
           const nested = (errField as Record<string, unknown>).message
           if (typeof nested === 'string') errMsg = nested
         }
-        throw new Error(errMsg)
+        // An APIError, so the status reaches the words below.
+        throw new APIError(res.status, errMsg, body)
       }
-      // alert() survives an unmounted React component, so the admin
-      // hears the outcome even if they tabbed away mid-restore.
-      window.alert((body && body.message) || 'The database has been restored. RESTART AURORA NOW to use the new data.')
-      if (!mountedRef.current) return
-      setStatus('Restore complete — RESTART AURORA NOW')
+      finishRestore({ accountId, file: f.name, ok: true })
       // Lock the button after success.
-      setDoneBlocked(true)
+      if (mountedRef.current) setDoneBlocked(true)
+      return null
     } catch (e) {
       console.error('[Aurora] Restore failed', e)
-      const msg = e instanceof Error ? e.message : 'see console'
-      // alert on failure too, so the admin still hears about it.
-      window.alert('Restore failed: ' + msg)
-      if (!mountedRef.current) return
-      setStatus('Failed: ' + msg)
+      const failure = restoreFailure(e)
+      finishRestore({ accountId, file: f.name, ok: false, failure })
+      return failure
     } finally {
-      if (mountedRef.current) setSubmitting(false)
+      release()
     }
-  }
+  })
 
   return (
     <div className="space-y-6">
+      {restored && (
+        <StandingNotice ref={noticeRef} title="Restart Aurora now" onDismiss={clearRestoreOutcome}>
+          The database has been restored from {restored}. Until Aurora is restarted, the server goes on
+          working from what it held before the restore, and what people see can be out of date.
+        </StandingNotice>
+      )}
       <div className="bg-surface-raised rounded-control p-6">
         <h3 className="text-ink font-semibold mb-2">Database backup</h3>
         <p className="text-ink-2 text-sm mb-4 leading-relaxed">
@@ -200,11 +234,15 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
           — restorable here or via <code>pg_restore</code> from the command line.
         </p>
         <button
-          onClick={downloadBackup}
+          onClick={() => {
+            setDownloadFailed(null)
+            void downloadBackup().then(failure => { if (mountedRef.current) setDownloadFailed(failure) })
+          }}
           className="stage-btn stage-btn-primary"
         >
           <Icon name="folder" size={16} /> Download backup
         </button>
+        <FailureNote failure={downloadFailed} className="mt-3" />
       </div>
 
       <div className="bg-surface-raised rounded-control p-6">
@@ -232,7 +270,13 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
             className="min-w-0 max-w-full text-sm text-ink-2 file:mr-3 file:px-3 file:py-1.5 file:rounded-chip file:border-0 file:bg-surface-raised-2 file:text-ink file:cursor-pointer hover:file:bg-action-soft"
           />
           <button
-            onClick={onSubmit}
+            ref={restoreRef}
+            onClick={e => {
+              // Not every browser focuses a button on a click, and the
+              // dialog gives focus back to what had it.
+              e.currentTarget.focus()
+              onSubmit()
+            }}
             disabled={!file || submitting || doneBlocked}
             className="stage-btn stage-btn-destructive"
           >
@@ -244,12 +288,49 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
             Selected: {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)
           </p>
         )}
-        {status && (
-          <p className={`text-sm mt-3 ${status.startsWith('Failed') ? 'text-danger-ink' : 'text-ink-2'}`}>{status}</p>
-        )}
+        <StatusLine said={restoreSaid} className="mt-3" />
+        <div className="mt-3 empty:hidden">{restoreFlow.panelNotes}</div>
+        {/* The last restore's failure, kept in the panel once its dialog is
+            put down (or said here first, when the dialog was left): one that
+            stopped part way can have left the database empty. */}
+        {!restoreFlow.dialog.open && !restoreFlow.busy && <FailureNote failure={lastFailure} className="mt-3" />}
       </div>
+
+      <ConfirmDialog
+        {...restoreFlow.dialog}
+        error={restoreFlow.dialog.error && <FailureText failure={restoreFlow.dialog.error} />}
+        stopWaitingLabel="Close and keep it running"
+        title={restoreFlow.asked ? `Restore the database from ${restoreFlow.asked.name}?` : 'Restore the database?'}
+        confirmLabel={submitting ? 'Restoring…' : 'Restore database'}
+        destructive
+        safeFirst
+        onConfirm={() => { void restore() }}
+        // A restore that finished locks the button that asked: the notice
+        // that says to restart takes the focus.
+        fallbackFocus={() => noticeRef.current ?? restoreRef.current}
+        details={submitting
+          ? <p role="status" className="text-[14px] leading-snug text-ink">Uploading and restoring. This can take several minutes. Keep this tab open until it says it has finished: reloading or closing it, or losing the connection, stops the restore part way and can leave the database empty.</p>
+          : undefined}
+      >
+        Everything Aurora holds now is replaced by what is in this file{restoreFlow.asked ? ` (${(restoreFlow.asked.size / 1024 / 1024).toFixed(1)} MB)` : ''}:
+        accounts, profiles, libraries, watch history, lists and settings. What is there now cannot be brought
+        back except from another backup. Aurora must be restarted once the restore is done. Keep this tab open
+        until it says it has finished: reloading or closing it, or losing the connection, stops the restore part
+        way and can leave the database empty.
+      </ConfirmDialog>
     </div>
   )
+}
+
+/** What a restore that did not finish is said to have done. Where it stopped
+ *  decides the database's state: every refusal of the file comes before the
+ *  old data is cleared, and a failure of the restore itself comes after. */
+function restoreFailure(e: unknown): Failure {
+  // Aurora itself never answers a restore with 502, 503 or 504: those come
+  // from a proxy in front of it that gave up waiting, while the restore may
+  // still be running. They are no answer, not a restore that failed.
+  const lost = 'The connection to the server failed during the restore, so it is not known how far it got: the database may be as it was, restored, or empty. Check the server before going on.'
+  return adminFailure(e, 'restore the database', { 502: lost, 503: lost, 504: lost, 400: 'The server refused this file, and the database was not changed.', 409: 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.', 413: 'The file is too large to restore from here, and the database was not changed.', noAnswer: lost, otherwise: 'The restore did not finish. Depending on where it stopped, the database is either as it was or empty. Read what the server said before going on.' })
 }
 
 function NowPlayingWidget() {
@@ -582,7 +663,7 @@ function UpdatePanel() {
 // The preview's items_to_delete is echoed back on confirm. If the catalog moved
 // in between (a scan finished, another admin acted) the server answers 409 and
 // nothing happens, so the number an admin approves is the number that goes.
-function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void }) {
+function RetypeLibraryButton({ lib, onDone, say }: { lib: Library; onDone: () => void; say: (text: string) => void }) {
   // BOTH targets are offered, including the one the library already claims.
   //
   // Offering only the opposite type made the documented repair path unreachable
@@ -591,96 +672,105 @@ function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void
   // with movie rows still present, the only button was "Change to Movies", whose
   // preview correctly reported 0 items to delete ("nothing to delete") and whose
   // confirm set the library back to movie. A review found it.
-  const [target, setTarget] = useState<'movie' | 'show' | null>(null)
-  const [preview, setPreview] = useState<RetypePreview | null>(null)
-  const [busy, setBusy] = useState(false)
+  const [checking, setChecking] = useState(false)
+  // A check that could not be made, said beside the buttons. The change it
+  // leads to is asked in the dialog, which says a refusal itself.
+  const [checkFailed, setCheckFailed] = useState<Failure | null>(null)
+  const change = useConfirmedAction<RetypePreview>(p => `changing ${p.library_name} to ${p.target_type === 'show' ? 'TV shows' : 'Movies'}`)
+  const preview = change.asked
+  const busy = checking || change.busy
+  const rowRef = useRef<HTMLDivElement | null>(null)
 
   const open = async (t: 'movie' | 'show') => {
-    setBusy(true)
-    try { setTarget(t); setPreview(await previewLibraryRetype(lib.id, t)) }
+    // Not `disabled` while it is out: the dialog gives the focus back to the
+    // button that asked, and a disabled one cannot take it.
+    if (busy) return
+    setChecking(true)
+    setCheckFailed(null)
+    try { change.ask(await previewLibraryRetype(lib.id, t)) }
     catch (e) {
-      setTarget(null)
-      window.alert('Could not check: ' + (e instanceof Error ? e.message : 'unknown'))
+      setCheckFailed(adminFailure(e, `check what changing ${lib.name} would delete`, { read: true, 404: `${lib.name} is no longer on the server.` }))
     }
-    finally { setBusy(false) }
+    finally { setChecking(false) }
   }
 
-  const close = () => { setPreview(null); setTarget(null) }
-
-  const confirm = async () => {
-    if (!preview || !target) return
-    setBusy(true)
+  const confirmRetype = () => change.run(async p => {
     try {
-      const res = await retypeLibrary(lib.id, target, preview.items_to_delete)
-      close()
-      window.alert(`Deleted ${res.items_deleted} item(s) and started a rescan.`)
+      const res = await retypeLibrary(lib.id, p.target_type, p.items_to_delete)
+      say(`Deleted ${res.items_deleted} item${res.items_deleted === 1 ? '' : 's'} from ${p.library_name} and started a rescan.`)
       onDone()
+      return null
     } catch (e) {
-      // A 409 here is the interlock doing its job, and the message says so.
-      window.alert('Change failed: ' + (e instanceof Error ? e.message : 'unknown'))
-    } finally { setBusy(false) }
-  }
+      if (e instanceof APIError && e.status === 404) {
+        say(`${p.library_name} is no longer on the server.`)
+        onDone()
+        return null
+      }
+      // A 409 here is the interlock doing its job: the count shown is not the
+      // count there now (or a scan holds the library), and nothing went.
+      return adminFailure(e, `change ${p.library_name}`, { 409: 'Nothing was deleted. The library has changed since it was checked, or a scan of it is running. Cancel, wait for any scan to finish, and check again to see the new figure.', 404: `${p.library_name} is no longer on the server.` })
+    }
+  })
 
-  if (!preview) {
-    return (
-      <div className="flex flex-wrap gap-2.5 mt-3">
+  const label = (t: 'movie' | 'show') => (t === 'show' ? 'TV shows' : 'Movies')
+  return (
+    <div ref={rowRef} className="mt-3">
+      <div className="flex flex-wrap gap-2.5">
         {(['movie', 'show'] as const).map(t => (
           <button
             key={t}
-            onClick={() => void open(t)}
-            disabled={busy}
+            onClick={e => { e.currentTarget.focus(); void open(t) }}
+            aria-disabled={busy || undefined}
+            data-retype={t}
             title={t === lib.type
               ? `Re-apply ${t === 'show' ? 'TV Shows' : 'Movies'}: purges any catalog rows that disagree with the library's type, then rescans`
               : `Change this library to ${t === 'show' ? 'TV Shows' : 'Movies'}`}
             className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
           >
-            {busy ? 'Checking…' : t === lib.type
+            {checking ? 'Checking…' : t === lib.type
               ? `Re-apply ${t === 'show' ? 'TV' : 'Movies'}`
               : `Change to ${t === 'show' ? 'TV' : 'Movies'}`}
           </button>
         ))}
       </div>
-    )
-  }
-
-  return (
-    <div className="w-full mt-3 p-3 rounded-control bg-surface-raised-2 border border-line">
-      <p className="text-danger-ink text-xs font-medium">
-        Change “{preview.library_name}” from {preview.current_type} to {preview.target_type}?
-      </p>
-      <p className="text-ink-2 text-xs mt-2">
-        This deletes {preview.items_to_delete} catalog item(s) and everything attached to them,
-        then rescans from disk. {preview.items_kept > 0 && `${preview.items_kept} item(s) already of the target type are kept. `}
-        The files on disk are not touched. There is no undo.
-      </p>
-      {preview.casualties && preview.casualties.length > 0 && (
-        <ul className="mt-2 space-y-0.5">
-          {preview.casualties.map(c => (
-            <li key={c.table} className="text-warn text-xs">
-              {c.rows} × <span className="font-mono">{c.table}</span>{c.why ? ` — ${c.why}` : ''}
-            </li>
-          ))}
-        </ul>
-      )}
-      {preview.items_to_delete === 0 && (
-        <p className="text-ink-2 text-xs mt-2">Nothing to delete — this only changes the type and rescans.</p>
-      )}
-      <div className="flex gap-2.5 mt-3">
-        <button
-          onClick={() => void confirm()}
-          disabled={busy}
-          className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger"
-        >
-          {busy ? 'Working…' : 'Delete and rescan'}
-        </button>
-        <button
-          onClick={close}
-          disabled={busy}
-          className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
-        >
-          Cancel
-        </button>
-      </div>
+      <FailureNote failure={checkFailed} className="mt-2" />
+      <div className="mt-2 empty:hidden">{change.panelNotes}</div>
+      <ConfirmDialog
+        {...change.dialog}
+        error={change.dialog.error && <FailureText failure={change.dialog.error} />}
+        title={preview
+          ? (preview.current_type === preview.target_type
+              ? `Re-apply ${label(preview.target_type)} to ${preview.library_name}?`
+              : `Change ${preview.library_name} to ${label(preview.target_type)}?`)
+          : ''}
+        confirmLabel={change.busy ? 'Working…' : preview && preview.items_to_delete === 0 ? 'Change and rescan' : 'Delete and rescan'}
+        destructive
+        safeFirst
+        onConfirm={() => { void confirmRetype() }}
+        fallbackFocus={() => rowRef.current?.querySelector<HTMLElement>(`[data-retype="${preview?.target_type ?? lib.type}"]`)}
+        details={preview && (
+          <div className="text-[14px] leading-snug">
+            {preview.casualties && preview.casualties.length > 0 && (
+              <ul className="space-y-0.5" aria-label="What is deleted">
+                {preview.casualties.map(c => (
+                  <li key={c.table} className="text-warn">
+                    <span className="tabular-nums">{c.rows}</span> × <span className="font-mono break-all">{c.table}</span>{c.why ? ` — ${c.why}` : ''}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {preview.items_to_delete === 0 && (
+              <p className="text-ink-2">Nothing to delete — this only changes the type and rescans.</p>
+            )}
+          </div>
+        )}
+      >
+        {preview && <>
+          This deletes {preview.items_to_delete} catalog item{preview.items_to_delete === 1 ? '' : 's'} and everything attached to them,
+          then rescans from disk. {preview.items_kept > 0 && `${preview.items_kept} item${preview.items_kept === 1 ? '' : 's'} already of the target type ${preview.items_kept === 1 ? 'is' : 'are'} kept. `}
+          The files on disk are not touched. There is no undo.
+        </>}
+      </ConfirmDialog>
     </div>
   )
 }
@@ -697,6 +787,30 @@ function AdminLibrariesTab() {
   // here is swallowed: it is a diagnostic, and losing it must not take the
   // libraries list down with it.
   const [health, setHealth] = useState<LibraryHealthReport | null>(null)
+  const [said, say] = useSaid()
+  const [addFailed, setAddFailed] = useState<Failure | null>(null)
+  // A scan that did not start, said under the row it was asked from.
+  const [scanFailed, setScanFailed] = useState<{ id: number; failure: Failure } | null>(null)
+  // The library a delete is being asked about, and what came of the answer.
+  const del = useConfirmedAction<Library>(lib => `deleting the library ${lib.name}`)
+  const listHeadingRef = useRef<HTMLHeadingElement | null>(null)
+  const confirmDelete = () => del.run(async lib => {
+    try {
+      await deleteLibrary(lib.id)
+      say(`Deleted the library ${lib.name}.`)
+      await reload()
+      return null
+    } catch (e) {
+      // Already gone: there is nothing to answer again. The list is read
+      // again and says so.
+      if (e instanceof APIError && e.status === 404) {
+        say(`${lib.name} was already gone from the server.`)
+        await reload()
+        return null
+      }
+      return adminFailure(e, `delete ${lib.name}`)
+    }
+  })
   const reload = useCallback(async () => {
     try { setItems(await listLibraries()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
@@ -721,21 +835,25 @@ function AdminLibrariesTab() {
           disabled={!newName || !newPaths || creating}
           onClick={async () => {
             setCreating(true)
+            setAddFailed(null)
             try {
               await createLibrary({ name: newName, type: newType, paths: newPaths.split(',').map(s => s.trim()).filter(Boolean) })
               setNewName(''); setNewPaths('')
               await reload()
             } catch (e) {
-              window.alert('Failed: ' + (e instanceof Error ? e.message : 'unknown'))
+              setAddFailed(adminFailure(e, 'add the library', { 400: 'The server refused this library.' }))
             } finally { setCreating(false) }
           }}
           className="stage-btn stage-btn-primary mt-3"
         >
           {creating ? 'Adding…' : 'Add'}
         </button>
+        <FailureNote failure={addFailed} className="mt-3" />
       </div>
       <div className="bg-surface-raised rounded-control p-5">
-        <h3 className="text-ink font-semibold mb-3">Libraries on this server</h3>
+        <h3 ref={listHeadingRef} tabIndex={-1} className="text-ink font-semibold mb-3">Libraries on this server</h3>
+        <StatusLine said={said} className="mb-3" />
+        <div className="mb-3 empty:hidden">{del.panelNotes}</div>
         {err && <p className="text-danger-ink text-sm">{err}</p>}
         {items === null && <p className="text-ink-2 text-sm">Loading…</p>}
         {items && items.length === 0 && <p className="text-ink-2 text-sm">No libraries yet.</p>}
@@ -760,17 +878,53 @@ function AdminLibrariesTab() {
                 )}
               </p>
             </div>
-            <button onClick={async () => { try { await scanLibrary(lib.id); window.alert('Scan kicked off.') } catch (e) { window.alert('Scan failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost">Scan</button>
-            <button onClick={async () => { if (!window.confirm(`Delete library "${lib.name}" and all its media?`)) return; try { await deleteLibrary(lib.id); await reload() } catch (e) { window.alert('Delete failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger">Delete</button>
+            <button
+              onClick={async () => {
+                setScanFailed(null)
+                try { await scanLibrary(lib.id); say(`Started a scan of ${lib.name}.`) }
+                catch (e) {
+                  setScanFailed({ id: lib.id, failure: adminFailure(e, `start a scan of ${lib.name}`, { 409: `A scan of ${lib.name} is already running.`, 404: `${lib.name} is no longer on the server.` }) })
+                }
+              }}
+              className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
+            >Scan{' '}<span className="sr-only">{lib.name}</span></button>
+            <button
+              // While a delete is out, says so through the panel's line and
+              // asks nothing: a second question would name the wrong library.
+              {...del.openerProps}
+              onClick={e => {
+                // Not every browser focuses a button on a click, and the
+                // dialog gives focus back to what had it.
+                e.currentTarget.focus()
+                del.ask(lib)
+              }}
+              className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger"
+            >Delete{' '}<span className="sr-only">{lib.name}</span></button>
           </div>
+          {scanFailed?.id === lib.id && <FailureNote failure={scanFailed.failure} className="mt-2" />}
           {h?.warning && (
             <p className="mt-2 text-warn text-xs leading-relaxed">{h.warning}</p>
           )}
-          <RetypeLibraryButton lib={lib} onDone={() => { void reload() }} />
+          <RetypeLibraryButton lib={lib} onDone={() => { void reload() }} say={say} />
           </div>
           )
         })}
       </div>
+      <ConfirmDialog
+        {...del.dialog}
+        error={del.dialog.error && <FailureText failure={del.dialog.error} />}
+        title={del.asked ? `Delete the library ${del.asked.name}?` : ''}
+        confirmLabel={del.busy ? 'Deleting…' : 'Delete library'}
+        destructive
+        safeFirst
+        onConfirm={() => { void confirmDelete() }}
+        // The row that asked goes with the library.
+        fallbackFocus={() => listHeadingRef.current}
+      >
+        Its titles leave Aurora, and with them everyone&rsquo;s watch history, lists and ratings for those
+        titles. The files on disk are not touched: adding the folders again brings the titles back, but not
+        that history. This cannot be undone.
+      </ConfirmDialog>
     </div>
   )
 }
@@ -828,15 +982,35 @@ function AdminServerSettingsTab() {
   // The Invite UI now lives on the Users tab inside AdminView; that
   // component owns its own inviteCode state.
   const [arrTest, setArrTest] = useState<{ svc: string; msg: string } | null>(null)
+  // A read of the settings that failed (at the start, or after a save), and
+  // a save that failed, said under the Save button that was pressed.
+  const [loadFailed, setLoadFailed] = useState<Failure | null>(null)
+  const [saveFailed, setSaveFailed] = useState<{ from: 'general' | 'arr'; failure: Failure } | null>(null)
+  // The image cache: the question, what came of it, and the line that says so.
+  const purgeFlow = useConfirmedAction<true>(() => 'purging the image cache')
+  const [purgeSaid, sayPurge] = useSaid()
+  const purgeRef = useRef<HTMLButtonElement | null>(null)
+  const purge = () => purgeFlow.run(async () => {
+    try {
+      const r = await purgeImageCache()
+      sayPurge(`Purged ${r.files_purged ?? 0} files (${((r.bytes_freed ?? 0) / 1024 / 1024).toFixed(1)} MB freed).`)
+      return null
+    } catch (e) {
+      // A 5xx here is the server's set-up (no image proxy) or its disk, which
+      // trying again does not change: no promise that it will.
+      return adminFailure(e, 'purge the image cache', { otherwise: 'The server could not purge the image cache.' })
+    }
+  })
   const reload = useCallback(async () => {
-    try { setSettings(await getAllSettings()); setEdited({}) }
-    catch (e) { window.alert(e instanceof Error ? e.message : 'failed') }
+    try { setSettings(await getAllSettings()); setEdited({}); setLoadFailed(null) }
+    catch (e) { setLoadFailed(adminFailure(e, 'read the server settings', { read: true })) }
   }, [])
   useEffect(() => { void reload() }, [reload])
   const val = (k: string, dflt: string) => (k in edited ? edited[k] : settings?.[k] ?? dflt)
   const setVal = (k: string, v: string) => setEdited(prev => ({ ...prev, [k]: v }))
-  const save = async () => {
+  const save = async (from: 'general' | 'arr') => {
     if (Object.keys(edited).length === 0) return
+    setSaveFailed(null)
     setSaving(true)
     try {
       // Empty ARR API key means "keep existing"; never send '' or
@@ -849,7 +1023,7 @@ function AdminServerSettingsTab() {
       if (Object.keys(patch).length === 0) { setEdited({}); return }
       await updateSettings(patch); await reload()
     }
-    catch (e) { window.alert(e instanceof Error ? e.message : 'failed') }
+    catch (e) { setSaveFailed({ from, failure: adminFailure(e, 'save the settings', { 400: 'The server refused these settings.' }) }) }
     finally { setSaving(false) }
   }
 
@@ -857,7 +1031,8 @@ function AdminServerSettingsTab() {
     <div className="space-y-4">
       <div className="bg-surface-raised rounded-control p-5">
         <h3 className="text-ink font-semibold mb-3">General</h3>
-        {settings === null ? <p className="text-ink-2 text-sm">Loading…</p> : (
+        <FailureNote failure={loadFailed} className="mb-3" />
+        {settings === null ? (loadFailed ? null : <p className="text-ink-2 text-sm">Loading…</p>) : (
           <div>
             <NumberSetting label="Transcode max sessions" desc="Concurrent FFmpeg processes; 0 = unlimited" min={0} max={1000} value={val('transcode_max_sessions', '0')} onChange={v => setVal('transcode_max_sessions', v)} />
             <NumberSetting label="Transcode max sessions per user" desc="Streams one account may hold; 0 = default (3)" min={0} max={100} value={val('transcode_max_sessions_per_user', '0')} onChange={v => setVal('transcode_max_sessions_per_user', v)} />
@@ -870,9 +1045,10 @@ function AdminServerSettingsTab() {
             <NumberSetting label="Daily request quota" desc="Per user, rolling 24h; requests over this are held for approval (default 25)" min={1} max={10000} value={val('requests_quota_daily', '25')} onChange={v => setVal('requests_quota_daily', v)} />
             <button
               disabled={saving || Object.keys(edited).length === 0}
-              onClick={save}
+              onClick={() => void save('general')}
               className="stage-btn stage-btn-primary mt-4"
             >{saving ? 'Saving…' : Object.keys(edited).length > 0 ? `Save ${Object.keys(edited).length} change${Object.keys(edited).length === 1 ? '' : 's'}` : 'No changes'}</button>
+            {saveFailed?.from === 'general' && <FailureNote failure={saveFailed.failure} className="mt-3" />}
           </div>
         )}
       </div>
@@ -884,13 +1060,24 @@ function AdminServerSettingsTab() {
         <h3 className="text-ink font-semibold mb-3">Image cache</h3>
         <p className="text-ink-2 text-xs mb-3">Delete cached TMDB poster/backdrop images. The cache repopulates on demand; useful after rescanning a large library or running out of disk.</p>
         <button
-          onClick={async () => {
-            if (!window.confirm('Purge the image cache? Images will re-download on next view.')) return
-            try { const r = await purgeImageCache(); window.alert(`Purged ${r.files_purged ?? 0} files (${((r.bytes_freed ?? 0) / 1024 / 1024).toFixed(1)} MB freed).`) }
-            catch (e) { window.alert(e instanceof Error ? e.message : 'failed') }
-          }}
+          ref={purgeRef}
+          onClick={e => { e.currentTarget.focus(); purgeFlow.ask(true) }}
           className="stage-btn stage-btn-ghost"
         >Purge image cache</button>
+        <StatusLine said={purgeSaid} className="mt-3" />
+        <div className="mt-3 empty:hidden">{purgeFlow.panelNotes}</div>
+        <ConfirmDialog
+          {...purgeFlow.dialog}
+          error={purgeFlow.dialog.error && <FailureText failure={purgeFlow.dialog.error} />}
+          title="Purge the image cache?"
+          confirmLabel={purgeFlow.busy ? 'Purging…' : 'Purge image cache'}
+          onConfirm={() => { void purge() }}
+          fallbackFocus={() => purgeRef.current}
+        >
+          Every picture in the server&rsquo;s image cache is deleted from its disk: posters, backdrops, stills,
+          cast photos and the rest. Nothing else is: each image is fetched again the next time someone views it,
+          so pages show their images more slowly for a while.
+        </ConfirmDialog>
       </div>
 
       <div className="bg-surface-raised rounded-control p-5">
@@ -935,7 +1122,7 @@ function AdminServerSettingsTab() {
           <div className="mt-3 pt-3 border-t border-line flex items-center gap-3">
             <button
               disabled={saving || Object.keys(edited).length === 0}
-              onClick={save}
+              onClick={() => void save('arr')}
               className="stage-btn stage-btn-primary"
             >{saving ? 'Saving…' : Object.keys(edited).length > 0 ? `Save ${Object.keys(edited).length} change${Object.keys(edited).length === 1 ? '' : 's'}` : 'No changes'}</button>
             <p className="text-ink-2 text-xs">
@@ -943,6 +1130,7 @@ function AdminServerSettingsTab() {
             </p>
           </div>
         )}
+        {saveFailed?.from === 'arr' && <FailureNote failure={saveFailed.failure} className="mt-3" />}
       </div>
     </div>
   )
@@ -953,6 +1141,27 @@ function AdminRoomsTab() {
   const [err, setErr] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
+  const [said, say] = useSaid()
+  const [makeFailed, setMakeFailed] = useState<Failure | null>(null)
+  const del = useConfirmedAction<Room>(room => `deleting the room ${room.name}`)
+  const listHeadingRef = useRef<HTMLHeadingElement | null>(null)
+  const confirmDelete = () => del.run(async room => {
+    try {
+      await deleteRoom(room.id)
+      say(`Deleted the room ${room.name}.`)
+      await reload()
+      return null
+    } catch (e) {
+      if (e instanceof APIError && e.status === 404) {
+        say(`${room.name} was already gone from the server.`)
+        await reload()
+        return null
+      }
+      // Rooms are not admin routes: a 403 here is the server's rule that only
+      // the room's owner deletes it.
+      return adminFailure(e, `delete ${room.name}`, { 403: 'Only the person who made this room can delete it.' })
+    }
+  })
   const reload = useCallback(async () => {
     try { setItems(await listRooms()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
@@ -969,12 +1178,15 @@ function AdminRoomsTab() {
         </div>
         <button
           disabled={!name.trim()}
-          onClick={async () => { try { await createRoom({ name: name.trim(), description: desc.trim() || undefined }); setName(''); setDesc(''); await reload() } catch (e) { window.alert(e instanceof Error ? e.message : 'failed') } }}
+          onClick={async () => { setMakeFailed(null); try { await createRoom({ name: name.trim(), description: desc.trim() || undefined }); setName(''); setDesc(''); await reload() } catch (e) { setMakeFailed(adminFailure(e, 'make the room', { 400: 'The server refused this room.' })) } }}
           className="stage-btn stage-btn-primary mt-3"
         >Make room</button>
+        <FailureNote failure={makeFailed} className="mt-3" />
       </div>
       <div className="bg-surface-raised rounded-control p-5">
-        <h3 className="text-ink font-semibold mb-3">Rooms on this server</h3>
+        <h3 ref={listHeadingRef} tabIndex={-1} className="text-ink font-semibold mb-3">Rooms on this server</h3>
+        <StatusLine said={said} className="mb-3" />
+        <div className="mb-3 empty:hidden">{del.panelNotes}</div>
         {err && <p className="text-danger-ink text-sm">{err}</p>}
         {items === null && <p className="text-ink-2 text-sm">Loading…</p>}
         {items && items.length === 0 && <p className="text-ink-2 text-sm">No rooms yet.</p>}
@@ -1001,10 +1213,26 @@ function AdminRoomsTab() {
                 </p>
               )}
             </div>
-            <button onClick={async () => { if (!window.confirm(`Delete room "${r.name}"?`)) return; try { await deleteRoom(r.id); await reload() } catch (e) { window.alert(e instanceof Error ? e.message : 'failed') } }} className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger">Delete</button>
+            <button
+              {...del.openerProps}
+              onClick={e => { e.currentTarget.focus(); del.ask(r) }}
+              className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger"
+            >Delete{' '}<span className="sr-only">{r.name}</span></button>
           </div>
         ))}
       </div>
+      <ConfirmDialog
+        {...del.dialog}
+        error={del.dialog.error && <FailureText failure={del.dialog.error} />}
+        title={del.asked ? `Delete the room ${del.asked.name}?` : ''}
+        confirmLabel={del.busy ? 'Deleting…' : 'Delete room'}
+        destructive
+        safeFirst
+        onConfirm={() => { void confirmDelete() }}
+        fallbackFocus={() => listHeadingRef.current}
+      >
+        {del.asked && <>Its code, {del.asked.code}, stops working. If a watch party is on in it now, the party ends for everyone in it. This cannot be undone.</>}
+      </ConfirmDialog>
     </div>
   )
 }
@@ -1026,25 +1254,40 @@ function AdminRequestsTab() {
   }, [])
   useEffect(() => { void reload() }, [reload])
 
-  const act = useCallback(async (id: number, fn: (id: number) => Promise<void>) => {
+  // What came of an approve or a deny: null when it went through, 'gone'
+  // when the request was already gone (the list is read again), else the
+  // failure. A deny is answered in its dialog, an approve under its row.
+  const act = useCallback(async (id: number, fn: (id: number) => Promise<void>, doing: string): Promise<Failure | null | 'gone'> => {
     setBusy(id)
-    try { await fn(id); await reload() }
-    catch (e) { window.alert(e instanceof Error ? e.message : 'failed') }
+    try { await fn(id); await reload(); return null }
+    catch (e) {
+      if (e instanceof APIError && e.status === 404) { await reload(); return 'gone' }
+      return adminFailure(e, doing, { 400: 'The server refused this: the request may no longer be waiting for approval.' })
+    }
     finally { setBusy(null) }
   }, [reload])
+  const [said, say] = useSaid()
+  const [approveFailed, setApproveFailed] = useState<{ id: number; failure: Failure } | null>(null)
+  // The deny's dialog has its own busy flag: `busy` is one id for the
+  // list, and another row's approve ending must not unlock this dialog.
+  const deny = useConfirmedAction<MediaRequest>(req => `denying the request for ${req.title}`)
+  const headingRef = useRef<HTMLHeadingElement | null>(null)
 
   return (
     <div className="space-y-4">
       <div className="bg-surface-raised rounded-control p-5">
-        <h3 className="text-ink font-semibold mb-1">Waiting for approval</h3>
+        <h3 ref={headingRef} tabIndex={-1} className="text-ink font-semibold mb-1">Waiting for approval</h3>
         <p className="text-ink-2 text-xs mb-3">Requests that hit a user's quota are held here. Approve to dispatch to Radarr/Sonarr, or deny to reject.</p>
+        <StatusLine said={said} className="mb-2" />
+        <div className="mb-2 empty:hidden">{deny.panelNotes}</div>
         {err && <p className="text-danger-ink text-sm">{err}</p>}
         {items === null && <p className="text-ink-2 text-sm">Loading…</p>}
         {items && items.length === 0 && <p className="text-ink-2 text-sm">No requests awaiting approval.</p>}
         {items && items.map(req => {
           const poster = tmdbPosterURL(req.poster_path)
           return (
-            <div key={req.id} className="flex items-center gap-3 py-3 border-b border-line last:border-0">
+            <div key={req.id} className="py-3 border-b border-line last:border-0">
+            <div className="flex items-center gap-3">
               <div className="w-[44px] h-[66px] rounded-chip overflow-hidden flex-shrink-0 bg-surface-raised-2 flex items-center justify-center">
                 {poster ? (
                   <img
@@ -1080,25 +1323,63 @@ function AdminRequestsTab() {
               </div>
               <div className="flex items-center gap-2.5 flex-shrink-0">
                 <button
-                  disabled={busy === req.id}
-                  onClick={() => act(req.id, approveRequest)}
+                  // Not `disabled` while out: a refusal is said beside this
+                  // button, and a disabled one drops the focus.
+                  aria-disabled={busy === req.id || undefined}
+                  onClick={async () => {
+                    if (busy === req.id) return
+                    setApproveFailed(null)
+                    const failure = await act(req.id, approveRequest, `approve the request for ${req.title}`)
+                    if (failure === 'gone') say(`The request for ${req.title} was already gone from the server.`)
+                    else if (failure) setApproveFailed({ id: req.id, failure })
+                    else say(`Approved the request for ${req.title}.`)
+                  }}
                   className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
-                >Approve</button>
+                >Approve{' '}<span className="sr-only">{req.title}</span></button>
                 <button
-                  disabled={busy === req.id}
-                  onClick={() => { if (!window.confirm(`Deny request for "${req.title}"?`)) return; void act(req.id, denyRequest) }}
+                  // Not `disabled` while its own deny is out: the dialog
+                  // gives the focus back to it if the deny is refused.
+                  {...deny.openerProps}
+                  aria-disabled={busy === req.id || deny.busy || undefined}
+                  onClick={e => {
+                    if (busy === req.id) return
+                    e.currentTarget.focus()
+                    deny.ask(req)
+                  }}
                   className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger"
-                >Deny</button>
+                >Deny{' '}<span className="sr-only">{req.title}</span></button>
               </div>
+            </div>
+            {approveFailed?.id === req.id && <FailureNote failure={approveFailed.failure} className="mt-2" />}
             </div>
           )
         })}
       </div>
+      <ConfirmDialog
+        {...deny.dialog}
+        error={deny.dialog.error && <FailureText failure={deny.dialog.error} />}
+        title={deny.asked ? `Deny the request for ${deny.asked.title}?` : ''}
+        confirmLabel={deny.busy ? 'Denying…' : 'Deny request'}
+        cancelLabel="Keep it waiting"
+        destructive
+        onConfirm={() => {
+          void deny.run(async req => {
+            const failure = await act(req.id, denyRequest, `deny the request for ${req.title}`)
+            if (failure === 'gone') { say(`The request for ${req.title} was already gone from the server.`); return null }
+            if (!failure) say(`Denied the request for ${req.title}.`)
+            return failure
+          })
+        }}
+        // The row that asked leaves the list with the deny.
+        fallbackFocus={() => headingRef.current}
+      >
+        {deny.asked && <>The request{deny.asked.username ? ` from ${deny.asked.username}` : ''} is closed as denied, and it is not sent to Radarr or Sonarr.</>}
+      </ConfirmDialog>
     </div>
   )
 }
 
-// One row per SESSION — Diag and Kill act on a session, and an operator
+// One row per SESSION — Diagnose and Stop act on a session, and an operator
 // killing a cast needs to reach the receiver's clone and the local player's
 // session separately. Grouping only orders and indents them, and carries each
 // row's cast label along so the markup never re-derives one.
@@ -1140,6 +1421,9 @@ function AdminSessionsTab() {
     diagAsked.current++
     setDiag(null); setDiagErr(null); setDiagLoading(false)
   }
+  // The stream a stop is being asked about, and what came of the answer.
+  const stop = useConfirmedAction<ActiveStreamRow>(row => `stopping the stream of ${row.file_name}`)
+  const [said, say] = useSaid()
   const reload = useCallback(async () => {
     try { setItems(await listAdminSessions()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
@@ -1158,15 +1442,32 @@ function AdminSessionsTab() {
     }
     setDiagLoading(false)
   }, [])
+  const confirmStop = () => stop.run(async s => {
+    try {
+      await deleteStreamSession(s.id)
+      say(`Stopped the stream of ${s.file_name}.`)
+      await reload()
+      return null
+    } catch (e) {
+      if (e instanceof APIError && e.status === 404) {
+        say(`The stream of ${s.file_name} had already ended.`)
+        await reload()
+        return null
+      }
+      return adminFailure(e, 'stop the stream')
+    }
+  })
   return (
     <div className="bg-surface-raised rounded-control p-5">
+      <StatusLine said={said} className="mb-3" />
+      <div className="mb-3 empty:hidden">{stop.panelNotes}</div>
       <div className="flex items-center justify-between mb-3">
         <p className="text-ink-2 text-sm">Everything playing right now, and how the server is delivering it.</p>
         <button ref={refreshRef} type="button" onClick={() => void reload()} className="stage-btn stage-btn-sm stage-hit44 stage-btn-quiet flex-none">Refresh</button>
       </div>
       {/* Active streams now span BOTH kinds (transcode + direct-play).
           The Kind column tells operators which pipeline is serving
-          the stream; Kill is only available for transcode sessions
+          the stream; Stop is only available for transcode sessions
           (direct-play has no FFmpeg process to terminate — it
           expires from the registry after 60s of no byte-serves). */}
       {err && <p className="text-danger-ink text-sm">{err}</p>}
@@ -1181,7 +1482,7 @@ function AdminSessionsTab() {
             <tr><th>Session</th><th>Kind</th><th>User</th><th>File</th><th>Detail</th><th>Started</th><th></th></tr>
           </thead>
           <tbody>
-            {/* One <tr> per SESSION — Diag and Kill act on a session, and an
+            {/* One <tr> per SESSION — Diagnose and Stop act on a session, and an
                 operator killing a cast needs to reach the receiver's clone
                 and the local player's session separately. Grouping only
                 orders and indents them: a receiver's clone sits directly
@@ -1262,12 +1563,16 @@ function AdminSessionsTab() {
                     {isTranscode ? (
                       <div className="flex items-center gap-2.5">
                         <button onClick={() => void openDiagnose(s.id)} className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost" title="Show FFmpeg stderr and variant state">Diagnose</button>
-                        <button onClick={async () => { if (!window.confirm('Terminate this stream?')) return; try { await deleteStreamSession(s.id); await reload() } catch (e) { window.alert('Failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger">Kill</button>
+                        <button
+                          {...stop.openerProps}
+                          onClick={e => { e.currentTarget.focus(); stop.ask(s) }}
+                          className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger"
+                        >Stop{' '}<span className="sr-only">the stream of {s.file_name}</span></button>
                       </div>
                     ) : (
                       // Direct-play has no FFmpeg lifecycle to terminate.
                       // The registry GCs after 60s of no byte-serves; an
-                      // explicit Kill button would mislead operators.
+                      // explicit Stop button would mislead operators.
                       <span className="text-ink-2 text-xs" title="Direct-play sessions auto-expire when the client stops requesting bytes">—</span>
                     )}
                   </td>
@@ -1278,6 +1583,19 @@ function AdminSessionsTab() {
         </table>
         </div>
       )}
+
+      <ConfirmDialog
+        {...stop.dialog}
+        error={stop.dialog.error && <FailureText failure={stop.dialog.error} />}
+        title={stop.asked ? `Stop ${stop.asked.username || `user ${stop.asked.user_id}`}'s stream?` : ''}
+        confirmLabel={stop.busy ? 'Stopping…' : 'Stop stream'}
+        destructive
+        onConfirm={() => { void confirmStop() }}
+        // The row goes when the stream does.
+        fallbackFocus={() => refreshRef.current}
+      >
+        {stop.asked && <>The server stops transcoding {stop.asked.file_name} now. Whoever is watching it loses that stream; their player may start a new one.</>}
+      </ConfirmDialog>
 
       {/* What FFmpeg is doing for one stream. The app's dialog: focus
           stays inside, Escape and Close leave, and focus goes back to the
@@ -1411,6 +1729,10 @@ function AdminFlaggedTab() {
   const [aiEnabled, setAiEnabled] = useState<boolean>(true)
   const [aiStarting, setAiStarting] = useState(false)
   const [acceptingId, setAcceptingId] = useState<number | null>(null)
+  // A sweep that did not start, said under its button; an accept that was
+  // refused, said under that item's suggestion.
+  const [startFailed, setStartFailed] = useState<Failure | null>(null)
+  const [acceptFailed, setAcceptFailed] = useState<{ id: number; failure: Failure } | null>(null)
 
   // 2026-05-27 (deep-debug Bug 1 fix) — polling refs lifted out of the
   // mount-only effect so startJob can restart the recursive chain.
@@ -1483,6 +1805,7 @@ function AdminFlaggedTab() {
 
   const startJob = useCallback(async () => {
     setAiStarting(true)
+    setStartFailed(null)
     try {
       await startAIRematch()
       // Re-enter the poll chain so the progress card advances. Without
@@ -1490,7 +1813,7 @@ function AdminFlaggedTab() {
       // operator sees a frozen progress bar (deep-debug Bug 1).
       void pollOnce()
     } catch (e) {
-      window.alert('Failed to start AI rematch: ' + (e instanceof Error ? e.message : 'unknown'))
+      setStartFailed(adminFailure(e, 'start the AI re-match', { 409: 'A re-match is already running.', 503: 'AI matching is not turned on for this server.' }))
     } finally { setAiStarting(false) }
   }, [pollOnce])
 
@@ -1503,11 +1826,12 @@ function AdminFlaggedTab() {
   const acceptSuggestion = useCallback(async (item: ServerMediaItem) => {
     if (!item.ai_suggested_tmdb_id) return
     setAcceptingId(item.id)
+    setAcceptFailed(null)
     try {
       await manualMatch(item.id, { tmdb_id: item.ai_suggested_tmdb_id, type: item.type })
       setItems(prev => prev ? prev.filter(i => i.id !== item.id) : prev)
     } catch (e) {
-      window.alert('Accept failed: ' + (e instanceof Error ? e.message : 'unknown'))
+      setAcceptFailed({ id: item.id, failure: adminFailure(e, `accept the suggestion for ${item.title}`, { 404: `${item.title} is no longer on the server.` }) })
     } finally { setAcceptingId(null) }
   }, [])
 
@@ -1546,6 +1870,7 @@ function AdminFlaggedTab() {
           </button>
         )}
       </div>
+      <FailureNote failure={startFailed} className="mb-3" />
 
       {/* AI job progress card — shown while a job is active OR for ~30s
           after completion so the operator sees the final result.
@@ -1641,6 +1966,7 @@ function AdminFlaggedTab() {
                 </button>
               </div>
             )}
+            {acceptFailed?.id === it.id && <FailureNote failure={acceptFailed.failure} className="ml-[88px] mt-2" />}
             {/* Evaluated but no pick — quieter inline note so the
                 operator knows AI tried and gave up (vs hasn't tried yet). */}
             {evaluated && !hasSuggestion && (
@@ -1690,8 +2016,17 @@ function AdminFlaggedTab() {
 const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434'
 const OLLAMA_CLOUD_DEFAULT = 'https://ollama.com'
 
-function AdminLLMTab() {
+function AdminLLMTab({ restartNeeded, onRestartNeeded, onDismissRestart }: {
+  /** Settings saved in this visit to the admin page need a restart to take
+   *  effect. Kept by the page, so it is still said when this section is
+   *  opened again. */
+  restartNeeded: boolean
+  onRestartNeeded: () => void
+  onDismissRestart: () => void
+}) {
   const [s, setS] = useState<LLMSettings | null>(null)
+  const [said, say] = useSaid()
+  const [saveFailed, setSaveFailed] = useState<Failure | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [apiKeyEdit, setApiKeyEdit] = useState('')
@@ -1851,9 +2186,14 @@ function AdminLLMTab() {
       </div>
       <div className="flex items-center gap-2 mt-3">
         <button
-          disabled={saving}
+          // Not `disabled` while it saves: what came of it is said beside
+          // this button, and a disabled one drops the focus.
+          aria-disabled={saving || undefined}
           onClick={async () => {
+            if (saving) return
             setSaving(true)
+            setSaveFailed(null)
+            let saved: { restart_required?: boolean } | null = null
             try {
               const body: Record<string, unknown> = {
                 provider: s.provider, embed_provider: s.embed_provider,
@@ -1869,13 +2209,26 @@ function AdminLLMTab() {
               if (anthropicKeyEdit) body.anthropic_api_key = anthropicKeyEdit
               if (openaiKeyEdit) body.openai_api_key = openaiKeyEdit
               const ack = await updateAdminLLM(body as Parameters<typeof updateAdminLLM>[0])
+              saved = ack
               // The PUT returns an ack, not the settings — re-fetch so the
               // form reflects what was persisted (masked keys, SET badges).
               const next = await getAdminLLM()
               loadedRef.current = next
               setS(next); setApiKeyEdit(''); setAnthropicKeyEdit(''); setOpenaiKeyEdit('')
-              window.alert(ack.restart_required ? 'LLM settings saved. Restart Aurora to apply them.' : 'LLM settings saved.')
-            } catch (e) { window.alert('Save failed: ' + (e instanceof Error ? e.message : 'unknown')) }
+              // Said every time, also when the restart notice is already up:
+              // the notice is not read out by itself.
+              if (ack.restart_required) { onRestartNeeded(); say('Saved. Restart Aurora to apply these settings.') }
+              else say('AI provider settings saved.')
+            } catch (e) {
+              if (saved) {
+                // Saved; only the read back failed, whatever its kind. Not
+                // called a failed save.
+                if (saved.restart_required) { onRestartNeeded(); say('Saved. Restart Aurora to apply these settings.') }
+                setSaveFailed({ says: 'Saved. The settings could not be read back: reload to see them.', server: adminFailure(e, 'read the settings back').server })
+              } else {
+                setSaveFailed(adminFailure(e, 'save the AI provider settings', { 400: 'The server refused these settings.' }))
+              }
+            }
             finally { setSaving(false) }
           }}
           className="stage-btn stage-btn-primary"
@@ -1905,6 +2258,13 @@ function AdminLLMTab() {
           {testing ? 'Testing…' : 'Test connection'}
         </button>
       </div>
+      <FailureNote failure={saveFailed} />
+      <StatusLine said={said} />
+      {restartNeeded && (
+        <StandingNotice title="Restart Aurora to use the new AI settings" onDismiss={onDismissRestart}>
+          The AI provider settings are saved. Aurora goes on using the ones it started with until it is restarted.
+        </StandingNotice>
+      )}
       {testError && <p className="text-danger-ink text-xs mt-2">{testError}</p>}
       {testResult && (
         <div className="mt-2 space-y-1 text-xs">
@@ -2334,10 +2694,12 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
   // register a new OAuth app.
   consoleURL: string
   settings: OAuthSettings
-  onUpdate: (s: OAuthSettings) => void
+  onUpdate: React.Dispatch<React.SetStateAction<OAuthSettings | null>>
 }) {
   const [secretEdit, setSecretEdit] = useState('')
   const [saving, setSaving] = useState(false)
+  const [said, say] = useSaid()
+  const [saveFailed, setSaveFailed] = useState<Failure | null>(null)
 
   // Field accessors keyed by provider prefix. Avoids three near-
   // identical copies of the same JSX.
@@ -2356,7 +2718,7 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
   const maskedSecret = settings[maskedKey] as string
 
   const setField = (key: keyof OAuthSettings, val: string | boolean) => {
-    onUpdate({ ...settings, [key]: val })
+    onUpdate(prev => prev && { ...prev, [key]: val })
   }
 
   const callbackHint = `https://your-aurora/api/auth/oauth/${provider}/callback`
@@ -2428,9 +2790,14 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
         Bypass invite-code requirement for {label} sign-up
       </label>
       <button
-        disabled={saving}
+        // Not `disabled` while it saves: what came of it is said beside this
+        // button, and a disabled one drops the focus.
+        aria-disabled={saving || undefined}
         onClick={async () => {
+          if (saving) return
           setSaving(true)
+          setSaveFailed(null)
+          let saved = false
           try {
             // Build a per-provider patch — only this provider's
             // fields. The admin endpoint accepts the full union
@@ -2443,12 +2810,24 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
               [bypassKey]: bypassInvite,
             }
             if (secretEdit) body[`${provider}_client_secret`] = secretEdit
-            const next = await updateAdminOAuth(body as Parameters<typeof updateAdminOAuth>[0])
-            onUpdate(next)
+            await updateAdminOAuth(body as Parameters<typeof updateAdminOAuth>[0])
+            saved = true
             setSecretEdit('')
-            window.alert(`${label} OAuth settings saved.`)
+            // The PUT answers an acknowledgement, not the settings: read them
+            // again, and take this provider's fields from what was stored
+            // (another provider's card keeps what is being typed in it).
+            const next = await getAdminOAuth()
+            onUpdate(prev => {
+              if (!prev) return next
+              const mine = Object.fromEntries(Object.entries(next).filter(([k]) => k.startsWith(`${provider}_`)))
+              return { ...prev, ...mine } as OAuthSettings
+            })
+            // Sign-in reads these on every request: nothing waits on a restart.
+            say(`${label} sign-in settings saved.`)
           } catch (e) {
-            window.alert('Save failed: ' + (e instanceof Error ? e.message : 'unknown'))
+            setSaveFailed(saved
+              ? { says: 'Saved. The settings could not be read back: reload to see them.', server: adminFailure(e, 'read the settings back').server }
+              : adminFailure(e, `save the ${label} sign-in settings`, { 400: 'The server refused these settings.' }))
           } finally {
             setSaving(false)
           }
@@ -2457,6 +2836,8 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
       >
         {saving ? 'Saving…' : `Save ${label} settings`}
       </button>
+      <FailureNote failure={saveFailed} />
+      <StatusLine said={said} />
     </div>
   )
 }
@@ -2475,14 +2856,35 @@ function UserRowMenu({
   user,
   onRoleChanged,
   onDeleted,
+  reloadUsers,
+  say,
 }: {
   user: AdminUser
   onRoleChanged: (role: 'admin' | 'user') => void
+  /** The row goes, and this menu and its dialog with it: the caller puts the
+   *  focus somewhere that stays. */
   onDeleted: () => void
+  /** Reads the users again in place; true when the read succeeded. Used
+   *  after a role change that failed (the server may have made it anyway: a
+   *  demotion answers 500 when only the sign-out that follows failed) and
+   *  after one that found the user gone. */
+  reloadUsers: () => Promise<boolean>
+  say: (text: string) => void
 }) {
   const [open, setOpen] = useState(false)
-  const [busy, setBusy] = useState(false)
   const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
+  // The question a menu item asked, and its one request.
+  // A role question carries the role it was asked about, fixed when it is
+  // asked: the row can change under an open question (a re-read after a
+  // change that may have happened), and a retry of "Remove admin" must never
+  // become "Make admin".
+  type Asked = { what: 'role'; from: 'admin' | 'user' } | { what: 'delete' }
+  const flow = useConfirmedAction<Asked>(a => a.what === 'role' ? `changing ${user.username}'s role` : `deleting ${user.username}`)
+  const asking = flow.asked
+  const busy = flow.busy
+  // What came of a change the dialog was closed on (it may have happened),
+  // said beside the menu's button.
+  const [rowNote, setRowNote] = useState<Failure | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
@@ -2523,48 +2925,86 @@ function UserRowMenu({
 
   const isAdmin = user.role === 'admin'
 
-  const handleRole = async () => {
-    const nextRole: 'admin' | 'user' = isAdmin ? 'user' : 'admin'
-    const verb = isAdmin ? 'Remove admin from' : 'Make'
-    if (!window.confirm(`${verb} "${user.username}"${isAdmin ? '' : ' an admin'}?`)) return
-    setBusy(true)
+  // A menu item asks its question in the app's dialog; the menu closes, and
+  // the dialog gives the focus back to the menu's button.
+  const ask = (what: 'role' | 'delete') => {
+    if (busy) return
+    setOpen(false)
+    triggerRef.current?.focus()
+    setRowNote(null)
+    flow.ask(what === 'role' ? { what, from: isAdmin ? 'admin' : 'user' } : { what })
+  }
+
+  const handleRole = () => flow.run(async asked => {
+    if (asked.what !== 'role') return null
+    // The row no longer has the role the question was about: nothing is
+    // sent, and the question is put down.
+    if (user.role !== asked.from) {
+      say(`${user.username}'s role has changed since you asked, so nothing was sent. Check it and ask again.`)
+      return null
+    }
+    const nextRole: 'admin' | 'user' = asked.from === 'admin' ? 'user' : 'admin'
     try {
       await updateUserRole(user.id, nextRole)
       onRoleChanged(nextRole)
       setOpen(false)
+      say(nextRole === 'admin' ? `${user.username} is now an admin.` : `${user.username} is no longer an admin.`)
+      return null
     } catch (err) {
-      window.alert('Role change failed: ' + (err instanceof Error ? err.message : 'unknown'))
-    } finally {
-      setBusy(false)
+      const read = await reloadUsers()
+      if (err instanceof APIError && err.status === 404) {
+        say(`${user.username} was already gone from the server.`)
+        return null
+      }
+      // A refusal (the last admin) changed nothing: it is said in the
+      // dialog, whose question stays what it was.
+      if (err instanceof APIError && err.status < 500) return adminFailure(err, `change ${user.username}'s role`)
+      // Anything else may have changed the role. The question is put down
+      // (its words could be the wrong way round by now) and the list read
+      // again says what is so.
+      setRowNote({
+        says: read
+          ? `Could not confirm the change. The list has been read again: check ${user.username}'s role.`
+          : `Could not confirm the change, and the list could not be read again. Reload this page to check ${user.username}'s role.`,
+        server: adminFailure(err, `change ${user.username}'s role`).server,
+      })
+      return null
     }
-  }
+  })
 
-  const handleDelete = async () => {
-    if (!window.confirm(`Delete user "${user.username}"? This cannot be undone.`)) return
-    setBusy(true)
+  const handleDelete = () => flow.run(async () => {
     try {
       await deleteUser(user.id)
-      // onDeleted() removes this row, unmounting the component — so close first
-      // and let it be the last statement on the success path. No setState runs
-      // after the unmount (unlike a finally{} block would).
+      // onDeleted() removes this row, unmounting the component (and this
+      // dialog): say it first.
       setOpen(false)
+      say(`Deleted ${user.username}.`)
       onDeleted()
+      return null
     } catch (err) {
-      window.alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'))
-      setBusy(false) // only reset on the error path, where the row stays mounted
+      if (err instanceof APIError && err.status === 404) {
+        say(`${user.username} was already gone from the server.`)
+        // The read takes the row away, this dialog with it.
+        await reloadUsers()
+        return null
+      }
+      return adminFailure(err, `delete ${user.username}`)
     }
-  }
+  })
+  const roleFrom = asking?.what === 'role' ? asking.from : (isAdmin ? 'admin' : 'user')
 
   return (
     <>
       <button
         ref={triggerRef}
-        onClick={() => setOpen(o => !o)}
-        disabled={busy}
+        onClick={() => { if (!busy) setOpen(o => !o) }}
+        // Not `disabled` while a change is out: the dialog gives the focus
+        // back to this button, and a disabled one cannot take it.
+        aria-disabled={busy || undefined}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Actions for ${user.username}`}
-        className="grid h-11 w-11 place-items-center rounded-control text-ink-2 hover:text-ink hover:bg-action-soft disabled:opacity-50"
+        className="grid h-11 w-11 place-items-center rounded-control text-ink-2 hover:text-ink hover:bg-action-soft aria-disabled:opacity-50"
       >
         <Icon name="moreVertical" size={16} />
       </button>
@@ -2577,7 +3017,7 @@ function UserRowMenu({
         >
           <button
             role="menuitem"
-            onClick={handleRole}
+            onClick={() => ask('role')}
             disabled={busy}
             className="w-full min-h-[44px] text-left px-4 py-2.5 text-sm text-ink hover:bg-action-soft disabled:opacity-50 flex items-center gap-2.5"
           >
@@ -2587,7 +3027,7 @@ function UserRowMenu({
           <div className="border-t border-line" />
           <button
             role="menuitem"
-            onClick={handleDelete}
+            onClick={() => ask('delete')}
             disabled={busy}
             className="w-full min-h-[44px] text-left px-4 py-2.5 text-sm text-danger-ink hover:bg-action-soft disabled:opacity-50 flex items-center gap-2.5"
           >
@@ -2597,6 +3037,35 @@ function UserRowMenu({
         </div>,
         document.body,
       )}
+      <ConfirmDialog
+        {...flow.dialog}
+        open={asking?.what === 'role'}
+        error={flow.dialog.error && <FailureText failure={flow.dialog.error} />}
+        title={roleFrom === 'admin' ? `Remove admin from ${user.username}?` : `Make ${user.username} an admin?`}
+        confirmLabel={busy ? 'Changing…' : roleFrom === 'admin' ? 'Remove admin' : 'Make admin'}
+        safeFirst={roleFrom !== 'admin'}
+        onConfirm={() => { void handleRole() }}
+        fallbackFocus={() => triggerRef.current}
+      >
+        {roleFrom === 'admin'
+          ? `${user.username} loses the admin pages and every admin power. They stay signed in.`
+          : `${user.username} gets the admin pages and every admin power: users, libraries, settings, backups and restores.`}
+      </ConfirmDialog>
+      <ConfirmDialog
+        {...flow.dialog}
+        open={asking?.what === 'delete'}
+        error={flow.dialog.error && <FailureText failure={flow.dialog.error} />}
+        title={`Delete ${user.username}?`}
+        confirmLabel={busy ? 'Deleting…' : 'Delete user'}
+        destructive
+        safeFirst
+        onConfirm={() => { void handleDelete() }}
+        fallbackFocus={() => triggerRef.current}
+      >
+        Their profiles, watch history, lists, collections, requests and rooms are deleted with them, and every
+        device they are signed in on is signed out. This cannot be undone.
+      </ConfirmDialog>
+      <div className="mt-1 max-w-[16rem] text-left empty:hidden">{flow.panelNotes}<FailureNote failure={rowNote} /></div>
     </>
   )
 }
@@ -2675,12 +3144,22 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
   // Blob for download. Trade-off: whole-archive buffering, but
   // pg_dump custom-format is self-compressed so even multi-GB DBs
   // fit comfortably.
-  const downloadBackup = useCallback(async () => {
+  // Answers what came of it, said beside the button by the backup panel.
+  const downloadBackup = useCallback(async (): Promise<Failure | null> => {
     try {
       const res = await apiFetchResponse('/api/admin/backup')
       if (!res.ok) {
         const body = await res.text().catch(() => '')
-        throw new Error(`HTTP ${res.status}${body ? ': ' + body.slice(0, 200) : ''}`)
+        // The server's sentence from its error shape ({error: {message}} or
+        // {error: "…"}), else the text as sent.
+        let said = body.slice(0, 200)
+        try {
+          const err = (JSON.parse(body) as { error?: unknown }).error
+          if (typeof err === 'string') said = err
+          else if (err && typeof err === 'object' && typeof (err as { message?: unknown }).message === 'string') said = (err as { message: string }).message
+        } catch { /* not JSON: the text as it came */ }
+        // An APIError, so the status reaches the words the panel says.
+        throw new APIError(res.status, said || `HTTP ${res.status}`, body)
       }
       // Derive a filename from Content-Disposition; fall back to a
       // timestamp-based default.
@@ -2700,11 +3179,29 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
       // Release the blob URL on the next tick so the browser has
       // finished kicking off the save dialog.
       setTimeout(() => URL.revokeObjectURL(url), 1000)
+      return null
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'unknown error'
-      window.alert('Backup download failed: ' + msg)
+      return adminFailure(e, 'download a backup', { 409: 'A backup or restore is already running. Try again when it has finished.' })
     }
   }, [])
+  // What the admin still has to do, kept while the page is up so that it is
+  // said again when its section is opened again.
+  const [llmRestart, setLLMRestart] = useState(false)
+  const [usersSaid, sayUsers] = useSaid()
+  const [inviteFailed, setInviteFailed] = useState<Failure | null>(null)
+  // The users read again in place (a role change that may or may not have
+  // been made): the list stays up meanwhile, and a failed read keeps it.
+  const reloadUsers = useCallback(async () => {
+    try { setUsers(await listAdminUsers()); return true } catch { /* the list on screen stays */ return false }
+  }, [])
+  // A deleted user's row takes its menu, and the focus in it, away: the
+  // users table takes it instead, once the row has gone.
+  const usersTableRef = useRef<HTMLDivElement | null>(null)
+  const [userGone, setUserGone] = useState(0)
+  useEffect(() => {
+    if (userGone === 0) return
+    if (!document.activeElement || document.activeElement === document.body) usersTableRef.current?.focus({ preventScroll: true })
+  }, [userGone])
 
   const [stats, setStats] = useState<ServerStats | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
@@ -3096,14 +3593,16 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
               <button
                 disabled={inviteBusy}
                 onClick={async () => {
-                  setInviteBusy(true); setInviteCopied(false)
-                  try { const r = await createInvite(); setInviteCode(r.code) }
-                  catch (e) { window.alert(e instanceof Error ? e.message : 'failed to generate invite') }
+                  setInviteBusy(true); setInviteCopied(false); setInviteFailed(null)
+                  try { const r = await createInvite(); setInviteCode(r.code); sayUsers('A new invite code is ready below.') }
+                  catch (e) { setInviteFailed(adminFailure(e, 'make an invite code')) }
                   finally { setInviteBusy(false) }
                 }}
                 className="stage-btn stage-btn-primary"
               >{inviteBusy ? 'Generating…' : 'Generate invite code'}</button>
             </div>
+            <FailureNote failure={inviteFailed} className="mt-3" />
+            <StatusLine said={usersSaid} className="mt-3" />
             {/* data-screenshot-exclude — a live invite code is a one-time
                 credential; blank the whole reveal block from bug-report
                 screenshots (the capture path drops tagged subtrees). */}
@@ -3126,7 +3625,7 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
 
           {/* Scrolls sideways on a phone. It was `overflow-hidden`, which cut
               the last columns off, the row's menu with them. */}
-          <div className="bg-surface-raised rounded-control overflow-x-auto">
+          <div ref={usersTableRef} tabIndex={-1} role="region" aria-label="Users on this server" className="bg-surface-raised rounded-control overflow-x-auto">
           {usersLoading && !users && <p className="p-6 text-ink-2 text-sm">Loading users…</p>}
           {usersErr && <p className="p-6 text-danger-ink text-sm">{usersErr}</p>}
           {users && (
@@ -3177,11 +3676,13 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
                           self-delete and self-role-change with a 4xx, so this
                           just spares them a menu of dead options. */}
                       {currentAdminId !== u.id && (
-                        <div className="flex justify-end">
+                        <div className="flex flex-col items-end">
                           <UserRowMenu
                             user={u}
                             onRoleChanged={(role) => setUsers(prev => prev ? prev.map(x => x.id === u.id ? { ...x, role } : x) : prev)}
-                            onDeleted={() => setUsers(prev => prev ? prev.filter(x => x.id !== u.id) : prev)}
+                            onDeleted={() => { setUsers(prev => prev ? prev.filter(x => x.id !== u.id) : prev); setUserGone(n => n + 1) }}
+                            reloadUsers={reloadUsers}
+                            say={sayUsers}
                           />
                         </div>
                       )}
@@ -3368,9 +3869,9 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
       {tab === 'server' && <AdminServerSettingsTab />}
       {tab === 'sessions' && <AdminSessionsTab />}
       {tab === 'flagged' && <AdminFlaggedTab />}
-      {tab === 'llm' && <AdminLLMTab />}
+      {tab === 'llm' && <AdminLLMTab restartNeeded={llmRestart} onRestartNeeded={() => setLLMRestart(true)} onDismissRestart={() => setLLMRestart(false)} />}
       {tab === 'oauth' && <AdminOAuthTab />}
-      {tab === 'backup' && <AdminBackupRestore downloadBackup={downloadBackup} />}
+      {tab === 'backup' && <AdminBackupRestore downloadBackup={downloadBackup} accountId={currentAdminId} />}
       {tab === 'health' && <PlaybackHealth />}
     </AdminShell>
   )

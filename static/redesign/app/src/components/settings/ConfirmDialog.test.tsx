@@ -112,4 +112,28 @@ describe('ConfirmDialog', () => {
     await new Promise(resolve => setTimeout(resolve, 20))
     expect(screen.getByRole('button', { name: 'Elsewhere' })).toHaveFocus()
   })
+
+  // A caller that keeps the dialog up while what it confirmed is sent.
+  it('takes one confirm while it stays open, and ignores every answer until the request ends', async () => {
+    const user = userEvent.setup()
+    const onConfirm = vi.fn()
+    const onCancel = vi.fn()
+    function Sending() {
+      const [pending, setPending] = useState(false)
+      return (
+        <ConfirmDialog open pending={pending} title="Delete it?" confirmLabel="Delete" onCancel={onCancel} onConfirm={() => { onConfirm(); setPending(true) }}>
+          It cannot be brought back.
+        </ConfirmDialog>
+      )
+    }
+    render(<Sending />)
+    const confirm = within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Delete' })
+    await user.click(confirm)
+    await user.click(confirm)
+    await user.keyboard('{Escape}')
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+  })
 })

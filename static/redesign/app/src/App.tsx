@@ -151,6 +151,7 @@ import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
 import { DetailSkeleton, GridSkeleton, RailSkeleton } from '@/components/Skeletons'
 import { useExitTransition } from '@/hooks/useExitTransition'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
+import { RestoreOutcomeAlert } from '@/components/admin/RestoreOutcomeAlert'
 
 // Chunk loaders, named so the nav can PREFETCH a view's code on hover /
 // focus of its tab (prefetchView, below) ahead of the click that needs it.
@@ -7353,6 +7354,7 @@ export default function App() {
           username={user.username}
         />
       </main>
+      {adminUI && user && <RestoreOutcomeAlert accountId={user.id} />}
 
       {/* The player. Mounted for the life of the app and shown while it has
           a target; it reports the surface it presents (onSurfaceChange). */}

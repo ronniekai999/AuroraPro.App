@@ -6,11 +6,11 @@ import { describe, expect, it } from 'vitest'
 // several did). The app asks with its own dialog (components/settings/
 // ConfirmDialog) and says failures in its own words (lib/failureWords).
 //
-// Files still being moved off them. Empty once every one is done: a file
-// that no longer uses one must leave this list (the second test says so).
-const NOT_YET_DONE = new Set<string>([
-  'components/admin/AdminView.tsx',
-])
+// Files still being moved off them. Nothing is exempt now: every file has
+// been moved off them, the Admin page last. The list stays so that a file
+// put on it must leave it once it no longer uses one (the second test says
+// so); adding one means a native box has come back.
+const NOT_YET_DONE = new Set<string>([])
 
 /** Every source file of the app, as text (tests excluded), by its path
  *  under src. */

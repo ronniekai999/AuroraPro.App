@@ -2123,8 +2123,10 @@ export async function updateAdminOAuth(body: Partial<{
   twitter_client_secret: string
   twitter_redirect_url: string
   twitter_bypass_invite: boolean
-}>): Promise<OAuthSettings> {
-  return apiFetch<OAuthSettings>('/api/admin/oauth', { method: 'PUT', body })
+}>): Promise<{ ok: boolean }> {
+  // The server answers an acknowledgement, not the settings: read them again
+  // with getAdminOAuth.
+  return apiFetch<{ ok: boolean }>('/api/admin/oauth', { method: 'PUT', body })
 }
 
 // Phase 4.6 — profiles. Aurora supports per-account "profiles" (think
