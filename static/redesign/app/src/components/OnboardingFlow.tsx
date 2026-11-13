@@ -112,6 +112,12 @@ export function onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilin
  *  flow has just written, that is how it refuses picks above the limit; it
  *  has no code of its own for it, so the refusal is confirmed by what the
  *  grid no longer offers (see recoverPicksUnderLimit). */
+/** Refusals of a profile write that carried a content limit which an age
+ *  can avoid: the way on is back to the age. */
+function fixableInDetails(reason: string | null | undefined): boolean {
+  return reason === 'last_unrestricted_profile' || reason === 'profile_restricted'
+}
+
 function refusedAsBadRequest(e: unknown): boolean {
   return e instanceof APIError && e.status === 400
 }
@@ -271,9 +277,19 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   // the limit was written no longer leaves one unset.
   const [landed, setLanded] = useState<{ profile: boolean; limit: string | null }>({ profile: false, limit: null })
   const landedRef = useRef(landed)
-  // The profile write has been sent and has not answered: whether it will
-  // land is not known. True through a build that gave up waiting for it.
+  // A profile write has been sent and has not answered: whether it will
+  // land is not known. True through a build that gave up waiting for it,
+  // and through a Try again whose own write answered first: what is out is
+  // a fact about the profile, not about one build, so the writes out are
+  // counted, and a build that was given up on still counts its own back in.
   const [profileWriteOut, setProfileWriteOut] = useState(false)
+  const profileWritesOutRef = useRef(0)
+  // A write that answers after its build was given up on still says what
+  // it did, while this flow is about the profile it wrote. (The host takes
+  // the flow down when the profile changes; this holds for the one render
+  // in between.)
+  const writingForRef = useRef<number | null>(null)
+  writingForRef.current = profileId ?? status.profile_id
   // Picks taken back out because the grid, read again under a limit that
   // had just been written, no longer offered them.
   const [removedPicks, setRemovedPicks] = useState(0)
@@ -542,14 +558,21 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   // The limit the open question is about; null while it is not asked.
   // `unknown`: the write that carries it is out and has not answered, so
   // the question cannot say that skipping sets no limit.
-  const [leaveAsk, setLeaveAsk] = useState<{ limit: string; unknown: boolean } | null>(null)
+  // It is worded from what is known as it is read: a write that answers
+  // while it is open changes what it can say.
+  const [leaveAsk, setLeaveAsk] = useState<{ limit: string } | null>(null)
+  const askUnknown = profileWriteOut
   // Every way out that does not finish setup: the header's Skip, "Continue
   // to Aurora" on an empty list, Skip after a build that failed.
   const leave = () => {
     const limit = limitLeftUnset()
-    if (limit) { setLeaveAsk({ limit, unknown: profileWriteOut }); return }
+    if (limit) { setLeaveAsk({ limit }); return }
     void skip()
   }
+  // The limit landed while the question was open: there is nothing left to
+  // ask, and the page under it says the limit is set.
+  const askMoot = leaveAsk !== null && landed.limit !== null
+  useEffect(() => { if (askMoot) setLeaveAsk(null) }, [askMoot])
 
   const retryLoad = () => {
     // The button goes with the failure it was under: the focus it holds goes
@@ -581,6 +604,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
       // As many as were on the page, in pages the server allows.
       const want = Math.max(40, popLoadedRef.current)
       while (offered.length < want && full) {
+        // Given up on (the build's time ran out, or a Try again started
+        // another): no more pages are asked for.
+        if (!stillHere()) return true
         const size = Math.min(100, want - offered.length)
         const items = await getOnboardingGrid({ profileId: profileId ?? undefined, limit: size, offset: offered.length })
         offered.push(...items)
@@ -611,7 +637,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   // What to say of a build that did not finish, which is first of all what
   // it did save: once the profile has been written its name and avatar are
   // kept, and so is the limit when the age set one, whatever failed after.
-  const buildFailure = (e: unknown, saved: { profile: boolean; limit: string | null }): string => {
+  const buildFailure = (e: unknown, saved: { profile: boolean; limit: string | null }, carriedLimit: boolean): string => {
     const kept = saved.profile
       ? `Your name and avatar are saved${saved.limit ? `, and this profile is now limited to titles ${limitPhrase(saved.limit)}` : ''}. `
       : ''
@@ -622,9 +648,11 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     // The profile write itself was refused. A refusal with a reason is
     // worded as Settings words it; here there is no list that was reloaded.
     const reason = refusalReason(e)
-    // These two are about the limit the age would set: without the age
-    // there is nothing to refuse, and the way back to it is offered.
-    if (reason === 'last_unrestricted_profile' || reason === 'profile_restricted') {
+    // These two can be about the limit the age would set: when the write
+    // carried one, without the age there is nothing to refuse, and the way
+    // back to it is offered. (The second is also the answer to any edit
+    // from a session on a restricted profile, whatever it carries.)
+    if (carriedLimit && fixableInDetails(reason)) {
       return `${refusalMessage(e, '', { reloaded: false })} Nothing was saved. Without an age the rest can be saved: go back to your details, or skip for now.`
     }
     if (reason) return `${refusalMessage(e, '', { reloaded: false })} Nothing was saved.`
@@ -645,6 +673,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     // cosmetic: advance the status messages
     const msgIv = setInterval(() => setPhaseMsg((m) => Math.min(m + 1, LOADING_MESSAGES.length - 1)), 1000)
 
+    let carriedLimit = false
     ;(async () => {
       try {
         // status.profile_id is the resolved (acting) profile even when the
@@ -656,6 +685,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         // keeps its existing rating/tone (e.g. a kids profile is never
         // silently un-restricted).
         const patch = onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilingLocked, soleUnrestricted })
+        carriedLimit = patch.max_age_rating !== undefined
         // The critical writes + a best-effort hero warm:
         //  1) persist identity (+ content settings when an age was entered),
         //  2) save taste seeds — flips taste_onboarding_completed, mirrors picks to
@@ -665,16 +695,23 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         //     hero rebuilds fast; discover/engagement run in the background (their
         //     LLM/SQL builds finish via Home's own loading path).
         const work = (async () => {
-          if (!cancelled) setProfileWriteOut(true)
+          // Counted out and back in whatever becomes of this build.
+          const ours = () => writingForRef.current === pid
+          profileWritesOutRef.current += 1
+          if (ours()) setProfileWriteOut(true)
           try {
             await updateProfile(pid, patch)
           } finally {
-            if (!cancelled) setProfileWriteOut(false)
+            profileWritesOutRef.current -= 1
+            if (ours()) setProfileWriteOut(profileWritesOutRef.current > 0)
           }
           // The profile is written, and with it the limit when the patch
-          // carried one. Known from here on, whatever happens next.
-          landedRef.current = { profile: true, limit: patch.max_age_rating || landedRef.current.limit }
-          if (!cancelled) setLanded(landedRef.current)
+          // carried one. Known from here on, whatever happens next, also
+          // when this build was given up on before the answer came.
+          if (ours()) {
+            landedRef.current = { profile: true, limit: patch.max_age_rating || landedRef.current.limit }
+            setLanded(landedRef.current)
+          }
           await saveOnboardingSeeds(selected, profileId ?? undefined)
           await Promise.race([
             getHeroPool(true, profileId ?? undefined).then(() => {}).catch(() => {}),
@@ -719,8 +756,8 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         // A refusal the same write would meet again, which a change of the
         // age can avoid: the way on is back to the first step.
         const reason = saved.profile ? null : refusalReason(failure)
-        setFixInDetails(reason === 'last_unrestricted_profile' || reason === 'profile_restricted')
-        setError(buildFailure(failure, saved))
+        setFixInDetails(carriedLimit && fixableInDetails(reason))
+        setError(buildFailure(failure, saved, carriedLimit))
       }
     })()
 
@@ -882,9 +919,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           "Who's watching?" picker. */}
       <ConfirmDialog
         open={leaveAsk !== null}
-        title={leaveAsk?.unknown ? 'Skip without knowing whether the limit was set?' : 'Skip without setting a limit?'}
+        title={askUnknown ? 'Skip without knowing whether the limit was set?' : 'Skip without setting a limit?'}
         cancelLabel="Go back"
-        confirmLabel={leaveAsk?.unknown ? 'Skip anyway' : 'Skip, no limit'}
+        confirmLabel={askUnknown ? 'Skip anyway' : 'Skip, no limit'}
         destructive
         safeFirst
         overlayClassName="z-[82]"
@@ -893,10 +930,10 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         onConfirm={() => { setLeaveAsk(null); void skip() }}
         fallbackFocus={() => headingRef.current}
       >
-        {leaveAsk?.unknown
+        {askUnknown
           // The write that carries the limit was sent and has not answered:
           // the page cannot say which way it went.
-          ? <>The age you entered limits this profile to titles {limitPhrase(leaveAsk.limit)}. That was sent, and the server has not answered: the limit may or may not have been set. If you skip, look in Settings, under Profiles and parental controls, and set it there if it is not.</>
+          ? <>The age you entered limits this profile to titles {limitPhrase(leaveAsk?.limit)}. That was sent, and the server has not answered: the limit may or may not have been set. If you skip, look in Settings, under Profiles and parental controls, and set it there if it is not.</>
           : <>The age you entered would have limited this profile to titles {limitPhrase(leaveAsk?.limit)}. Skipping now sets no limit and saves nothing from this page. You can set a limit in Settings, under Profiles and parental controls.</>}
       </ConfirmDialog>
     </div>

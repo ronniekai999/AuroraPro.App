@@ -716,7 +716,9 @@ describe('onboarding: the build', () => {
     const row = document.querySelector('[data-build-picks]')!
     expect(row.children).toHaveLength(5)
     // A pick's name, where its picture is missing, is not drawn under 12px.
-    for (const name of row.querySelectorAll('[aria-hidden="true"]')) expect(name.className).toMatch(/(^|\s)text-\[1[2-9]px\]/)
+    const names = row.querySelectorAll('[aria-hidden="true"]')
+    expect(names.length).toBeGreaterThan(0)
+    for (const name of names) expect(name.className).toMatch(/(^|\s)text-\[1[2-9]px\]/)
     expect(row).toHaveTextContent('KestrelHarbor LightsIronwoodSmall HoursGlasshouse')
   })
 
@@ -864,6 +866,58 @@ describe('onboarding: the build', () => {
     expect(offered).toEqual([button, 'Skip'])
   })
 
+  // A session on a restricted profile is refused any edit, whatever the
+  // patch carries (another tab moved it onto a child's profile, say). With
+  // no age entered there is no limit to take out: Try again, not the way
+  // back to an age that is not the reason.
+  it('does not send the person back to the age for a refusal of a patch that carried no limit', async () => {
+    const user = userEvent.setup()
+    api.updateProfile.mockReset().mockRejectedValue(refusal(403, 'a restricted profile can only edit itself', 'profile_restricted'))
+    flow()
+    await pickFive(user)
+    await user.click(next())
+    const alert = await screen.findByRole('alert')
+    expect(patchOf()[1]).not.toHaveProperty('max_age_rating')
+    expect(alert.textContent).toBe('The profile you are watching as has a content limit, so it cannot change this. Switch to a profile without a limit first. Nothing was saved.')
+    expect(within(alert.parentElement!).getAllByRole('button').map(b => b.textContent)).toEqual(['Try again', 'Skip'])
+  })
+
+  // The question is owed, and was answered (or passed over with its own
+  // Skip) before the build was refused: the way back to the details and on
+  // to a second build neither asks it nor sends it again.
+  it.each([
+    ['answered', 'A friend'],
+    ['skipped', null],
+  ])('goes back to the details with the question already %s, and neither asks nor sends it again', async (_how, choice) => {
+    const user = userEvent.setup()
+    api.updateProfile.mockReset()
+      .mockRejectedValueOnce(refusal(409, 'refused', 'last_unrestricted_profile'))
+      .mockResolvedValue({})
+    flow({ referral: PROMPT })
+    await user.type(age(), '8')
+    await pickFive(user)
+    await user.click(next())
+    await screen.findByRole('heading', { level: 1, name: 'One quick thing' })
+    if (choice) {
+      await user.click(screen.getByRole('radio', { name: choice }))
+      await user.click(next())
+    } else {
+      await user.click(screen.getByRole('button', { name: 'Skip this question' }))
+    }
+    await user.click(await screen.findByRole('button', { name: 'Back to your details' }))
+    expect(api.submitReferral).toHaveBeenCalledTimes(1)
+    expect(api.submitReferral).toHaveBeenCalledWith(choice ? expect.objectContaining({ source: 'friend' }) : expect.objectContaining({ skip: true }))
+    await user.clear(age())
+    await user.click(next())
+    // The picks end the flow now: the question is passed over.
+    expect(next()).toHaveTextContent('Finish')
+    await user.click(next())
+    await waitFor(() => expect(api.saveOnboardingSeeds).toHaveBeenCalledWith(FIVE_IDS, 7))
+    expect(screen.queryByRole('heading', { level: 1, name: 'One quick thing' })).toBeNull()
+    expect(api.updateProfile).toHaveBeenCalledTimes(2)
+    expect(api.submitReferral).toHaveBeenCalledTimes(1)
+  })
+
   it('goes back to the details with the picks kept, and the next Finish is a new build', async () => {
     const user = userEvent.setup()
     api.updateProfile.mockReset()
@@ -934,6 +988,63 @@ describe('onboarding: the build', () => {
       await act(async () => {})
       expect(question()).toBeNull()
       expect(onDone).toHaveBeenCalledTimes(1)
+    })
+
+    // Write 1 (carrying the limit) stalls and the build gives up; Try again
+    // sends write 2, which fails at once. Write 1 is still out: what is out
+    // is the profile's, not the build's.
+    async function stalledThenRetriedAndFailed() {
+      let answer!: { land: () => void; fail: (e: Error) => void }
+      api.updateProfile.mockReset()
+        .mockImplementationOnce(() => new Promise((resolve, reject) => { answer = { land: () => resolve({}), fail: reject } }))
+        .mockRejectedValueOnce(new Error('offline'))
+      vi.useFakeTimers()
+      const onDone = flow()
+      await act(async () => {})
+      fireEvent.change(age(), { target: { value: '8' } })
+      fireEvent.click(next())
+      await act(async () => {})
+      for (const name of FIVE) fireEvent.click(tile(name))
+      fireEvent.click(next())
+      await act(async () => {})
+      await pass(20_100)
+      expect(screen.getByRole('alert')).toHaveTextContent(/^This is taking longer than expected\./)
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+      await act(async () => {})
+      expect(api.updateProfile).toHaveBeenCalledTimes(2)
+      expect(patchOf(1)[1]).toMatchObject({ max_age_rating: 'PG' })
+      expect(screen.getByRole('alert')).toHaveTextContent(/^Your choices could not be saved just now\./)
+      // Skip: the first write may still land, so skipping cannot be said
+      // to set no limit.
+      fireEvent.click(screen.getByRole('button', { name: 'Skip' }))
+      await act(async () => {})
+      expect(screen.getByRole('alertdialog', { name: UNKNOWN })).toBeInTheDocument()
+      expect(api.skipOnboarding).not.toHaveBeenCalled()
+      return { onDone, answer }
+    }
+
+    it('does not say skipping sets no limit while a given-up write is out after a Try again, and says the limit is set when it lands', async () => {
+      const { onDone, answer } = await stalledThenRetriedAndFailed()
+      await act(async () => { answer.land() })
+      // Nothing is left to ask: the question goes, and the page says the
+      // limit is set and the age can no longer change it.
+      expect(question()).toBeNull()
+      expect(document.querySelector('[data-skip-keeps-limit]')).toHaveTextContent('Skipping leaves the limit set.')
+      expect(api.skipOnboarding).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: 'Skip' }))
+      await act(async () => {})
+      expect(question()).toBeNull()
+      expect(api.skipOnboarding).toHaveBeenCalledTimes(1)
+      expect(onDone).toHaveBeenCalledTimes(1)
+    })
+
+    it('asks the plain question when a given-up write fails after a Try again has failed too', async () => {
+      const { answer } = await stalledThenRetriedAndFailed()
+      await act(async () => { answer.fail(new Error('offline')) })
+      const dialog = screen.getByRole('alertdialog', { name: 'Skip without setting a limit?' })
+      expect(dialog).toHaveTextContent('Skipping now sets no limit and saves nothing from this page.')
+      expect(document.querySelector('[data-skip-keeps-limit]')).toBeNull()
+      expect(within(dialog).getAllByRole('button').map(b => b.textContent)).toEqual(['Go back', 'Skip, no limit'])
     })
 
     it('asks the plain question once the write has failed after all', async () => {
@@ -1061,6 +1172,40 @@ describe('onboarding: picks refused under the limit the build has just written',
     expect(screen.getByRole('alert')).toBeInTheDocument()
     expect(screen.getByRole('heading', { level: 1, name: 'Building your Tonight' })).toBeInTheDocument()
     expect(document.querySelector('[data-picks-removed]')).toBeNull()
+  })
+
+  // A re-read given up on asks for no more pages.
+  it('asks for no more pages of a re-read once it has been given up on', async () => {
+    const user = userEvent.setup()
+    const page = (from: number, n: number) => Array.from({ length: n }, (_, i) => ({ id: from + i, title: `Title ${from + i}`, year: 2000, poster: '/p.jpg' }))
+    api.getOnboardingGrid.mockReset().mockImplementation(async (opts: { selected?: number[]; offset?: number }) => (opts.selected ? [] : page(100 + (opts.offset ?? 0), 40)))
+    flow()
+    await user.type(age(), '10')
+    await user.click(next())
+    await user.click(await screen.findByRole('button', { name: 'Show more' }))
+    await screen.findByRole('button', { name: 'Title 140 (2000)' })
+    await user.click(screen.getByRole('button', { name: 'Show more' }))
+    await screen.findByRole('button', { name: 'Title 180 (2000)' })
+    for (const n of [100, 101, 102, 150, 219]) await user.click(tile(`Title ${n} (2000)`))
+    api.saveOnboardingSeeds.mockReset().mockRejectedValue(PICKS_REFUSED())
+    // The first page of the re-read (120 titles were on the page, so two
+    // pages) is held until the build has given up; every other is answered.
+    let late!: (items: unknown[]) => void
+    api.getOnboardingGrid.mockReset().mockImplementation((opts: { selected?: number[]; offset?: number; limit?: number }) =>
+      (opts.selected ? Promise.resolve([])
+        : opts.offset ? Promise.resolve(page(100 + opts.offset, opts.limit ?? 40))
+          : new Promise(resolve => { late = resolve })))
+    const rereads = () => api.getOnboardingGrid.mock.calls.filter(c => !(c[0] as { selected?: number[] }).selected).length
+    vi.useFakeTimers()
+    fireEvent.click(next())
+    await act(async () => {})
+    expect(api.saveOnboardingSeeds).toHaveBeenCalledTimes(1)
+    expect(rereads()).toBe(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_100) })
+    expect(screen.getByRole('alert')).toHaveTextContent(/The rest is taking longer than expected\./)
+    await act(async () => { late(page(100, 100)) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000) })
+    expect(rereads()).toBe(1)
   })
 
   // A title picked from "More like your picks" is not on the list that is
