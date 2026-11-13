@@ -193,7 +193,7 @@ describe('the backup panel follows the restore the server runs', () => {
       'The server was stopped or restarted while the restore ran. Everything the restore had done was undone, so the database is as it was. Read what the server said before trying again.',
       'The server said: the server stopped the restore because it was shutting down'],
     ['whose commit could not be confirmed', { succeeded: false, phase: 'replacing', database: 'unknown', message: 'psql was cut off after it sent the COMMIT' },
-      'The connection to the database was lost as the restore was committing, so it is not known whether it took effect: the database holds either what it held before or the backup, never a mix. Check which before going on.',
+      'The restore was cut off as it was being committed (the connection to the database was lost, or the server stopped it), so it is not known whether it took effect: the database holds either what it held before or the backup, never a mix. Check which before going on.',
       'The server said: psql was cut off after it sent the COMMIT'],
   ] as const)('says a restore %s by what it left', async (_what, result, says, server) => {
     const user = userEvent.setup()

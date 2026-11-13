@@ -18,10 +18,19 @@ package api
 // at the end of its input: a pg_restore that dies mid-stream simply ends the
 // input. Without a COMMIT the transaction cannot commit: when psql exits, or
 // is interrupted (SIGINT makes it cancel the statement in flight and exit),
-// its connection ends and the server rolls the transaction back. So every
+// its connection ends and the server rolls the transaction back. A psql that
+// is killed instead (systemd's SIGTERM to every process in the unit on a stop,
+// an OOM kill, the job's SIGKILL after its grace) sends no cancel: the server
+// notices the lost client within about a second of the statement in flight
+// checking (client_connection_check_interval, set in the preamble), and the
+// rollback, which frees the locks, follows; before that setting it noticed
+// only when the statement ended, minutes later for an index build. So every
 // failure before the COMMIT, the wipe included, leaves the old data, and the
 // admins who were signed in stay signed in. Pinned against PostgreSQL by
-// TestARestoreIsNeverCommittedUnlessPgRestoreSucceeded.
+// TestARestoreIsNeverCommittedUnlessPgRestoreSucceeded,
+// TestTheCommitGuardHoldsWhenTheJobIsStopped,
+// TestPsqlReachingEndOfInputWithoutTheCommitRollsBack and
+// TestAKilledPsqlFreesTheLocksWithinSeconds.
 //
 // What the stream may contain. pg_dump's SQL for one database is DDL and COPY,
 // all of which runs inside a transaction, except for entries this pipeline
@@ -43,14 +52,16 @@ package api
 // 16.10, 15.14, 14.19 and 13.22, August 2025; CVE-2025-8714) wraps its output
 // in `\restrict KEY` ... `\unrestrict KEY`, and psql refuses every other
 // meta-command in between. The key is random per restore, so the archive
-// cannot know it. A server whose pg_restore or psql predates that option is
-// refused in the validation, with the database untouched.
+// cannot know it. A server whose pg_restore or psql is missing or predates
+// that option is refused before the upload is read (and again in the
+// validation), with the database untouched.
 //
 // Locks. The wipe takes an ACCESS EXCLUSIVE lock on every table it drops and
 // the transaction holds them until it ends, so the server's own queries on
 // those tables (the admin guard's session read included) wait rather than
 // fail, and see the restored data, or the old data after a rollback, once it
-// ends. The wipe waits at most restoreLockTimeout for each lock (a long query
+// ends: writes that waited (progress, activity, a scan's inserts) then land
+// on the restored data. The wipe waits at most restoreLockTimeout for each lock (a long query
 // or an open transaction elsewhere): past it, or on a deadlock, the restore
 // fails and rolls back, with the old data. The old tables' files stay on disk
 // until the COMMIT, so the database needs room for both copies meanwhile.
@@ -58,15 +69,20 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -123,9 +139,8 @@ func (t restoreTools) runPipeline(ctx context.Context, databaseURL, path string,
 		return restoreEnd{phase: RestoreValidating, database: RestoreDBUnchanged,
 			message: message + " — the database was NOT modified", stderr: stderr}
 	}
-	if missing := t.missingRestrictSupport(ctx); missing != "" {
-		return refused("this server's "+missing+" is too old to restore a backup safely: it predates --restrict-key "+
-			"(PostgreSQL 17.6, 16.10, 15.14, 14.19 and 13.22, August 2025); update the PostgreSQL client packages", "")
+	if msg := t.missingRestrictSupport(ctx); msg != "" {
+		return refused(msg, "")
 	}
 	if msg, stderr := t.checkTOC(ctx, path); msg != "" {
 		return refused(msg, stderr)
@@ -155,18 +170,25 @@ func (t restoreTools) runPipeline(ctx context.Context, databaseURL, path string,
 	return t.replace(ctx, databaseURL, path)
 }
 
-// missingRestrictSupport names the client program that lacks the
-// \restrict / \unrestrict pair, or answers "" when both have it.
+// missingRestrictSupport says why the client programs cannot run a restore
+// (one is missing, or predates the \restrict / \unrestrict pair), or answers
+// "" when both can.
 func (t restoreTools) missingRestrictSupport(ctx context.Context) string {
-	out, err := exec.CommandContext(ctx, t.pgRestoreBin(), "--help").Output()
-	if err != nil || !bytes.Contains(out, []byte("--restrict-key")) {
-		return "pg_restore"
+	check := func(name, bin, flag, want string) string {
+		out, err := exec.CommandContext(ctx, bin, flag).Output()
+		switch {
+		case errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist):
+			return "this server has no " + name + " (it was not found on $PATH); install the PostgreSQL client packages"
+		case err != nil || !bytes.Contains(out, []byte(want)):
+			return "this server's " + name + " is too old to restore a backup safely: it predates --restrict-key " +
+				"(PostgreSQL 17.6, 16.10, 15.14, 14.19 and 13.22, August 2025); update the PostgreSQL client packages"
+		}
+		return ""
 	}
-	out, err = exec.CommandContext(ctx, t.psqlBin(), "--help=commands").Output()
-	if err != nil || !bytes.Contains(out, []byte(`\unrestrict`)) {
-		return "psql"
+	if msg := check("pg_restore", t.pgRestoreBin(), "--help", "--restrict-key"); msg != "" {
+		return msg
 	}
-	return ""
+	return check("psql", t.psqlBin(), "--help=commands", `\unrestrict`)
 }
 
 // restoreTOCAllowed is every table-of-contents entry type the pipeline runs
@@ -270,13 +292,35 @@ func (t restoreTools) checkTOC(ctx context.Context, path string) (string, string
 }
 
 // restorePreamble opens the transaction and runs the wipe.
+//
+// client_connection_check_interval (PostgreSQL 14+, settable by any user)
+// makes the server look for a lost client every second while a statement
+// runs. Without it, a psql that is killed (systemd's SIGTERM to every process
+// in the unit on a stop, an OOM kill, the job's SIGKILL after its grace) left
+// the restore's session holding every lock until its statement in flight
+// ended, and the longest ones (the vector index build, the foreign-key checks)
+// come at the end of the stream: the next start then waited in its
+// migrations. With it the session is gone, and its transaction rolled back,
+// within a second or two of the statement noticing.
 func restorePreamble(lockTimeout time.Duration) string {
 	return fmt.Sprintf("BEGIN;\n"+
 		"SET LOCAL lock_timeout = '%dms';\n"+
 		"SET LOCAL statement_timeout = 0;\n"+
 		"SET LOCAL idle_in_transaction_session_timeout = 0;\n"+
+		"SET LOCAL client_connection_check_interval = '1s';\n"+
 		"SET LOCAL client_min_messages = warning;\n"+
 		"%s\n", lockTimeout.Milliseconds(), restoreWipeSQL)
+}
+
+// restorePsqlArgs are psql's arguments for the restore's one session. -X: no
+// psqlrc; --no-password: never ask (stdin is the script); ON_ERROR_STOP: the
+// first error ends it, before any COMMIT; -f -: the script is stdin. NEVER
+// --single-transaction: psql would then COMMIT at the end of its input, so a
+// stream that ends early (pg_restore dead, this process crashed) would commit
+// a partial load. TestPsqlReachingEndOfInputWithoutTheCommitRollsBack runs
+// psql with exactly these.
+func restorePsqlArgs(connURL string) []string {
+	return []string{"-X", "--quiet", "--no-password", "--set", "ON_ERROR_STOP=on", "-f", "-", connURL}
 }
 
 // restoreCommitBlock is the only COMMIT the transaction ever gets, with the
@@ -354,24 +398,56 @@ func (p *restoreProgress) stderr() string {
 
 // restoreProcs are the pipeline's running children, for stopOnCancel. Each is
 // started in a process group of its own (restoreChild), and signalled as a
-// group, so nothing it started is left holding the stream.
+// group, so nothing it started is left holding the stream. A child leaves the
+// list before it is reaped (wait), so no signal can reach a group id the
+// kernel has handed to another process since.
 type restoreProcs struct {
 	mu   sync.Mutex
-	pids []int
+	live map[int]bool
 }
 
 func (r *restoreProcs) add(p *os.Process) {
 	r.mu.Lock()
-	r.pids = append(r.pids, p.Pid)
+	if r.live == nil {
+		r.live = map[int]bool{}
+	}
+	r.live[p.Pid] = true
 	r.mu.Unlock()
 }
 
 func (r *restoreProcs) signal(sig syscall.Signal) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, pid := range r.pids {
+	for pid := range r.live {
 		_ = syscall.Kill(-pid, sig) // a group that has gone answers ESRCH
 	}
+}
+
+// signalOne signals one child's group, if it has not been reaped.
+func (r *restoreProcs) signalOne(pid int, sig syscall.Signal) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.live[pid] {
+		_ = syscall.Kill(-pid, sig)
+	}
+}
+
+// wait waits for cmd to exit and reaps it. It first waits without reaping
+// (waitid WNOWAIT): until a process is reaped its pid, and so its group id,
+// stays its own, so taking it off the list in between leaves no moment in
+// which a signal could reach a reused id.
+func (r *restoreProcs) wait(cmd *exec.Cmd) error {
+	pid := cmd.Process.Pid
+	var info unix.Siginfo
+	for {
+		if err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil); err != unix.EINTR {
+			break
+		}
+	}
+	r.mu.Lock()
+	delete(r.live, pid)
+	r.mu.Unlock()
+	return cmd.Wait()
 }
 
 // restoreChild prepares a pipeline child: its own process group, and a bound
@@ -413,7 +489,7 @@ func stopOnCancel(ctx context.Context, stop <-chan struct{}, prog *restoreProgre
 func (t restoreTools) replace(ctx context.Context, databaseURL, path string) restoreEnd {
 	failed := func(message, stderr string) restoreEnd {
 		return restoreEnd{phase: RestoreReplacing, database: RestoreDBUnchanged,
-			message: "the restore failed and its transaction was rolled back — the database was NOT modified: " + message,
+			message: "rolled back, the database was NOT modified: " + message,
 			stderr:  stderr}
 	}
 	key, err := newRestoreID()
@@ -430,12 +506,9 @@ func (t restoreTools) replace(ctx context.Context, databaseURL, path string) res
 	}
 	connURL, pgEnv := pgConnEnv(databaseURL)
 
-	// psql reads the whole stream from stdin. -X: no psqlrc; -w: never ask
-	// for a password (stdin is the script); ON_ERROR_STOP: the first error
-	// ends it, before any COMMIT. No --single-transaction: see the file
-	// comment. Its stdout (the SELECT setval results in the dump) goes to
-	// the null device.
-	psqlCmd := restoreChild(exec.Command(t.psqlBin(), "-X", "--quiet", "--no-password", "--set", "ON_ERROR_STOP=on", "-f", "-", connURL))
+	// psql reads the whole stream from stdin (restorePsqlArgs). Its stdout
+	// (the SELECT setval results in the dump) goes to the null device.
+	psqlCmd := restoreChild(exec.Command(t.psqlBin(), restorePsqlArgs(connURL)...))
 	psqlCmd.Env = append(os.Environ(), append(pgEnv, "PGAPPNAME="+restoreAppName)...)
 	prog := newRestoreProgress(marker)
 	psqlCmd.Stderr = prog
@@ -459,10 +532,13 @@ func (t restoreTools) replace(ctx context.Context, databaseURL, path string) res
 	var pgrStderr strings.Builder
 	pgr.Stderr = &limitedStringWriter{w: &pgrStderr, max: 16 * 1024}
 
-	// What stopped the stream short of the commit block, if anything.
+	// What stopped the stream short of the commit block, if anything, and
+	// whether psql stopped reading first (then psql's error is the cause, and
+	// pg_restore's death, which follows, is not).
 	var streamErr error
+	psqlStopped := false
 	if _, err := io.WriteString(stdin, restorePreamble(lockTimeout)); err != nil {
-		streamErr = fmt.Errorf("psql stopped reading before the wipe: %w", err)
+		streamErr, psqlStopped = fmt.Errorf("psql stopped reading before the wipe: %w", err), true
 	} else if out, err := pgr.StdoutPipe(); err != nil {
 		streamErr = fmt.Errorf("could not open pg_restore's output: %w", err)
 	} else if err := pgr.Start(); err != nil {
@@ -471,26 +547,29 @@ func (t restoreTools) replace(ctx context.Context, databaseURL, path string) res
 		procs.add(pgr.Process)
 		_, copyErr := io.Copy(stdin, out)
 		if copyErr != nil {
-			// psql has gone (an error in the SQL, an interrupt): pg_restore
-			// would block on a pipe nobody reads.
-			_ = syscall.Kill(-pgr.Process.Pid, syscall.SIGKILL)
+			// psql has gone (an error in the SQL, a lock timeout, an
+			// interrupt): pg_restore would block on a pipe nobody reads.
+			procs.signalOne(pgr.Process.Pid, syscall.SIGKILL)
 		}
-		waitErr := pgr.Wait()
+		waitErr := procs.wait(pgr)
 		switch {
+		case copyErr != nil:
+			streamErr, psqlStopped = fmt.Errorf("psql stopped reading the backup: %w", copyErr), true
 		case waitErr != nil:
 			streamErr = fmt.Errorf("pg_restore failed while converting the backup: %w", waitErr)
-		case copyErr != nil:
-			streamErr = fmt.Errorf("psql stopped reading the backup: %w", copyErr)
 		}
 	}
 
 	// THE GUARD. The commit block, and with it the only COMMIT this
 	// transaction can get, is written only when pg_restore exited 0, its
-	// whole output reached psql, and the job is not being stopped.
+	// whole output reached psql, and the job is not being stopped. Both
+	// halves are pinned against PostgreSQL:
+	// TestARestoreIsNeverCommittedUnlessPgRestoreSucceeded and
+	// TestTheCommitGuardHoldsWhenTheJobIsStopped.
 	commitSent := false
 	if streamErr == nil && ctx.Err() == nil {
 		if _, err := io.WriteString(stdin, restoreCommitBlock(marker)); err != nil {
-			streamErr = fmt.Errorf("psql stopped reading before the commit: %w", err)
+			streamErr, psqlStopped = fmt.Errorf("psql stopped reading before the commit: %w", err), true
 		} else {
 			commitSent = true
 		}
@@ -498,14 +577,20 @@ func (t restoreTools) replace(ctx context.Context, databaseURL, path string) res
 	if !commitSent {
 		// No COMMIT, ever: interrupt psql so a statement in flight is
 		// cancelled at once; its connection's end rolls the transaction back.
-		_ = syscall.Kill(-psqlCmd.Process.Pid, syscall.SIGINT)
+		procs.signalOne(psqlCmd.Process.Pid, syscall.SIGINT)
 	}
 	_ = stdin.Close()
-	psqlErr := psqlCmd.Wait()
+	psqlErr := procs.wait(psqlCmd)
 	close(stop)
 	<-stopped
 
-	stderr := strings.TrimSpace(strings.Join(nonEmpty(strings.TrimSpace(pgrStderr.String()), prog.stderr()), "\n"))
+	psqlStderr, pgrStderrText := prog.stderr(), strings.TrimSpace(pgrStderr.String())
+	stderr := strings.Join(nonEmpty(pgrStderrText, psqlStderr), "\n")
+	if psqlStopped {
+		// psql's own error first: it is the cause, and the outcome's
+		// second line is cut short on the page.
+		stderr = strings.Join(nonEmpty(psqlStderr, pgrStderrText), "\n")
+	}
 	committing, committed, failedAfterCommitting := prog.state()
 	switch {
 	case committed:
@@ -513,10 +598,15 @@ func (t restoreTools) replace(ctx context.Context, databaseURL, path string) res
 			message: "Restore complete. RESTART AURORA NOW — current connections will see stale state until you do."}
 	case committing && !failedAfterCommitting:
 		return restoreEnd{phase: RestoreReplacing, database: RestoreDBUnknown,
-			message: "psql was cut off after it sent the COMMIT and before it could report how the COMMIT ended, so the database holds either the old data or the backup (never a mix): check which before going on",
+			message: "psql ended after it sent the COMMIT and before it reported how the COMMIT ended (" + errText(psqlErr) + "), so the database holds either the old data or the backup (never a mix): check which before going on",
 			stderr:  stderr}
+	case psqlStopped:
+		return failed(psqlCause(psqlStderr, psqlErr), stderr)
 	case streamErr != nil:
 		return failed(streamErr.Error(), stderr)
+	case !commitSent:
+		// The stream was whole, but the job was stopped first.
+		return failed("the restore was stopped before its COMMIT", stderr)
 	case psqlErr != nil:
 		return failed("psql: "+psqlErr.Error(), stderr)
 	default:
@@ -526,6 +616,27 @@ func (t restoreTools) replace(ctx context.Context, databaseURL, path string) res
 			message: "psql ended without reporting whether the COMMIT took effect, so the database holds either the old data or the backup (never a mix): check which before going on",
 			stderr:  stderr}
 	}
+}
+
+// psqlCause is psql's first error line, without its "psql:<stdin>:N: "
+// prefix, or its exit when it wrote none.
+func psqlCause(stderr string, err error) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.Contains(line, "ERROR:") || strings.Contains(line, "FATAL:") || strings.Contains(line, "error:") {
+			line = psqlLinePrefix.ReplaceAllString(line, "")
+			return "psql: " + strings.Join(strings.Fields(line), " ")
+		}
+	}
+	return "psql: " + errText(err)
+}
+
+var psqlLinePrefix = regexp.MustCompile(`^psql:[^:]*:\d+: `)
+
+func errText(err error) string {
+	if err == nil {
+		return "exit status 0"
+	}
+	return err.Error()
 }
 
 func nonEmpty(ss ...string) []string {

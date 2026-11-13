@@ -26,14 +26,17 @@
 // What the status cannot say. Its route is behind the admin guards, which
 // read the session from the database, and while the restore's transaction
 // runs it holds exclusive locks on those tables: a read gets no answer until
-// the restore has committed or rolled back (or until the server gives up,
-// after 60 s, with a 504, or its session check with a 401 or 500). The 202
-// says "validating", and the read that would say "replacing" is the one that
-// waits, so every read of a followed restore that is slow, given up, or
-// refused that way is said as the wait it most likely is (REPLACING), never
-// as advice to sign in. Reads go one at a time, each given up after
-// READ_TIMEOUT_MS, so a tab holds at most one of the server's database
-// connections waiting on the restore. A successful restore replaces the
+// the restore has committed or rolled back. (The token check runs with no
+// deadline once its 60 s cache has lapsed; with a fresh cache the session
+// check gives up after 60 s with a 500.) The 202 says "validating", and the
+// read that would say "replacing" is the one that waits, so every read of a
+// followed restore that is slow, given up, or refused that way is said as the
+// wait it most likely is (REPLACING), never as advice to sign in. Reads go one
+// at a time, each given up after READ_TIMEOUT_MS, so this tab's status reads
+// hold at most one of the server's database connections at a time (the scan
+// bar pauses while a restore is followed: restoreFollowed); every other
+// request the app makes meanwhile waits too, and the server's connections
+// (10 by default) are soon all waiting until the restore ends. A successful restore replaces the
 // sessions with the backup's (none), so everyone is signed out, the admin
 // included, and the admin is told after signing in again (before a restart,
 // which forgets the outcome); a failed one leaves everyone signed in. The
@@ -86,9 +89,9 @@ const set = (next: Partial<State>) => {
 const POLL_MS = 3000
 const POLL_UNREADABLE_MS = 10_000
 // A read out this long during the replacing step is said to be waiting for
-// it; one out this long is given up (past the server's own 60 s, so its 504
-// normally comes first). One read at a time, so a tab holds at most one of
-// the server's database connections waiting on the restore.
+// it; one out this long is given up (past the session check's own 60 s,
+// whose 500 comes first when the token check's cache is fresh). One read at a
+// time.
 const SLOW_READ_MS = 5000
 const READ_TIMEOUT_MS = 75_000
 let pollMs = POLL_MS
@@ -180,6 +183,12 @@ function apply(followed: FollowedRestore, st: RestoreStatus) {
     return
   }
   finish({ accountId: followed.accountId, file: followed.file, ok: false, failure: { says: NO_RECORD, server: null } })
+}
+
+/** Whether this tab follows a restore now (the scan bar pauses its polling
+ *  meanwhile). */
+export function restoreFollowed(): boolean {
+  return !!state.following
 }
 
 /** The followed restore has ended (or the server has no record of it). */
@@ -308,8 +317,9 @@ export const NO_ANSWER = 'No answer came from the server, so it is not known how
 
 /** Why the followed restore's status could not be read. While its
  *  transaction runs the server's session check waits on its locks, so a read
- *  that waited (given up here, a 504, or a 401 or 500 from the check giving
- *  up) is that wait, and is said as REPLACING, never as advice to sign in.
+ *  that waited (given up here, a 500 or 401 from the check giving up, or a
+ *  504 from a proxy in front that gave up first) is that wait, and is said as
+ *  REPLACING, never as advice to sign in.
  *  No answer at all is said as that; anything else as what it is. */
 function unreadableFailure(e: unknown): Failure {
   if (e instanceof NetworkError) return { says: NO_ANSWER, server: null }
@@ -331,7 +341,7 @@ function outcomeOf(followed: FollowedRestore, r: RestoreResult): RestoreOutcome 
       : ''
   let says: string
   if (r.database === 'unknown') {
-    says = `${stopped}The connection to the database was lost as the restore was committing, so it is not known whether it took effect: the database holds either what it held before or the backup, never a mix. Check which before going on.`
+    says = `${stopped}The restore was cut off as it was being committed (the connection to the database was lost, or the server stopped it), so it is not known whether it took effect: the database holds either what it held before or the backup, never a mix. Check which before going on.`
   } else if (r.phase === 'validating') {
     says = `${stopped}The restore did not start changing anything, so the database is as it was. Read what the server said before trying again.`
   } else {

@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -103,6 +102,9 @@ func newJobHandler(t *testing.T, base context.Context, f *fakeRestore) *AdminHan
 	t.Helper()
 	rj := NewRestoreJobs(base)
 	rj.run = f.run
+	// Client programs that pass the handler's check, whatever this machine
+	// has installed.
+	rj.tools = fakeTools(t, "  --restrict-key=RESTRICT_KEY", "  \\unrestrict RESTRICT_KEY")
 	h := &AdminHandler{databaseURL: "postgres://aurora@127.0.0.1:1/none"}
 	h.SetRestoreJobs(rj)
 	return h
@@ -405,8 +407,8 @@ esac
 // points nowhere, so reaching the transaction would end in phase
 // "replacing"), and the status must say the database was not changed.
 func TestThePipelineValidatesBeforeTheWipe(t *testing.T) {
-	if _, err := exec.LookPath("pg_restore"); err != nil {
-		t.Skip("pg_restore not on PATH")
+	if msg := (restoreTools{}).missingRestrictSupport(context.Background()); msg != "" {
+		t.Skip(msg)
 	}
 	h := &AdminHandler{databaseURL: "postgres://aurora@127.0.0.1:1/none"}
 	h.SetRestoreJobs(NewRestoreJobs(context.Background()))
@@ -553,13 +555,18 @@ func TestClientProgramsWithoutRestrictKeyAreRefused(t *testing.T) {
 	newPgRestore := "  --restrict-key=RESTRICT_KEY  use provided string as psql \\restrict key"
 	newPsql := "  \\unrestrict RESTRICT_KEY  exit restricted mode if key matches"
 	if got := fakeTools(t, newPgRestore, newPsql).missingRestrictSupport(ctx); got != "" {
-		t.Fatalf("both programs have it, yet %q is reported missing", got)
+		t.Fatalf("both programs have it, yet %q is reported", got)
 	}
-	if got := fakeTools(t, "  --no-owner", newPsql).missingRestrictSupport(ctx); got != "pg_restore" {
-		t.Errorf("an old pg_restore: reported %q, want pg_restore", got)
+	if got := fakeTools(t, "  --no-owner", newPsql).missingRestrictSupport(ctx); !strings.Contains(got, "pg_restore is too old") {
+		t.Errorf("an old pg_restore: reported %q", got)
 	}
-	if got := fakeTools(t, newPgRestore, "  \\warn TEXT"); got.missingRestrictSupport(ctx) != "psql" {
-		t.Errorf("an old psql: reported %q, want psql", got.missingRestrictSupport(ctx))
+	if got := fakeTools(t, newPgRestore, "  \\warn TEXT").missingRestrictSupport(ctx); !strings.Contains(got, "psql is too old") {
+		t.Errorf("an old psql: reported %q", got)
+	}
+	missing := fakeTools(t, newPgRestore, newPsql)
+	missing.pgRestore = filepath.Join(t.TempDir(), "no-such-pg_restore")
+	if got := missing.missingRestrictSupport(ctx); !strings.Contains(got, "has no pg_restore") {
+		t.Errorf("a missing pg_restore: reported %q, want it called missing", got)
 	}
 	// Through the pipeline: refused while validating, nothing changed, and
 	// the archive is never read.
@@ -567,6 +574,22 @@ func TestClientProgramsWithoutRestrictKeyAreRefused(t *testing.T) {
 	if end.ok || end.phase != RestoreValidating || end.database != RestoreDBUnchanged || !strings.Contains(end.message, "--restrict-key") {
 		t.Fatalf("pipeline with an old pg_restore: %+v", end)
 	}
+	// Through the handler: refused before the upload is read, nothing
+	// started, the lock free.
+	f := newFakeRestore()
+	h := newJobHandler(t, context.Background(), f)
+	h.restores().tools = fakeTools(t, "  --no-owner", newPsql)
+	rec := httptest.NewRecorder()
+	h.Restore(rec, restoreRequest(t, context.Background(), "aurora.dump", archiveLike()))
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "--restrict-key") {
+		t.Fatalf("a restore with an old pg_restore: %d %s", rec.Code, rec.Body.String())
+	}
+	select {
+	case <-f.started:
+		t.Fatal("a restore started with an old pg_restore")
+	default:
+	}
+	waitUnlocked(t, h)
 }
 
 // TestThePsqlProgressReaderFindsTheCommitLines: the commit block's lines are

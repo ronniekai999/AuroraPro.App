@@ -11,6 +11,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { getScanStatus, listLibraries, type Library, type ScanStatus } from '@/lib/api'
+import { restoreFollowed } from './admin/restoreOutcome'
 
 interface ProgressItem {
   library: Library
@@ -56,7 +57,17 @@ export function ScanProgressBar({ isAdmin, onScanComplete, onOpenLibraries }: {
   useEffect(() => {
     if (!isAdmin || libraries.length === 0) return
     let cancelled = false
+    let polling = false
     const tick = async () => {
+      // One poll at a time, and none while this tab follows a database
+      // restore: its transaction holds locks the status read waits on, and a
+      // poll every 4 s would stack requests, each holding one of the
+      // server's database connections until the restore ends.
+      if (polling || restoreFollowed()) return
+      polling = true
+      try { await poll() } finally { polling = false }
+    }
+    const poll = async () => {
       // Collect only the libraries that ANSWERED, then merge over the previous
       // map. Rebuilding from empty each poll meant one failed request dropped
       // that library, which read as "no longer running" — indistinguishable

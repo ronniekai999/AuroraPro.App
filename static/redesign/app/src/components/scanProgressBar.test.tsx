@@ -12,6 +12,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ScanProgressBar } from './ScanProgressBar'
+import { followRestore, resetRestoreOutcomeForTest } from './admin/restoreOutcome'
 
 const listLibraries = vi.hoisted(() => vi.fn())
 const getScanStatus = vi.hoisted(() => vi.fn())
@@ -25,7 +26,7 @@ beforeEach(() => {
   listLibraries.mockResolvedValue([LIB])
   getScanStatus.mockReset()
 })
-afterEach(() => { cleanup(); vi.useRealTimers() })
+afterEach(() => { cleanup(); vi.useRealTimers(); resetRestoreOutcomeForTest() })
 
 /** Advance past one 4s poll tick and let its promises settle. */
 const tick = async () => {
@@ -199,5 +200,31 @@ describe('ScanProgressBar — scan completion signal', () => {
     await tick()
     // The prop is optional; the transition must not throw when it is absent.
     rerender(<ScanProgressBar isAdmin />)
+  })
+
+  // A database restore holds locks the scan-status read waits on. A poll
+  // every 4 s used to stack requests, each holding one of the server's
+  // database connections until the restore ended.
+  it('polls one at a time: a poll still out holds the next back', async () => {
+    getScanStatus.mockReturnValue(new Promise(() => {}))
+    render(<ScanProgressBar isAdmin onScanComplete={() => {}} />)
+    await waitFor(() => expect(getScanStatus).toHaveBeenCalledTimes(1))
+    await tick()
+    await tick()
+    await tick()
+    expect(getScanStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('asks nothing while this tab follows a database restore, and goes on after it', async () => {
+    getScanStatus.mockResolvedValue(status('idle'))
+    followRestore(1, { id: 'j1', file: 'aurora.dump', phase: 'validating', started_at: '' })
+    render(<ScanProgressBar isAdmin onScanComplete={() => {}} />)
+    await waitFor(() => expect(listLibraries).toHaveBeenCalled())
+    await tick()
+    await tick()
+    expect(getScanStatus).not.toHaveBeenCalled()
+    resetRestoreOutcomeForTest()
+    await tick()
+    await waitFor(() => expect(getScanStatus).toHaveBeenCalled())
   })
 })

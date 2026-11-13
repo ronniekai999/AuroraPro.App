@@ -40,6 +40,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -56,10 +57,13 @@ func requireBackupTestDB(t *testing.T) (*pgxpool.Pool, string) {
 	if dbURL == "" {
 		t.Skip("TEST_BACKUP_DATABASE_URL not set; skipping destructive backup roundtrip test")
 	}
-	for _, bin := range []string{"pg_dump", "pg_restore"} {
+	for _, bin := range []string{"pg_dump", "pg_restore", "psql"} {
 		if _, err := exec.LookPath(bin); err != nil {
 			t.Skipf("%s not on PATH; skipping", bin)
 		}
+	}
+	if msg := (restoreTools{}).missingRestrictSupport(context.Background()); msg != "" {
+		t.Skip(msg)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1033,6 +1037,14 @@ func TestALockTimeoutAbortsTheRestoreAndKeepsTheOldData(t *testing.T) {
 	if !strings.Contains(got.Stderr, "lock timeout") {
 		t.Errorf("stderr %q does not carry the lock timeout", got.Stderr)
 	}
+	// psql's error is the cause, said first: not pg_restore's death, which
+	// only followed it (the page shows the first 200 characters).
+	if !strings.Contains(got.Message, "lock timeout") || strings.Contains(got.Message, "pg_restore failed") {
+		t.Errorf("message %q; want psql's lock timeout, not pg_restore", got.Message)
+	}
+	if !strings.HasPrefix(got.Stderr, "psql:") {
+		t.Errorf("stderr %q; want psql's error first", got.Stderr)
+	}
 	f.assertOldData(t)
 }
 
@@ -1151,7 +1163,9 @@ func TestPsqlReachingEndOfInputWithoutTheCommitRollsBack(t *testing.T) {
 				t.Fatalf("the cut kept %d lines; it should end the stream part way", len(kept))
 			}
 			connURL, pgEnv := pgConnEnv(f.dbURL)
-			psql := exec.Command("psql", "-X", "--quiet", "--no-password", "--set", "ON_ERROR_STOP=on", "-f", "-", connURL)
+			// The pipeline's own arguments: with --single-transaction among
+			// them, psql would COMMIT here.
+			psql := exec.Command("psql", restorePsqlArgs(connURL)...)
 			psql.Env = append(os.Environ(), pgEnv...)
 			psql.Stdin = strings.NewReader(restorePreamble(restoreLockTimeout) + strings.Join(kept, "\n") + "\n")
 			res, err := psql.CombinedOutput()
@@ -1179,6 +1193,116 @@ func TestADroppedConnectionMidRestoreLeavesTheOldData(t *testing.T) {
 	got := waitRestoreEnd(t, f.jobs, id)
 	if got.Succeeded || got.Database != RestoreDBUnchanged {
 		t.Fatalf("outcome %+v, want failed with the database unchanged", got)
+	}
+	f.assertOldData(t)
+}
+
+// wrapPsql writes a stand-in for psql that runs body, a bash fragment with
+// $REAL set to the real psql and "$@" its arguments.
+func (f *restoreFixture) wrapPsql(t *testing.T, body string) {
+	t.Helper()
+	real, err := exec.LookPath("psql")
+	if err != nil {
+		t.Skip("psql not on PATH")
+	}
+	path := filepath.Join(t.TempDir(), "psql")
+	if err := os.WriteFile(path, []byte("#!/bin/bash\nREAL='"+real+"'\n"+body+"\n"), 0o755); err != nil {
+		t.Fatalf("write the psql stand-in: %v", err)
+	}
+	f.jobs.tools.psql = path
+}
+
+// restoreHoldsLocks reports whether the restore's database session still
+// holds a lock.
+func (f *restoreFixture) restoreHoldsLocks(t *testing.T) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return f.query(t, ctx, `SELECT count(*)::int FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+		WHERE a.application_name = $1`, restoreAppName) > 0
+}
+
+// TestAKilledPsqlFreesTheLocksWithinSeconds: on a stop systemd sends SIGTERM
+// to every process in the unit, psql included, and psql dies without asking
+// the server to cancel. Its session used to hold every lock until the
+// statement in flight ended, and the long ones (the vector index build, the
+// foreign-key checks) come last: the next start waited in its migrations.
+// client_connection_check_interval makes the server notice the lost client
+// within seconds. The stand-in pg_restore ends its stream with a 30-second
+// statement, as a long index build would.
+func TestAKilledPsqlFreesTheLocksWithinSeconds(t *testing.T) {
+	f := newRestoreFixture(t)
+	f.wrapPgRestore(t, `"$REAL" "$@" | awk '/^\\unrestrict / {print "SELECT pg_sleep(30);"} {print}'
+exit ${PIPESTATUS[0]}`)
+	pidFile := filepath.Join(t.TempDir(), "psql.pid")
+	f.wrapPsql(t, `echo $$ > '`+pidFile+`'
+exec "$REAL" "$@"`)
+	id := restoreAsJob(t, f.h, context.Background(), f.dump)
+
+	// The restore's session is in its last, long statement.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		n := f.query(t, ctx, `SELECT count(*)::int FROM pg_stat_activity WHERE application_name = $1 AND query LIKE '%pg_sleep%' AND state = 'active'`, restoreAppName)
+		cancel()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the restore never reached its last statement; status %+v", f.jobs.Status())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read psql's pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("psql's pid %q: %v", raw, err)
+	}
+	// systemd's stop.
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM psql: %v", err)
+	}
+	killed := time.Now()
+	for f.restoreHoldsLocks(t) {
+		if time.Since(killed) > 10*time.Second {
+			t.Fatal("the killed psql's session still holds the restore's locks after 10 s: the server has not noticed the lost client")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Logf("locks freed %v after psql was killed", time.Since(killed).Round(time.Millisecond))
+	got := waitRestoreEnd(t, f.jobs, id)
+	if got.Succeeded || got.Database != RestoreDBUnchanged {
+		t.Fatalf("outcome %+v, want failed with the database unchanged", got)
+	}
+	f.assertOldData(t)
+}
+
+// TestTheCommitGuardHoldsWhenTheJobIsStopped pins the guard's other half: a
+// stream that finishes whole after the job was stopped gets no COMMIT. The
+// stand-ins ignore the stop's interrupt (psql in a session of its own), so
+// only the guard's check of the job's context stands between the whole
+// stream and a COMMIT.
+func TestTheCommitGuardHoldsWhenTheJobIsStopped(t *testing.T) {
+	f := newRestoreFixture(t)
+	base, stopServer := context.WithCancel(context.Background())
+	defer stopServer()
+	f.jobs = NewRestoreJobs(base)
+	f.h.SetRestoreJobs(f.jobs)
+	f.wrapPgRestore(t, `trap '' INT
+"$REAL" "$@" | awk '{print} !d && /^COPY / {fflush(); system("sleep 3"); d=1}'
+exit ${PIPESTATUS[0]}`)
+	f.wrapPsql(t, `trap '' INT
+setsid -w "$REAL" "$@"`)
+	oid := f.mediaItemsOID(t)
+	id := restoreAsJob(t, f.h, context.Background(), f.dump)
+	f.waitForTheLock(t, oid)
+	stopServer()
+	got := waitRestoreEnd(t, f.jobs, id)
+	if got.Succeeded || got.Database != RestoreDBUnchanged || got.Stopped != "shutdown" {
+		t.Fatalf("outcome %+v, want stopped by shutdown with the database unchanged", got)
 	}
 	f.assertOldData(t)
 }

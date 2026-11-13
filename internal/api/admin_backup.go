@@ -413,6 +413,14 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		_ = rc.SetReadDeadline(time.Now().Add(65 * time.Minute))
 	}
 
+	// Client programs that cannot run a restore safely (missing, or older
+	// than pg_restore --restrict-key) are refused before the upload is read:
+	// the job's validation would refuse them anyway, after the whole file.
+	if msg := h.restores().tools.missingRestrictSupport(r.Context()); msg != "" {
+		writeError(w, http.StatusInternalServerError, msg+" — no restore was started and the database was NOT modified")
+		return
+	}
+
 	// 2026-05-16 audit H3 — serialize backup/restore operations. See
 	// Backup for the rationale. Same mutex — both endpoints share it. It
 	// is held from here for the restore job's whole life: once the job has

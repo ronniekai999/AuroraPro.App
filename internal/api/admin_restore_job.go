@@ -31,8 +31,11 @@ package api
 // once the HTTP server has drained, and systemd's default KillMode
 // (control-group) sends SIGTERM to psql and pg_restore at the same moment as
 // to this process; either way psql ends without the COMMIT, and PostgreSQL
-// rolls the transaction back. The restore is lost and the old data stays; the
-// admin runs it again. The deploy scripts' drain waits up to its 5 minutes for
+// rolls the transaction back: at once for psql's SIGINT (it cancels its
+// statement), within a second or two of the statement in flight noticing the
+// lost client for a killed psql (client_connection_check_interval, see
+// restorePreamble), which the next start's migrations may wait out. The
+// restore is lost and the old data stays; the admin runs it again. The deploy scripts' drain waits up to its 5 minutes for
 // a running restore before restarting (it counts in the stream-state
 // snapshot; cmd/aurora wires that).
 //
@@ -358,10 +361,14 @@ func restoreFileName(name string) string {
 //
 // Those guards read the session from the database (the token version, the
 // session row, the acting profile), and while the restore's transaction runs
-// it holds exclusive locks on those tables: the guards' queries wait for it,
-// so this route answers once the restore has committed or rolled back (or,
-// past the admin group's 60-second timeout, 504). The Admin page says so. A
-// committed restore replaces the sessions with the backup's (none), so the
+// it holds exclusive locks on those tables: the guards' queries wait for it.
+// RequireAuth's token-version read (cached 60 s) runs outside the admin
+// group's 60-second timeout and has no deadline of its own, so once its cache
+// has lapsed a read waits until the restore ends or the client gives up; with
+// a fresh cache, the session check inside the group gives up after 60 s and
+// answers 500. Each waiting read holds one of the server's database
+// connections. The Admin page reads one at a time and says what the wait is.
+// A committed restore replaces the sessions with the backup's (none), so the
 // admin signs in again to read it.
 func (h *AdminHandler) RestoreStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")

@@ -45,8 +45,11 @@ Fix or file each item, and delete it here when it is no longer true.
   restore ends every session, so the admin is told after signing in again
   (not checked: whether signing in works before the restart the restore asks
   for), only while the server has not restarted (the status is in its
-  memory). A stop, an update's restart or the 60-minute bound undoes a
-  running restore, which leaves the old data and has to be run again. On the
+  memory); a tab that never saw it running (opened while the transaction
+  held its locks) is not told the outcome at all. A stop, an update's restart
+  or the 60-minute bound undoes a running restore, which leaves the old data
+  and has to be run again. While it runs, every request that needs the
+  database waits, and the server's connections are soon all waiting. On the
   Admin page, an answer that lands after its section has been left is said
   nowhere, except a restore's outcome and the AI settings' restart notice (shown when that
   section is opened again). The server's approve checks a request's status and

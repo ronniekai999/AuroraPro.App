@@ -212,11 +212,14 @@ backend served the new frontend.
 
 A database restore started from the Admin page runs as a job on the server, in
 one transaction, and a restart stops it: the transaction rolls back, the old
-data stays, and the admin has to run the restore again. The server counts a
-running restore as one in the drain snapshot's `held_by_viewer` (and in its
-own `restore` field), so the drain waits up to its five minutes for it, as
-for a viewer, before restarting; the updater's log and status say "viewers or
-a database restore".
+data stays, and the admin has to run the restore again. The rolled-back
+session lets go of its locks about a second after its psql is killed, so the
+restarted server's migrations can wait that long. The server counts a running
+restore as one in the drain snapshot's `held_by_viewer` (and in its own
+`restore` field), so the drain waits up to its five minutes for it, as for a
+viewer, before restarting; the updater's log says "held by viewers or a
+database restore", and its status "Waiting for active stream sessions or a
+database restore to finish".
 
 Browser tabs left open across a deploy run the build they loaded, and the
 previous build's chunks are deleted. The SPA compares the build id it was loaded

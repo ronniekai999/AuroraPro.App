@@ -1373,10 +1373,13 @@ count restarts).
   waits for it as for a viewer, with no change to the shared block, and
   restarts anyway after its 5 minutes. A restart stops a restore, whose
   transaction then rolls back: the old data stays, and the admin runs the
-  restore again (see "Admin page dialogs and the restore"). The updater's own
-  log and status lines outside the block say "viewers or a database
-  restore"; the block's comments and its function names still speak of
-  viewers only.
+  restore again (see "Admin page dialogs and the restore"); the restarted
+  server's migrations can wait a second or two for the stopped restore's
+  session to go. The updater's own lines outside the block name it: its log
+  says "held by viewers or a database restore" and "waiting for viewers (or
+  a database restore)", its status "Waiting for active stream sessions or a
+  database restore to finish". The block's comments and its function names
+  still speak of viewers only.
 
 ### Node build floor
 
@@ -2148,9 +2151,10 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   the job's end, however it ends (the job releases it and removes the temp
   file); a second restore or a backup meanwhile is a 409.
 - The job validates (`validating`), touching nothing: pg_restore and psql
-  must have the `\restrict` pair (`pg_restore --restrict-key`, PostgreSQL
-  17.6, 16.10, 15.14, 14.19, 13.22; without it a crafted archive could make
-  psql run `\!` shell commands), the archive's table of contents may hold
+  must be there and have the `\restrict` pair (`pg_restore --restrict-key`,
+  PostgreSQL 17.6, 16.10, 15.14, 14.19, 13.22; without it a crafted archive
+  could make psql run `\!` shell commands; checked also before the upload is
+  read, so a missing or old program is a 500 at once), the archive's table of contents may hold
   only entry types that run inside a transaction (`restoreTOCAllowed`:
   large objects, whose section pg_restore wraps in its own BEGIN and
   COMMIT, a database, subscriptions and the like are refused), and the
@@ -2166,21 +2170,39 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   (30 s per lock in the wipe) or a deadlock, a stop (SIGINT, or systemd's
   SIGTERM to every process in the unit) or a dropped connection ends psql
   without a COMMIT and PostgreSQL rolls everything back: the old data
-  stays and everyone stays signed in. psql prints a marker line on each side
+  stays and everyone stays signed in. The rollback, and with it the end of
+  the locks, is at once after psql's SIGINT (it cancels its statement); after
+  a killed psql (systemd's SIGTERM, an OOM kill, the job's SIGKILL 15 s after
+  its SIGINT) it waits for the statement in flight to notice the lost client,
+  which `client_connection_check_interval = 1s` (in the preamble, PostgreSQL
+  14+) makes about a second (`TestAKilledPsqlFreesTheLocksWithinSeconds`:
+  under a second here); without it, the session kept every lock until the
+  statement ended, and the long ones (the vector index build, the foreign-key
+  checks) are last, so the next start waited in its migrations. A failure
+  is reported by its cause: psql's own error first when psql stopped reading
+  (a lock timeout, a deadlock, a permission error), not pg_restore's death
+  that followed. psql prints a marker line on each side
   of the COMMIT (to stderr), which decides `restored`; the job does not
   interrupt a COMMIT psql has reached (it waits up to 60 s), though a stop's
   SIGTERM from systemd reaches psql directly. Outcomes: `unchanged`
   (any failure), `restored`, or `unknown`, only when psql was cut off after
-  sending the COMMIT and before saying how it ended (the database is then
-  the old data or the backup, never a mix and never empty). No path leaves
-  it empty. While the transaction runs it holds ACCESS EXCLUSIVE locks on
-  every table it dropped: the server's other queries on them wait for it
-  (and then see the restored data, or the old after a rollback) rather than
-  fail, each request until its own timeout (60 s on most routes), holding a
-  pool connection (10 by default) meanwhile, so pages and playback stall and
-  the pool frees itself as those time out and when the transaction ends. The
-  old tables' files stay until the COMMIT, so the database needs room for a
-  second copy. A committed restore replaces the sessions with the backup's
+  sending the COMMIT and before saying how it ended (a lost connection, a
+  kill by the job after its 60 s grace or by a signal from outside; the
+  database is then the old data or the backup, never a mix and never empty).
+  No path leaves it empty. While the transaction runs it holds ACCESS
+  EXCLUSIVE locks on every table it dropped: the server's other queries on
+  them wait for it rather than fail, and once it ends they run against the
+  restored data (or the old, after a rollback), writes included (progress,
+  activity, a scan's inserts). Each waiting query holds one of the pool's
+  connections (10 by default), and they are soon all taken: then every
+  request that needs the database, `/api/health`'s ping included, waits
+  for a connection too. A request whose deadline passes (60 s on most
+  routes) or whose client leaves gives its connection back; the token
+  check in `RequireAuth` runs with no deadline of its own, so an
+  authenticated request whose 60 s token cache has lapsed waits until the
+  transaction ends or its client gives up. Pages and playback stall until
+  then, and the pool recovers when it ends. The old tables' files stay
+  until the COMMIT, so the database needs room for a second copy. A committed restore replaces the sessions with the backup's
   (none): everyone is signed out. The server does not wait for a restore at
   shutdown: a stop or an update's restart (after its drain's 5 minutes)
   rolls it back, and the admin runs it again.
@@ -2189,9 +2211,11 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   (succeeded, the phase it ended in, `database`, the server's sentence,
   pg_restore's stderr and the tail of psql's, `stopped`
   `shutdown`/`timeout`), in memory: a server restart forgets both. While the
-  transaction runs the guard's session read waits on its locks, so a read
-  gets no answer until the restore ends, or a 504 (the admin group's 60 s),
-  or a 401 or 500 from the session check giving up.
+  transaction runs the guards' reads wait on its locks: once the token
+  check's 60 s cache has lapsed a read gets no answer until the restore
+  ends (or the client gives up; the page does at 75 s); with a fresh cache
+  the session check gives up at the admin group's 60 s and answers 500
+  (a 504 comes only from a proxy in front).
 - The web app follows the job by id (`restoreOutcome.ts`), kept in the
   tab's sessionStorage so a reload, or a sign-out and sign-in in the tab,
   goes on following it and says its outcome from `last`. The upload's
@@ -2205,7 +2229,10 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   restart. Reads go one at a time, each given up after 75 s, every 3 s (10 s
   while one cannot be read), only while the backup panel or
   `RestoreOutcomeAlert` (mounted by App for `adminUI && user`) is mounted for
-  the following account, so a signed-out tab asks nothing. A read of a
+  the following account, so a signed-out tab asks nothing; those reads hold
+  at most one of the server's connections per tab, and the scan bar's 4 s
+  poll goes one at a time and asks nothing while the tab follows a restore
+  (`restoreFollowed`). A read of a
   followed restore that is slow (5 s), given up, or answered 504, 401 or
   5xx is said as the wait it is ("The server has not answered yet. While
   the restore replaces the database… Do not restart the server meanwhile:
@@ -2229,23 +2256,28 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   running; a page opened mid-restore in the panel and in the app; a failed
   look retried; no answer; a refusal that is not the wait; the alert
   elsewhere; no reads with no watcher; another account; another account's
-  refused upload; an upload with no answer) and the
+  refused upload; an upload with no answer), `scanProgressBar.test.tsx`
+  (one poll at a time; none while a restore is followed) and the
   `AdminView.results`/`confirms`/`waiting` tests; server side by
   `admin_restore_job_test.go` (the request's context cancelled while the
   job runs, the lock for the job's life, the phases, the publish on start
   and end, a stop, a validation stopped by a stop, the table-of-contents
-  types, programs without the restrict key, psql's marker lines, the
-  validation before the transaction with the real `pg_restore`, the
-  router's wiring and the restricted refusal), the
+  types, programs missing or without the restrict key (in the job and
+  before the upload), psql's marker lines, the validation before the
+  transaction with the real `pg_restore`, the router's wiring and the
+  restricted refusal), the
   `TEST_BACKUP_DATABASE_URL` tests in `admin_backup_test.go` (against
   PostgreSQL: a request cancelled mid-transaction while the restore still
   completes; a read during it waits and then sees the backup's rows; the
   guard: a pg_restore that exits 1 after a stream that looks whole is
-  never committed; pg_restore killed inside a COPY; psql reaching the end of
-  its input with no COMMIT, cut between statements and inside a COPY; a
-  dropped connection; a lock timeout; large objects refused; a truncated
-  archive refused; a stop mid-transaction; each leaving every table and the
-  old rows) and `cmd/aurora/restore_shutdown_test.go` (main's wiring, read
+  never committed, and a whole stream after the job was stopped is never
+  committed (both with stand-ins); pg_restore killed inside a COPY; psql,
+  run with the pipeline's own arguments, reaching the end of its input with
+  no COMMIT, cut between statements and inside a COPY; a killed psql in a
+  long last statement freeing the locks within seconds; a dropped
+  connection; a lock timeout, reported as psql's; large objects refused; a
+  truncated archive refused; a stop mid-transaction; each leaving every
+  table and the old rows) and `cmd/aurora/restore_shutdown_test.go` (main's wiring, read
   from the source).
 - Known gaps: from the moment the transaction takes its locks until it
   ends, the status route answers no one, so the page cannot say how far
@@ -2256,7 +2288,11 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   signing in works before the restart the restore asks for was not
   checked (the server's own database connections can need it). A stop, an
   update's restart or the 60-minute bound undoes a running restore, which
-  then has to be run again. An archive crafted to hold a COMMIT inside an
+  then has to be run again; after a killed psql the locks outlast it by
+  about a second, which the next start's migrations wait. A tab that never
+  saw the restore running (opened while the transaction held its locks, so
+  its look for one got no answer) is not told the outcome: after the commit
+  it finds nothing running and does not show `last`. An archive crafted to hold a COMMIT inside an
   allowed entry could end the transaction early; only an admin can upload
   one. Restoring needs pg_restore and psql from August 2025 or later. An
   answer that lands after its section was left is said nowhere, except a
