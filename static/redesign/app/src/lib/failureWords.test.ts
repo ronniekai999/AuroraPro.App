@@ -99,6 +99,11 @@ describe('serverSaidForAdmin: the server\'s own text, for the Admin page only', 
     expect(serverSaidForAdmin(new APIError(500, 'a\u200eb\u200fc\u061cd e\u2060f\u2064g h\u200di', null))).toBe('The server said: abcd efg hi')
     // A family emoji keeps its joiners.
     expect(serverSaidForAdmin(new APIError(500, 'it is 👩\u200d👩\u200d👧', null))).toBe('The server said: it is 👩\u200d👩\u200d👧')
+    // So do sequences with a skin tone or the presentation selector before
+    // the joiner.
+    for (const seq of ['👨🏽\u200d💻', '❤️\u200d🔥', '🏳️\u200d🌈']) {
+      expect(serverSaidForAdmin(new APIError(500, seq, null))).toBe(`The server said: ${seq}`)
+    }
   })
 
   it('is cut on whole characters', () => {

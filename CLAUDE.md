@@ -2025,7 +2025,11 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   a secondary line (`serverSaidForAdmin`); views not yet moved onto the
   helper still show it (known gap until they are). The browser's own alert,
   confirm and prompt boxes are not used: `noNativeDialogs.test.ts` reads
-  every source file, with a list of files still being moved off them. A
+  every source file with a scanner that blanks comments only (it knows
+  strings, template literals, regular expressions and both comment kinds),
+  with a list of files still being moved off them; a name built at run
+  time is not seen. The app's own question (`ConfirmDialog`, one state in
+  App) is cleared by a sign-out, an expiry and a profile switch. A
   title page whose title answers 404 is left (the step Back takes) and
   "This title is not available." is said where the viewer lands.
 - Pinned by `AuthView.test.tsx`, `Toast.test.tsx`, `lib/libraryUndo.test.ts`,

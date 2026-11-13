@@ -1171,6 +1171,15 @@ const PAGE_TITLES: Record<string, string> = {
 // malformed deep link falls through to the home view instead of a
 // dangling detail page.
 const TITLE_PATH_RE = /^\/title\/(\d+)$/
+// Whether the browser has already moved to another history entry that the
+// router has not caught up with (its Back, pressed a moment ago): the
+// entry's own key, which BrowserRouter keeps in history.state, differs from
+// the location's. Unknown (no key there) reads as no.
+function stepBackUnderWay(locationKey: string): boolean {
+  const key = (window.history.state as { key?: unknown } | null)?.key
+  return typeof key === 'string' && key !== locationKey
+}
+
 function titleIdFromPath(pathname: string): number | null {
   const m = TITLE_PATH_RE.exec(pathname)
   return m ? Number(m[1]) : null
@@ -1498,6 +1507,7 @@ export default function App() {
   const closeAddToList = useCallback(() => {
     const from = addToListOpenerRef.current
     setAddToListMedia(null)
+    setAddToListFailed(null)
     if (!from) return
     const back = from.el?.isConnected
       ? from.el
@@ -1517,6 +1527,12 @@ export default function App() {
   // own dialog, components/settings/ConfirmDialog; the browser's native box
   // was used before). `run` is what the confirm button does, once.
   const [confirmAsk, setConfirmAsk] = useState<{ title: string; body: string; confirmLabel: string; destructive?: boolean; run: () => void } | null>(null)
+  // The question as it is now, for its confirm button: a second press on a
+  // dialog that is closing finds it gone and runs nothing.
+  const confirmAskRef = useRef(confirmAsk)
+  useLayoutEffect(() => { confirmAskRef.current = confirmAsk }, [confirmAsk])
+  // Titles whose removal from the library is out.
+  const deletingMediaRef = useRef(new Set<number>())
   useEffect(() => {
     if (!addToListMedia || !activeProfileId) { setAddToListLists(null); return }
     let cancelled = false
@@ -2138,6 +2154,9 @@ export default function App() {
     else if (wanted) navigate('/device', { replace: true })
   }, [user, navigate])
   const location = useLocation()
+  // The address as it is now, for an answer that lands after the press.
+  const locationRef = useRef(location)
+  useLayoutEffect(() => { locationRef.current = location }, [location])
   const previousPathnameRef = useRef(location.pathname)
   // The address the effect below last acted on (null before its first run).
   const syncedPathnameRef = useRef<string | null>(null)
@@ -3117,13 +3136,17 @@ export default function App() {
   // The title page's way out when its title cannot be read (the detail read
   // below): Back, with the reason said where it lands. A ref, so that read
   // does not run again whenever the address changes.
-  const leaveMissingTitleRef = useRef(() => {})
+  const leaveMissingTitleRef = useRef((_id: number) => {})
   useLayoutEffect(() => {
-    leaveMissingTitleRef.current = () => {
-      addToast('This title is not available.', 'info')
+    leaveMissingTitleRef.current = (id: number) => {
+      // Only from that title's page, and not when a step back is under way
+      // already (the browser's Back, pressed while the read was out): two
+      // steps would leave the page the viewer went back to.
+      if (titleIdFromPath(location.pathname) !== id || stepBackUnderWay(location.key)) return
+      addToast('This title is not available.', 'error')
       handleBack()
     }
-  }, [addToast, handleBack])
+  }, [addToast, handleBack, location.pathname, location.key])
 
   // Handle keyboard shortcuts
   useEffect(() => {
@@ -3623,6 +3646,10 @@ export default function App() {
   // login. Hoisted above the storage useEffect so both the explicit
   // logout and the cross-tab path can share it.
   const resetUserState = useCallback(() => {
+    // A question left open, and the add-to-list sheet's last failure, are
+    // whoever asked's: never the next session's.
+    setConfirmAsk(null)
+    setAddToListFailed(null)
     // What was typed in the search field goes with whoever typed it. It
     // stayed in the bar across a sign-out: the next person to sign in on
     // the tab found the last one's words there, a search ran for them under
@@ -4787,6 +4814,7 @@ export default function App() {
     // leak into the new render frame.
     setDetailSeasons([])
     setDetailSelectedSeason(null)
+    const switchGen = profileSwitchGeneration()
     ;(async () => {
       try {
         // The seasons list depends only on the id, and `selectedMedia.type`
@@ -4893,7 +4921,10 @@ export default function App() {
         // offered Play, saving and a party for a title none of them could
         // reach, beside a stale card's description.
         if (err instanceof APIError && err.status === 404) {
-          leaveMissingTitleRef.current()
+          // Across a profile switch the answer may be the previous
+          // profile's: the switch's own re-read of the open title decides.
+          if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) return
+          leaveMissingTitleRef.current(selectedMedia.id)
           return
         }
         // Anything else keeps the page, with the reason in the app's words.
@@ -4903,7 +4934,8 @@ export default function App() {
       }
     })()
     return () => { cancelled = true; ac.abort() }
-  }, [user, view, selectedMedia])
+    // The switch's two readers are stable (they read refs).
+  }, [user, view, selectedMedia, isProfileSwitching, profileSwitchGeneration])
 
   // 2026-05-27 — Continue Watching resume handler. Restored after the
   // PR #95 cleanup pass deleted it (see git blame on PR #95 for the
@@ -5460,16 +5492,24 @@ export default function App() {
   // first (destructive + irreversible), then navigates back off the now-gone
   // detail page and purges the local caches.
   const handleDeleteMedia = useCallback((m: Media) => {
+    // One removal of a title at a time: asked again while one is out, it is
+    // not asked (the question would send a second request for the same).
+    if (deletingMediaRef.current.has(m.id)) return
     const remove = async () => {
+      deletingMediaRef.current.add(m.id)
       try {
         await deleteMedia(m.id)
         purgeMediaFromCaches(m.id)
-        handleBack()
+        // Off the title's page, unless the viewer has left it already (the
+        // browser's Back while the question was up, or since).
+        if (titleIdFromPath(locationRef.current.pathname) === m.id && !stepBackUnderWay(locationRef.current.key)) handleBack()
         addToast(`Removed "${m.title}" from the library`, 'success')
       } catch (err) {
         // A 404: it was gone already (removed meanwhile, or by a scan).
         const msg = failureWords(err, `remove "${m.title}" from the library`, { status: { 404: `"${m.title}" is no longer in the library.` } })
         if (msg) addToast(msg, 'error')
+      } finally {
+        deletingMediaRef.current.delete(m.id)
       }
     }
     // What the server's delete does: the title's row goes, and with it
@@ -5761,7 +5801,7 @@ export default function App() {
       return {
         ok: false,
         error: failureWords(err, 'start the party', {
-          status: { 409: 'Could not start the party. If you already have one, a scheduled one included, end it from Together first.' },
+          status: { 409: 'Could not start the party. If you already have one, a scheduled one included, end it from Together first; otherwise try again.' },
         }) ?? undefined,
       }
     }
@@ -5942,6 +5982,10 @@ export default function App() {
     // with nothing typed. (A described ask needs no clearing here: it is
     // stamped with who made it and handed to the page only for them.)
     setSearchQuery('')
+    // A question left open (Remove from library, Leave and join) was asked
+    // of the session that has gone: the next one is not shown it.
+    setConfirmAsk(null)
+    setAddToListFailed(null)
     heroLoadRef.current++
     heroPoolRef.current = []
     setHeroPool(pool => (pool.length ? [] : pool))
@@ -5973,6 +6017,10 @@ export default function App() {
     // tab's, or a pick from the picker opened for an unreadable binding)
     // resets.
     if (!profilesSettledBeforeRef.current) return
+    // A question asked under the previous profile is not answered as the
+    // new one; nor is the add-to-list sheet's failure said to it.
+    setConfirmAsk(null)
+    setAddToListFailed(null)
     forgetDescribedAnswer()
     moviesLoadMoreAcRef.current?.abort()
     moviesLoadMoreAcRef.current = null
@@ -7599,7 +7647,7 @@ export default function App() {
       )}
 
       {addToListMedia && activeProfileId && (
-        <div className="fixed inset-0 z-[70] bg-[var(--scrim)] flex items-center justify-center p-4 stage-scrim-in" onClick={() => setAddToListMedia(null)}>
+        <div className="fixed inset-0 z-[70] bg-[var(--scrim)] flex items-center justify-center p-4 stage-scrim-in" onClick={() => { setAddToListMedia(null); setAddToListFailed(null) }}>
           <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 stage-dialog-in" onClick={e => e.stopPropagation()}>
             <h2 className="text-white text-lg font-semibold mb-2">Add "{addToListMedia.title}" to…</h2>
             <p className="text-white/50 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>
@@ -7652,7 +7700,12 @@ export default function App() {
         confirmLabel={confirmAsk?.confirmLabel ?? ''}
         destructive={confirmAsk?.destructive ?? false}
         safeFirst={confirmAsk?.destructive ?? false}
-        onConfirm={() => { const run = confirmAsk?.run; setConfirmAsk(null); run?.() }}
+        onConfirm={() => {
+          const run = confirmAskRef.current?.run
+          confirmAskRef.current = null
+          setConfirmAsk(null)
+          run?.()
+        }}
         onCancel={() => setConfirmAsk(null)}
       >
         {confirmAsk?.body ?? ''}

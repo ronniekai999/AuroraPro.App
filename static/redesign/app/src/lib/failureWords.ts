@@ -118,9 +118,10 @@ export function serverSaidForAdmin(err: unknown): string | null {
   if (!(err instanceof APIError) || typeof err.message !== 'string') return null
   const text = err.message
     // Directional marks, overrides and isolates, invisible operators and
-    // zero-width spaces: dropped. The zero-width joiner too, except between
-    // two pictographs, where it holds an emoji sequence together.
-    .replace(/(?<!\p{Extended_Pictographic})\u200d|\u200d(?!\p{Extended_Pictographic})/gu, '')
+    // zero-width spaces: dropped. The zero-width joiner too, except where it
+    // holds an emoji sequence together: after a pictograph, a skin-tone
+    // modifier or the emoji presentation selector, and before a pictograph.
+    .replace(/(?<!\p{Extended_Pictographic}|[\u{1F3FB}-\u{1F3FF}]|\uFE0F)\u200d|\u200d(?!\p{Extended_Pictographic})/gu, '')
     .replace(/[\u061c\u200b\u200c\u200e\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, '')
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')

@@ -28,6 +28,32 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, useNavigate } from 'react-router'
 import App from './App'
+import { SESSION_EXPIRED_EVENT } from '@/lib/api'
+
+// The party hook, as it is, unless a test puts the session in a party of
+// its own (`partyStub.code`) or answers its joins (`partyStub.join`).
+const partyStub = vi.hoisted(() => ({
+  code: null as string | null,
+  calls: [] as string[],
+  join: null as null | ((code: string) => Promise<{ ok: boolean; error?: string }>),
+}))
+vi.mock('@/hooks/useParty', async (original) => {
+  const real = await original<typeof import('@/hooks/useParty')>()
+  return {
+    ...real,
+    useParty: (...args: Parameters<typeof real.useParty>) => {
+      const party = real.useParty(...args)
+      const join = partyStub.join
+      if (!partyStub.code && !join) return party
+      return {
+        ...party,
+        state: partyStub.code ? { ...party.state, code: partyStub.code } : party.state,
+        leave: () => { partyStub.calls.push('leave') },
+        join: async (code: string) => { partyStub.calls.push(`join ${code}`); return join ? join(code) : { ok: true } },
+      }
+    },
+  }
+})
 
 // The player is replaced by a marker that says what it was asked to play.
 // Its root carries what the real one's does (VideoPlayer.tsx): a modal
@@ -79,7 +105,10 @@ const FOUND = item(401, 'Found By Search')
 const SAVED = item(501, 'Saved Title')
 const COLLECTED = item(601, 'In A Collection')
 
-function stubServer({ bound = 1, role = 'user' } = {}) {
+function stubServer({ bound: boundAt = 1, role = 'user' } = {}) {
+  let bound = boundAt
+  /** Parties the server lists as live (Tonight's strip). */
+  const live: unknown[] = []
   const me = { id: 1, username: 'ronnie', email: 'r@example.test', role }
   const asks: string[] = []
   /** What was written to a profile's library, in the order the server was asked. */
@@ -105,7 +134,15 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
     const p = url.pathname
     asks.push(p)
     // An admin's removal of a title from the library.
-    if (init?.method === 'DELETE' && /^\/api\/media\/\d+$/.test(p)) { mediaDeletes.push(p); return json({ message: 'media deleted' }) }
+    if (init?.method === 'DELETE' && /^\/api\/media\/\d+$/.test(p)) {
+      mediaDeletes.push(p)
+      const kept = holds.get('media-delete')
+      if (kept) await kept
+      return json({ message: 'media deleted' })
+    }
+    // A switch binds the session to the profile it names.
+    const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
+    if (activate && init?.method === 'POST') { bound = Number(activate[1]); return new Response(null, { status: 204 }) }
     const failed = failing.find(f => f.path.test(p))?.how
     if (failed === 'network') throw new TypeError('Failed to fetch')
     if (failed) return json({ error: { code: failed.status, message: failed.words } }, failed.status)
@@ -129,6 +166,8 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
     if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     if (p === '/api/auth/me') return json(me)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: me })
+    if (p === '/api/auth/login' && init?.method === 'POST') return json({ expires_in: 900, user: me })
+    if (p === '/api/auth/setup-status') return json({ has_users: true })
     if (p === '/api/profiles') return json([PARENT, KID])
     if (p === '/api/profiles/active') return json(bound === 1 ? PARENT : KID)
     if (/^\/api\/profiles\/\d+\/library$/.test(p)) {
@@ -191,14 +230,14 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
       return json({ code: 'NEWPARTY' }, 201)
     }
     if (p.startsWith('/api/me/discover')) return json({ rails: [] })
-    if (p === '/api/parties/active') return json({ parties: [] })
+    if (p === '/api/parties/active') return json({ parties: live })
     return json([])
   })
   vi.stubGlobal('WebSocket', class { readyState = 3; close() {} send() {} addEventListener() {} removeEventListener() {} })
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   vi.stubGlobal('scrollTo', () => {})
   return {
-    asks, parties, writes, mediaDeletes,
+    asks, parties, writes, mediaDeletes, live,
     /** Keeps the answer to every library write back until the returned
      *  function is called; writes asked after that are answered at once. */
     holdLibraryWrites() {
@@ -257,7 +296,7 @@ async function openMenu(title: string, within_: HTMLElement = document.body) {
 const rail = async (name: string) => (await screen.findByRole('heading', { name }, find)).closest('section') as HTMLElement
 
 vi.setConfig({ testTimeout: 20_000 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); partyStub.code = null; partyStub.join = null; partyStub.calls = [] })
 
 describe('every page that draws a card gives it the menu', () => {
   it('Tonight\'s rails', async () => {
@@ -1207,5 +1246,171 @@ describe('Play on the poster and the menu agree', () => {
     await waitFor(() => expect(player()).not.toBeNull(), find)
     expect(player()!.getAttribute('data-media')).toBe(String(FRESH.id))
     expect(player()!.getAttribute('data-resume')).toBe('0')
+  })
+})
+
+// The app's confirmation is state, where the browser's own box blocked the
+// page: a question left open must not outlive the session it was asked of.
+describe('a question asked with the app\'s dialog', () => {
+  const askRemove = async () => {
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: FRESH.title })).toBeInTheDocument(), find)
+    fireEvent.click(await screen.findByRole('button', { name: /^Manage/ }, find))
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove from library' }, find))
+    return screen.findByRole('alertdialog', {}, find)
+  }
+  const signInAgain = () => act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'aurora_user', newValue: localStorage.getItem('aurora_user') })) })
+
+  it('goes when the session expires, and is not there for the next sign-in', async () => {
+    const server = renderAt(`/title/${FRESH.id}`, { role: 'admin' })
+    await askRemove()
+    act(() => { window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT)) })
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull(), find)
+    signInAgain()
+    await waitFor(() => expect(document.querySelector('[data-identity-trigger]')).not.toBeNull(), find)
+    await act(async () => { await new Promise(done => setTimeout(done, 100)) })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(server.mediaDeletes).toEqual([])
+  })
+
+  it('goes with a sign-out, and is not there for the next sign-in', async () => {
+    const server = renderAt(`/title/${FRESH.id}`, { role: 'admin' })
+    await askRemove()
+    // Driven behind the question (it hides the page), as a sign-out made
+    // in another tab of the same session reaches this one.
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(await screen.findByRole('button', { name: /^Sign out/, hidden: true }, find))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull(), find)
+    // Signed in again on the tab, by the sign-in page.
+    fireEvent.change(await screen.findByLabelText('Username', {}, find), { target: { value: 'ronnie' } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    await waitFor(() => expect(document.querySelector('[data-identity-trigger]')).not.toBeNull(), find)
+    await act(async () => { await new Promise(done => setTimeout(done, 200)) })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(server.mediaDeletes).toEqual([])
+  })
+
+  it('goes with a profile switch, and nothing is sent', async () => {
+    const server = renderAt(`/title/${FRESH.id}`, { role: 'admin' })
+    await askRemove()
+    // Behind the question, as a switch's binding read can land from another
+    // tab's switch.
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Watching as', hidden: true }, find)).getByRole('button', { name: /Kid/, hidden: true }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull(), find)
+    await act(async () => { await new Promise(done => setTimeout(done, 100)) })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(server.mediaDeletes).toEqual([])
+  })
+
+  // While a removal is out, the title's Remove is not asked again: the
+  // question would send a second request for the same title.
+  it('Remove from library sends one request while one is out', async () => {
+    const server = renderAt(`/title/${FRESH.id}`, { role: 'admin' })
+    const release = server.hold('media-delete')
+    fireEvent.click(within(await askRemove()).getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(server.mediaDeletes).toHaveLength(1), find)
+    fireEvent.click(screen.getByRole('button', { name: 'Remove from library' }))
+    await act(async () => { await new Promise(done => setTimeout(done, 50)) })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    release()
+    await screen.findByText(`Removed "${FRESH.title}" from the library`, {}, find)
+    expect(server.mediaDeletes).toEqual([`/api/media/${FRESH.id}`])
+  })
+
+  // "Leave and join", from Tonight's strip: asked while the session is in
+  // another party; leave, then join, on the confirm only.
+  it.each([
+    ['Leave and join', ['leave', 'join MOON42']],
+    ['Cancel', []],
+    ['Escape', []],
+  ])('Tonight\'s Join while in another party asks first: %s', async (answer, calls) => {
+    partyStub.code = 'OLD123'
+    renderAt('/', { before: server => server.live.push({ code: 'MOON42', host_user_id: 9, party_name: '', media_title: 'Night Train', media_poster: '', participant_count: 2, max_participants: 0, is_playing: true, started_at: NOW }) })
+    fireEvent.click(await screen.findByRole('button', { name: 'Join the party watching Night Train' }, find))
+    const dialog = await screen.findByRole('alertdialog', {}, find)
+    expect(dialog.textContent).toContain('Leave your party and join MOON42?')
+    if (answer === 'Escape') fireEvent.keyDown(dialog, { key: 'Escape' })
+    else fireEvent.click(within(dialog).getByRole('button', { name: answer }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull(), find)
+    await act(async () => { await new Promise(done => setTimeout(done, 50)) })
+    expect(partyStub.calls).toEqual(calls)
+  })
+
+  // The same from a party's link (/p/<code>).
+  it.each([
+    ['Leave and join', ['leave', 'join NEWONE']],
+    ['Cancel', []],
+  ])('a party link while in another party asks first: %s', async (answer, calls) => {
+    partyStub.code = 'OLD123'
+    window.history.replaceState(null, '', '/p/NEWONE')
+    renderAt('/')
+    const dialog = await screen.findByRole('alertdialog', {}, find)
+    expect(dialog.textContent).toContain('Leave party OLD123 and join NEWONE?')
+    fireEvent.click(within(dialog).getByRole('button', { name: answer }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull(), find)
+    await act(async () => { await new Promise(done => setTimeout(done, 50)) })
+    // The link's own join leaves the party by joining the new one.
+    expect(partyStub.calls).toEqual(calls.filter(c => c !== 'leave'))
+  })
+})
+
+describe('what the app says when it cannot', () => {
+  // The composer said the server's words, matched on them for one case.
+  it.each([
+    ['a refused creation', { status: 409, words: 'you already have an active party' }, 'Could not start the party. If you already have one, a scheduled one included, end it from Together first; otherwise try again.'],
+    ['a server failure', { status: 500, words: 'pq: connection refused' }, 'Could not start the party just now.'],
+  ])('the party composer says %s in its own words', async (_how, how, says) => {
+    const server = renderAt('/', { before: server => server.failAt(/^\/api\/parties$/, how) })
+    void server
+    const { menu } = await openMenu('Never Started', await rail('Recently Added'))
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Watch together' }))
+    const composer = await screen.findByRole('dialog', { name: 'Plan a watch party' }, find)
+    const buttons = within(composer).getAllByRole('button')
+    fireEvent.click(buttons[buttons.length - 1])
+    expect((await within(composer).findByRole('alert', {}, find)).textContent).toBe(says)
+    expect(document.body.textContent).not.toContain(how.words)
+  })
+
+  it('the party composer says a party made but not joined, with its code and nothing of the join\'s words', async () => {
+    partyStub.join = async () => ({ ok: false, error: 'pq: room vanished' })
+    renderAt('/')
+    const { menu } = await openMenu('Never Started', await rail('Recently Added'))
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Watch together' }))
+    const composer = await screen.findByRole('dialog', { name: 'Plan a watch party' }, find)
+    const buttons = within(composer).getAllByRole('button')
+    fireEvent.click(buttons[buttons.length - 1])
+    expect((await within(composer).findByRole('alert', {}, find)).textContent).toBe('The party was made (code NEWPARTY), but joining it did not work. Open it from Together.')
+    expect(document.body.textContent).not.toContain('room vanished')
+  })
+
+  // A deep link to a title that cannot be read said "Title not found",
+  // whatever had failed.
+  it.each([
+    ['a 404', { status: 404, words: 'not found' }, 'This title is not available.'],
+    ['a server failure', { status: 500, words: 'pq: connection refused' }, 'Could not open this title just now.'],
+  ])('a deep link to a title says %s in the app\'s words, and goes to Tonight', async (_how, how, says) => {
+    renderAt(`/title/${FRESH.id}`, { before: server => server.failDetail(how) })
+    await screen.findByText(says, {}, find)
+    expect(document.body.textContent).not.toContain(how.words)
+    expect(screen.queryByRole('heading', { level: 1, name: FRESH.title })).toBeNull()
+  })
+
+  // The add-to-list sheet's failure line is the failure of that opening:
+  // closed and opened again, the sheet starts clean.
+  it('the add-to-list sheet does not say an old failure when opened again', async () => {
+    renderAt('/movies', { before: server => server.failAt(/^\/api\/profiles\/\d+\/watchlists\/\d+\/items$/, { status: 500, words: 'pq: connection refused' }) })
+    const open = async () => {
+      fireEvent.click(within((await openMenu('Never Started')).menu).getByRole('menuitem', { name: 'Add to a list…' }))
+      return screen.findByRole('dialog', { name: /Add "Never Started" to a watchlist/ }, find)
+    }
+    let sheet = await open()
+    fireEvent.click(await within(sheet).findByRole('button', { name: 'Weekend' }, find))
+    await within(sheet).findByRole('alert', {}, find)
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /watchlist/ })).toBeNull(), find)
+    sheet = await open()
+    await within(sheet).findByRole('button', { name: 'Weekend' }, find)
+    expect(within(sheet).queryByRole('alert')).toBeNull()
   })
 })
