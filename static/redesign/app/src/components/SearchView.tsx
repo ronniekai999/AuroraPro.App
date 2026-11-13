@@ -325,15 +325,30 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   }, [query, described, describeN, describeKey, retry])
 
   const q = query.trim()
+  // Whether what the page holds (the results, a failure, how they were
+  // asked for) is the answer to the words in the field, asked the way they
+  // are being asked now. The search effect runs AFTER the commit a key
+  // lands in, so for that commit `loading` is still false and the state is
+  // the last answer's: the status line read "0 results" for a first key and
+  // the old count under the new words when typing on, a failure was shown
+  // for words that had not been tried, and Enter showed "a search by
+  // description found nothing" over the title matches it was about to
+  // replace. All of it was drawn, and read out by the live region. So
+  // nothing below reads `loading` or `failed` directly: until the answer
+  // for these words is in, the page is searching, whatever the effect has
+  // got round to. (The palette's searchStatusMessage held this rule.)
+  const settled = !!q && answered?.query === q && answered.described === described
+  const searching = loading || (!!q && !settled)
+  const failedNow = searching ? null : failed
   // On offer once the title search for these words has answered, and until
   // the description search has been asked for.
-  const canDescribe = !!onDescribe && !!q && !loading && !described && answered?.query === q && !failed
+  const canDescribe = !!onDescribe && !!q && !searching && !described && !failedNow
   // Asked for by description, and the server says these are title matches:
   // its description search found nothing for the words, or it has none (no
   // model is set up). The server does not say which, so neither does this.
-  const describedAsTitles = !loading && !failed && described && answered?.query === q && searchMode !== 'semantic'
+  const describedAsTitles = !searching && !failedNow && described && searchMode !== 'semantic'
   const tryAgain = () => {
-    if (failed === 'description') onDescribe?.(query)
+    if (failedNow === 'description') onDescribe?.(query)
     else setRetry(n => n + 1)
   }
 
@@ -358,12 +373,13 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
   // By description, and the server says that is what it ran.
   // (Titles, not collections: those are matched here on plain words, and
   // the model had nothing to do with them.)
-  const readAsMood = !loading && !failed && results.length > 0 && searchMode === 'semantic'
-  // Nothing found FOR THESE WORDS: the answer on screen is theirs. Without
-  // that, the commit between a keystroke and the search starting counted as
-  // an empty search, and the page (and the lookup of what can be requested)
-  // came up for one frame on the first key of every search.
-  const empty = !loading && !!q && found === 0 && !failed && answered?.query === q
+  const readAsMood = !searching && !failedNow && results.length > 0 && searchMode === 'semantic'
+  // Nothing found FOR THESE WORDS: the answer on screen is theirs (it is
+  // not `searching`). Without that, the commit between a keystroke and the
+  // search starting counted as an empty search, and the page (and the
+  // lookup of what can be requested) came up for one frame on the first key
+  // of every search.
+  const empty = !searching && !!q && found === 0 && !failedNow
   // Requests are offered once the server is known to take them (L2: the
   // page used to promise one and then say they are not set up).
   const mayRequest = !!requesting && requestState.offered
@@ -386,10 +402,35 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
             </p>
   ) : null
 
+  // What this profile looked for lately, to pick up again. With nothing
+  // typed it is the one thing on the page to act on, and leads it; beside
+  // results it steps into the second column.
+  const recentSection = recent && recent.length > 0 && onPickRecent && (
+    <section aria-labelledby="search-recent-heading" data-search-recent className={q ? undefined : 'search-recent-lead'}>
+      <div className="mb-1 flex items-center">
+        <h2 id="search-recent-heading" className={q ? 'search-aside-h flex-1' : 'search-h2 flex-1'}>Recent searches</h2>
+        {onClearRecent && (
+          <button type="button" onClick={onClearRecent} className="stage-btn stage-btn-sm stage-btn-quiet search-recent-clear stage-hit44">
+            Clear
+          </button>
+        )}
+      </div>
+      <ul className="m-0 list-none p-0">
+        {recent.map(words => (
+          <li key={words}>
+            <button type="button" onClick={() => onPickRecent(words)} className="search-recent-row flex w-full items-center text-left">
+              <Icon name="clock" size={16} className="flex-none text-ink-3" />
+              <span className="min-w-0 flex-1 truncate">{words}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+
   return (
-    // data-search-results: lets TopNav's outside-click-to-close handler
-    // exempt clicks on result cards (a page-level sibling, not a DOM
-    // descendant of the search pill) from closing the search.
+    // data-search-results marks the search page: lib/searchKeys finds the
+    // page's own field by it.
     <div className="animate-fade-in" data-search-results>
       {onQueryChange && (
         // The page's own field, below md only: there the top bar has no
@@ -447,10 +488,10 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
                 how the results were produced. */}
             {readAsMood && <span className="aurora-dot flex-none" aria-hidden="true" data-search-read-as-mood="" />}
             <span>
-              {loading
+              {searching
                 ? described ? `Looking for titles like "${query}"…` : `Searching for "${query}"…`
-                : failed
-                  ? failed === 'description' ? 'The search by description did not work.' : 'The search did not work.'
+                : failedNow
+                  ? failedNow === 'description' ? 'The search by description did not work.' : 'The search did not work.'
                   : !query
                     ? 'Type a title, or describe what you are in the mood for'
                     : readAsMood
@@ -460,9 +501,9 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
                         : `${shown} result${shown === 1 ? '' : 's'} for "${query}"`}
             </span>
           </p>
-          {failed && !loading && (
+          {failedNow && (
             <p className="search-failed-line mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-ink-2" data-search-failed>
-              {failed === 'description' ? 'Nothing is wrong with what you typed. The server could not run it.' : 'The server could not be reached, or could not answer.'}
+              {failedNow === 'description' ? 'Nothing is wrong with what you typed. The server could not run it.' : 'The server could not be reached, or could not answer.'}
               <button type="button" onClick={tryAgain} className="stage-btn stage-btn-sm stage-btn-ghost search-retry-btn stage-hit44">
                 Try again
               </button>
@@ -474,8 +515,10 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
             </p>
           )}
           {!empty && describeLine}
+          {/* Nothing typed: what was searched for lately leads the page. */}
+          {!q && recentSection}
           {/* Narrowing to a kind, once there is something to narrow. */}
-          {wide && !loading && found > 0 && !askingNow && (
+          {wide && !searching && found > 0 && !askingNow && (
             <div role="group" aria-label="Filter results" className="search-filters" data-search-filters="">
               {kinds.map(k => (
                 <button key={k.id} type="button" className="genre-chip" aria-pressed={kindShown === k.id} onClick={() => setKind(k.id)}>
@@ -498,7 +541,7 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
               </p>
               <SearchRequest query={q} userId={requesting.userId} state={requestState} takeFocus={focusAsk === 'list'} onRequested={requesting.onRequested} onOpenRequests={requesting.onOpenRequests} />
             </div>
-          ) : loading && found === 0 ? (
+          ) : searching && found === 0 ? (
             // First search (or a new query after an empty result): hold the
             // grid's shape. With results already on screen the previous
             // results stay up until the new ones land, as before.
@@ -612,7 +655,7 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
             below it: what can be done with this search, and what was
             searched for lately. */}
         <aside className="search-aside" aria-label="Search actions and recent searches">
-          {q && !loading && found > 0 && !askingNow && ((onWatchTogether && titles.length > 0) || mayRequest) && (
+          {q && !searching && found > 0 && !askingNow && ((onWatchTogether && titles.length > 0) || mayRequest) && (
             <section aria-labelledby="search-actions-heading" data-search-actions="">
               {/* Under the results on a phone, where it is what else there is. */}
               <h2 id="search-actions-heading" className="search-aside-h">{wide ? 'Actions' : 'More'}</h2>
@@ -630,29 +673,7 @@ export default function SearchView({ query, onQueryChange, describe, onDescribe,
               )}
             </section>
           )}
-          {/* What this profile looked for lately, to pick up again. */}
-          {recent && recent.length > 0 && onPickRecent && (
-            <section aria-labelledby="search-recent-heading" data-search-recent>
-              <div className="mb-1 flex items-center">
-                <h2 id="search-recent-heading" className="search-aside-h flex-1">Recent searches</h2>
-                {onClearRecent && (
-                  <button type="button" onClick={onClearRecent} className="stage-btn stage-btn-sm stage-btn-quiet search-recent-clear stage-hit44">
-                    Clear
-                  </button>
-                )}
-              </div>
-              <ul className="m-0 list-none p-0">
-                {recent.map(words => (
-                  <li key={words}>
-                    <button type="button" onClick={() => onPickRecent(words)} className="search-recent-row flex w-full items-center text-left">
-                      <Icon name="clock" size={16} className="flex-none text-ink-3" />
-                      <span className="min-w-0 flex-1 truncate">{words}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
+          {q && recentSection}
           {onDescribe && (
             <p className="search-hint">
               Titles appear as you type. {wide ? 'Press Enter' : 'Use the Search key on your keyboard'} to search by mood or description, which takes a few seconds longer.

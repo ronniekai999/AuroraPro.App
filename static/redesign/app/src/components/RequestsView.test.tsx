@@ -430,10 +430,27 @@ describe('what a refusal says on the requests page', () => {
     const said = screen.getByRole('alert')
     expect(said.textContent).toBe('First: It is with the downloader now and can no longer be deleted. It is listed under Processing now.')
     expect(said.closest('[data-request-id]')).toBeNull()
-    // Shown where the row is, it is said on the row, once.
+    // With the row back in view the words are on the row, and are not
+    // announced a second time: they were said above the list.
     fireEvent.click(screen.getByRole('button', { name: 'All · 3' }))
-    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(document.querySelector('[data-requests-wrong]')).toBeNull()
+    expect(row(1).querySelector('.req-wrong')!.textContent).toBe('It is with the downloader now and can no longer be deleted.')
+    expect(screen.queryAllByRole('alert')).toEqual([])
+  })
+
+  // The other way round: said on the row first, then the viewer filters the
+  // row out. The words move above the list, and are not announced again.
+  it('announces it once when it was said on the row first and the row is then filtered out', async () => {
+    api.deleteRequest.mockRejectedValueOnce(new Error('can only delete pending or failed requests'))
+    render(<Kept start={[request(1, { title: 'First' }), request(2, { title: 'Second' })]} userId={1} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete request for First' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete the request for First' }))
+    await flush()
     expect(within(row(1)).getByRole('alert').textContent).toBe('It is with the downloader now and can no longer be deleted.')
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Pending · 1' }))
+    expect(document.querySelector('[data-requests-wrong]')!.textContent).toBe('First: It is with the downloader now and can no longer be deleted. It is listed under Processing now.')
+    expect(screen.queryAllByRole('alert')).toEqual([])
   })
 
   // Deleted already, from another tab or by an admin: the server has no

@@ -8,7 +8,7 @@
 
 import { useEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, useLocation, useNavigate } from 'react-router'
 import App from './App'
 import { forgetDescribedAnswer } from '@/lib/describedSearch'
@@ -30,12 +30,17 @@ function Where() {
 const NOW = '2026-10-01T00:00:00Z'
 const PARENT = { id: 1, user_id: 1, name: 'Parent', is_default: true, created_at: NOW, updated_at: NOW }
 const KID = { id: 2, user_id: 1, name: 'Kid', is_default: false, created_at: NOW, updated_at: NOW, max_age_rating: 'PG' }
+const OTHER = { id: 9, user_id: 2, name: 'Other', is_default: true, created_at: NOW, updated_at: NOW }
 const HARBOR = { id: 77, library_id: 1, type: 'movie', title: 'Harbor Lights', year: 2022, rating: 8, overview: 'A harbor.', added_at: NOW, updated_at: NOW }
 
 /** `bindingUnreadable`: the server cannot say which profile the session acts
  *  as, so the app knows none (it opens the profile picker over the page). */
-function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfiles = false, kidFree = false, requests = [] as Record<string, unknown>[] } = {}) {
-  const me = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' }
+function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfiles = false, kidFree = false, requests = [] as Record<string, unknown>[], at = '/' } = {}) {
+  // Whoever is signed in: a sign-in as anyone but "ronnie" is a second account.
+  let me = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' }
+  let signedIn = true
+  /** Every search the server was asked for, with who was signed in. */
+  const searched: { q: string; as: number }[] = []
   /** What was looked up outside the library (the server asks TMDB). */
   const lookups: string[] = []
   /** The requests made, as the server was sent them, and as it lists them. */
@@ -57,11 +62,23 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
     const url = new URL(input, 'http://localhost')
     const p = url.pathname
+    if (p === '/api/auth/logout' && init?.method === 'POST') { signedIn = false; return new Response(null, { status: 204 }) }
+    if (p === '/api/auth/login' && init?.method === 'POST') {
+      const name = (JSON.parse(String(init.body)) as { username: string }).username
+      me = name === 'ronnie' ? { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' } : { id: 2, username: name, email: 'other@example.test', role: 'user' }
+      signedIn = true
+      return json({ expires_in: 900, user: me })
+    }
+    if (p === '/api/auth/setup-status') return json({ setup_complete: true, has_users: true })
+    if (!signedIn) return json({ error: { code: 401, message: 'signed out' } }, 401)
     if (p === '/api/auth/me') return json(me)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: me })
     // `noProfiles`: an account that has made none (the server acts as a stand-in).
     // `kidFree`: the second profile has no content limit, so both may request.
     const kid = kidFree ? { ...KID, max_age_rating: undefined } : KID
+    // The second account has one profile of its own.
+    if (me.id === 2 && p === '/api/profiles') return json([OTHER])
+    if (me.id === 2 && p === '/api/profiles/active') return json(OTHER)
     if (p === '/api/profiles') return json(noProfiles ? [] : [PARENT, kid])
     const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
     if (activate && init?.method === 'POST') { acting.id = Number(activate[1]); return new Response(null, { status: 204 }) }
@@ -74,6 +91,7 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
     // Nothing in the library matches anything, but "harbor".
     if (p === '/api/media/search') {
       searchModes.push(url.searchParams.get('mode'))
+      searched.push({ q: url.searchParams.get('q') ?? '', as: me.id })
       const found = (url.searchParams.get('q') ?? '').toLowerCase().includes('harbor') ? [HARBOR] : []
       return new Response(JSON.stringify(found), { status: 200, headers: { 'content-type': 'application/json', 'X-Search-Mode': 'literal' } })
     }
@@ -106,9 +124,16 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
   localStorage.setItem('aurora_prefs', JSON.stringify({ profile_gate_seen: true }))
   if (bound !== 1) localStorage.setItem('aurora_active_profile_id', String(bound))
   else localStorage.removeItem('aurora_active_profile_id')
-  render(<MemoryRouter initialEntries={['/']}><Where /><App /></MemoryRouter>)
+  render(<MemoryRouter initialEntries={[at]}><Where /><App /></MemoryRouter>)
   return {
-    lookups, collectionLists, heroAsks, posted, searchModes,
+    lookups, collectionLists, heroAsks, posted, searchModes, searched,
+    /** The session ends as it does when the server rejects a refresh: the
+     *  app is told (api.ts's event), and every request is a 401 until the
+     *  next sign-in. */
+    expire() {
+      signedIn = false
+      act(() => { window.dispatchEvent(new Event('aurora:session-expired')) })
+    },
     holdRequest() {
       let release!: () => void
       held.answer = new Promise<void>(done => { release = done })
@@ -597,7 +622,9 @@ describe('searching from the keyboard', () => {
   })
 
   it('clears the field on Escape, with the focus kept in it and the page still up, then goes back to where the viewer was', async () => {
-    await ready()
+    renderApp(1, false, { at: '/movies' })
+    await screen.findByText('Parent', undefined, find)
+    await waitFor(() => expect(field()).not.toBeNull(), find)
     press(document.body, { key: 'k', metaKey: true })
     fireEvent.change(field(), { target: { value: 'harbor' } })
     await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
@@ -610,8 +637,51 @@ describe('searching from the keyboard', () => {
     expect(where.path).toBe('/search')
     fireEvent.keyDown(field(), { key: 'Escape' })
     expect(focused()).not.toBe(field())
+    // Where the typing began, not merely Tonight.
+    await waitFor(() => expect(where.path).toBe('/movies'), find)
+    await waitFor(() => expect(document.querySelector('[data-search-results]')).toBeNull(), find)
+  })
+
+  // Back must never leave the app. A tab opened on the search page (a typed
+  // address, a bookmark, a reload of a first entry) has nothing of the app
+  // behind it: there Escape goes to Tonight, and replaces the entry.
+  it('goes to Tonight on Escape when the tab was opened on the search page, where there is nothing to go back to', async () => {
+    renderApp(1, false, { at: '/search' })
+    await screen.findByText('Parent', undefined, find)
+    await waitFor(() => expect(document.querySelector('[data-search-results]')).not.toBeNull(), find)
+    fireEvent.keyDown(document.body, { key: 'Escape' })
     await waitFor(() => expect(where.path).toBe('/'), find)
     await waitFor(() => expect(document.querySelector('[data-search-results]')).toBeNull(), find)
+    // Replaced, not pushed: Back from Tonight does not return to the search page.
+    where.back()
+    await new Promise(r => setTimeout(r, 50))
+    expect(where.path).toBe('/')
+  })
+
+  // The entry behind the search page can be from before a profile switch.
+  // It is an address of the app like any other: a profile that is not shown
+  // that page is not shown it by Escape either.
+  it('lands on Tonight when the page behind is one the profile switched to is not shown', async () => {
+    renderApp(1, false, { requests: [{ id: 5, user_id: 1, media_type: 'movie', tmdb_id: 505, title: 'Harbor Lights', poster_path: '', overview: '', year: 2022, status: 'available', quality_1080p: true, quality_4k: false, requested_at: NOW, updated_at: NOW }] })
+    await screen.findByText('Parent', undefined, find)
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(await screen.findByRole('button', { name: /My requests/ }, find))
+    await waitFor(() => expect(where.path).toBe('/requests'), find)
+    fireEvent.click(await screen.findByRole('button', { name: 'Find Harbor Lights in the library' }, find))
+    await waitFor(() => expect(where.path).toBe('/search'), find)
+    // Now the Kid, who has a content limit and is not shown My requests.
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(within(screen.getByRole('group', { name: 'Watching as' })).getByRole('button', { name: /Kid/ }))
+    await waitFor(() => expect(document.querySelector('[data-identity-name]')?.textContent).toBe('Kid'), find)
+    const seen: string[] = []
+    const watch = new MutationObserver(() => { if (document.querySelector('.req-page')) seen.push('requests page') })
+    watch.observe(document.body, { childList: true, subtree: true })
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    await waitFor(() => expect(where.path).toBe('/'), find)
+    watch.disconnect()
+    expect(seen).toEqual([])
+    expect(screen.queryByRole('heading', { level: 1, name: /requests/i })).toBeNull()
   })
 
   it('only leaves the field on Escape anywhere else, and keeps what is typed on a title opened from a search', async () => {
@@ -629,6 +699,80 @@ describe('searching from the keyboard', () => {
     fireEvent.keyDown(document.body, { key: 'Escape' })
     await waitFor(() => expect(where.path).toBe('/search'), find)
     expect(await screen.findByRole('button', { name: /^Harbor Lights/ }, find)).toBeInTheDocument()
+  })
+
+  // The add-to-list sheet had no Escape of its own: the key went to the page
+  // behind it, which cleared the words, or went Back, with the sheet still up.
+  it('gives Escape to the add-to-list sheet while it is open, and leaves the page behind it alone', async () => {
+    await ready()
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    const sheet = () => screen.queryByRole('dialog', { name: 'Add "Harbor Lights" to a watchlist' })
+    const openSheet = async () => {
+      fireEvent.click((await screen.findAllByRole('button', { name: 'More actions for Harbor Lights' }, find))[0])
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Add to a list…' }, find))
+      await waitFor(() => expect(sheet()).not.toBeNull(), find)
+    }
+    await openSheet()
+    // The shortcut is the page's too, and the page is covered.
+    expect(press(document.body, { key: 'k', metaKey: true })).toBe(false)
+    expect(focused()).not.toBe(field())
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(sheet()).toBeNull()
+    expect(field().value).toBe('harbor')
+    expect(where.path).toBe('/search')
+    expect(screen.getByRole('button', { name: /^Harbor Lights/ })).toBeInTheDocument()
+    // With nothing typed, where Escape would go Back: still the sheet's.
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(field().value).toBe('')
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    await openSheet()
+    fireEvent.change(field(), { target: { value: '' } })
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(sheet()).toBeNull()
+    expect(where.path).toBe('/search')
+  })
+
+  it('leaves the page alone while a card\'s menu is open: the shortcut does nothing, and Escape only closes the menu', async () => {
+    await ready()
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    fireEvent.click((await screen.findAllByRole('button', { name: 'More actions for Harbor Lights' }, find))[0])
+    await screen.findByRole('menu', { name: 'Actions for Harbor Lights' }, find)
+    expect(press(document.body, { key: 'k', metaKey: true })).toBe(false)
+    expect(focused()).not.toBe(field())
+    // Pressed with the focus outside the menu, so the menu's own handler on its rows is not what stops it.
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull(), find)
+    expect(field().value).toBe('harbor')
+    expect(where.path).toBe('/search')
+  })
+
+  // Any other dialog over the page: one that says it is modal, or one that
+  // has made the page inert or hidden it (as the app's Radix dialogs do).
+  it('leaves Escape alone on the search page while another dialog is over it', async () => {
+    await ready()
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    const modal = document.createElement('div')
+    modal.setAttribute('role', 'dialog')
+    modal.setAttribute('aria-modal', 'true')
+    document.body.append(modal)
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(field().value).toBe('harbor')
+    modal.remove()
+    const bar = field().closest('header')!
+    for (const attr of ['inert', 'aria-hidden']) {
+      bar.setAttribute(attr, attr === 'inert' ? '' : 'true')
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      expect(field().value).toBe('harbor')
+      bar.removeAttribute(attr)
+    }
+    expect(where.path).toBe('/search')
+    // Uncovered, the key is the page's again.
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(field().value).toBe('')
   })
 
   it('clears on Escape from a result too, and puts the focus back in the field', async () => {
@@ -784,5 +928,76 @@ describe('the search page has its own address', () => {
     await back('/requests')
     await screen.findByRole('heading', { level: 1, name: 'My requests' }, find)
     expect(field().value).toBe('')
+  })
+})
+
+// What is typed in the search field is App state, and the page it shows on
+// has an address. Neither a sign-out nor a session that expires cleared the
+// words: the next person to sign in on the tab found them in the bar, a
+// search ran for them under the new account, and opening a result filed
+// them in that account's recent searches.
+describe('the words in the search field go with whoever typed them', () => {
+  const field = () => document.querySelector<HTMLInputElement>('.stage-navsearch input')!
+  const WORDS = 'harbor to cry to'
+  async function typedByTheFirst() {
+    const server = renderApp()
+    await screen.findByText('Parent', undefined, find)
+    await waitFor(() => expect(field()).not.toBeNull(), find)
+    fireEvent.change(field(), { target: { value: WORDS } })
+    await screen.findByRole('button', { name: /^Harbor Lights/ }, find)
+    expect(server.searched).toContainEqual({ q: WORDS, as: 1 })
+    return server
+  }
+  async function theSecondSignsIn() {
+    fireEvent.change(await screen.findByPlaceholderText('Enter username', {}, find), { target: { value: 'dana' } })
+    fireEvent.change(screen.getByPlaceholderText('Enter password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
+    await waitFor(() => expect(document.querySelector('[data-identity-name]')?.textContent).toBe('Other'), find)
+    await waitFor(() => expect(field()).not.toBeNull(), find)
+    // Long enough for a search of whatever is in the field to have been asked for.
+    await act(async () => { await new Promise(done => setTimeout(done, 500)) })
+  }
+  const theSecondWasHandedNothing = (server: ReturnType<typeof renderApp>) => {
+    expect(field().value).toBe('')
+    expect(server.searched.filter(s => s.as === 2)).toEqual([])
+    expect(document.body.textContent).not.toContain(WORDS)
+    expect(localStorage.getItem('aurora_recent_searches:2:9')).toBeNull()
+  }
+
+  it('are gone after a sign-out: the next account finds an empty field, and no search is made for them', async () => {
+    const server = await typedByTheFirst()
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(await screen.findByRole('button', { name: /^Sign out/ }, find))
+    await theSecondSignsIn()
+    theSecondWasHandedNothing(server)
+    // Signing out leaves the search page too.
+    expect(where.path).toBe('/')
+    expect(document.querySelector('[data-search-results]')).toBeNull()
+  })
+
+  it('are gone when the session expires: the page keeps its address, with nothing typed', async () => {
+    const server = await typedByTheFirst()
+    expect(where.path).toBe('/search')
+    server.expire()
+    await theSecondSignsIn()
+    theSecondWasHandedNothing(server)
+    // An expiry leaves the address where it was, as on any page.
+    expect(where.path).toBe('/search')
+    expect(document.querySelector('[data-search-results] [role="status"]')?.textContent).toBe('Type a title, or describe what you are in the mood for')
+    // What the second account then searches for and opens is all its recents hold.
+    fireEvent.change(field(), { target: { value: 'harbor' } })
+    fireEvent.click(await screen.findByRole('button', { name: /^Harbor Lights/ }, find))
+    await waitFor(() => expect(JSON.parse(localStorage.getItem('aurora_recent_searches:2:9') ?? '[]')).toEqual(['harbor']), find)
+    expect(server.searched.filter(s => s.as === 2).map(s => s.q)).toEqual(['harbor'])
+  })
+
+  it('and a search by description asked for before the session expired is not run again for the next account', async () => {
+    const server = await typedByTheFirst()
+    fireEvent.keyDown(field(), { key: 'Enter' })
+    await waitFor(() => expect(server.searchModes.filter(m => m === 'semantic')).toHaveLength(1), find)
+    server.expire()
+    await theSecondSignsIn()
+    theSecondWasHandedNothing(server)
+    expect(server.searchModes.filter(m => m === 'semantic')).toHaveLength(1)
   })
 })

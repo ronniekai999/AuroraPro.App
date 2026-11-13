@@ -78,6 +78,113 @@ describe('moving the focus through the results', () => {
   })
 })
 
+// Down and Up go by where the results are on the page. This DOM lays
+// nothing out, so each result is given the box it would have: a best match
+// across the page, cards four to a row with a short last row, two
+// collections side by side.
+describe('moving down and up, by where the results are', () => {
+  const box = (el: Element, left: number, top: number, width: number, height: number) => {
+    (el as HTMLElement).getBoundingClientRect = () => ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON() {} }) as DOMRect
+  }
+  /** best / c1 c2 c3 c4 / c5 c6 / k1 k2 */
+  function laidOut() {
+    document.body.innerHTML = `
+      <header><div class="stage-navsearch"><input aria-label="Search titles"></div></header>
+      <div data-search-results><div class="search-main">
+        <button class="search-best-open">best</button>
+        ${[1, 2, 3, 4, 5, 6].map(n => `<div><button class="card-open">c${n}</button><button class="card-act">Add</button></div>`).join('')}
+        <button class="search-colrow">k1</button><button class="search-colrow">k2</button>
+      </div></div>`
+    const by = (name: string) => [...document.querySelectorAll('button')].find(b => b.textContent === name)!
+    box(by('best'), 0, 100, 1000, 176)
+    ;[0, 150, 300, 450].forEach((left, i) => box(by(`c${i + 1}`), left, i === 1 ? 401 : 400, 130, 195))
+    box(by('c5'), 0, 660, 130, 195); box(by('c6'), 150, 660, 130, 195)
+    box(by('k1'), 0, 950, 480, 72); box(by('k2'), 500, 950, 480, 72)
+    return by
+  }
+  const down = (by: (n: string) => HTMLElement, from: string) => { by(from).focus(); return focusResult('down', by(from)) ? text() : null }
+  const up = (by: (n: string) => HTMLElement, from: string) => { by(from).focus(); return focusResult('up', by(from)) ? text() : null }
+
+  it('goes down to the result below, not to the next one along', () => {
+    const by = laidOut()
+    expect(down(by, 'c1')).toBe('c5')
+    expect(down(by, 'c2')).toBe('c6')
+    // From a row across the page, to the first of the row under it.
+    expect(down(by, 'best')).toBe('c1')
+  })
+
+  it('goes to the nearest result in a row that does not reach the column', () => {
+    const by = laidOut()
+    expect(down(by, 'c3')).toBe('c6')
+    expect(down(by, 'c4')).toBe('c6')
+    expect(up(by, 'k2')).toBe('c6')
+  })
+
+  it('leads from the last row of the cards on to the collections, and stops below the last row', () => {
+    const by = laidOut()
+    expect(down(by, 'c5')).toBe('k1')
+    expect(down(by, 'c6')).toBe('k1')
+    expect(down(by, 'k1')).toBeNull()
+    expect(down(by, 'k2')).toBeNull()
+    expect(text()).toBe('k2')
+  })
+
+  it('goes up to the result above, and from the top row to the search field', () => {
+    const by = laidOut()
+    expect(up(by, 'c5')).toBe('c1')
+    expect(up(by, 'c6')).toBe('c2')
+    expect(up(by, 'k1')).toBe('c5')
+    expect(up(by, 'c3')).toBe('best')
+    by('best').focus()
+    expect(focusResult('up', by('best'))).toBe(true)
+    expect(document.activeElement).toBe(document.querySelector('.stage-navsearch input'))
+  })
+
+  it('takes the earlier of two results equally near', () => {
+    const by = laidOut()
+    // Half way between the two cards of the row above.
+    box(by('k1'), 75, 950, 300, 72)
+    expect(up(by, 'k1')).toBe('c5')
+  })
+
+  it('keeps Left and Right to the order the results are drawn in, across the end of a row', () => {
+    const by = laidOut()
+    by('c4').focus()
+    key(by('c4'), 'ArrowRight')
+    expect(text()).toBe('c5')
+    key(by('c5'), 'ArrowLeft')
+    expect(text()).toBe('c4')
+    // And the keys themselves: Down and Up are the moves above.
+    key(by('c4'), 'ArrowDown')
+    expect(text()).toBe('c6')
+    key(by('c6'), 'ArrowUp')
+    expect(text()).toBe('c2')
+  })
+
+  it('passes over a result that has no box, and falls back to drawn order where nothing has one', () => {
+    const by = laidOut()
+    // c5 is not drawn (a row scrolled out of a clipped list, say): c1's Down has only c6 in that row.
+    box(by('c5'), 0, 0, 0, 0)
+    expect(down(by, 'c1')).toBe('c6')
+    // Nor is it "above" the top row for having no top of its own: Up from there is still the field.
+    by('best').focus()
+    expect(focusResult('up', by('best'))).toBe(true)
+    expect(document.activeElement).toBe(document.querySelector('.stage-navsearch input'))
+    // No layout at all: the order they are drawn in.
+    for (const b of document.querySelectorAll('.search-main button')) box(b, 0, 0, 0, 0)
+    expect(down(by, 'c1')).toBe('c2')
+    expect(up(by, 'c2')).toBe('c1')
+    expect(up(by, 'best')).toBe('')
+    expect(document.activeElement).toBe(document.querySelector('.stage-navsearch input'))
+  })
+
+  it('starts from the first result when asked to go down from somewhere that is not one', () => {
+    laidOut()
+    expect(focusResult('down', document.querySelector('.card-act'))).toBe(true)
+    expect(text()).toBe('best')
+  })
+})
+
 describe('the search field that is drawn', () => {
   // A box is what "drawn" means; this DOM lays nothing out, so a box is given.
   const drawn = (sel: string, yes: boolean) => {
@@ -108,6 +215,7 @@ describe('the search field that is drawn', () => {
 })
 
 describe('a key pressed on a result', () => {
+  // (No layout here: Down and Up go by drawn order, as Right and Left do.)
   it('moves with the arrows, Home and End, and keeps the key from the page', () => {
     page()
     focusResult('first')

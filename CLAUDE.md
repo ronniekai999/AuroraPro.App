@@ -503,15 +503,30 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   another page. The words are App state, never in the address (a reload of
   `/search` is the page with nothing typed); they stay in the bar on a
   title, a collection or My requests opened from the results
-  (`keepSearch`), and go on any other way off the page. Ctrl or Cmd K puts
-  the focus in the search field (there is no palette; `lib/searchKeys.ts`
-  moves the real focus through the results with the arrow keys) and does
-  nothing from another text field or while the player, a card's menu, the
-  add-to-list sheet, the profile picker, a PIN prompt or any modal dialog
-  is over the page. Typing is the one change of address that leaves a
-  minimized player on. Pinned by `App.searchRequest.test.tsx` and
-  `App.cardMenu.test.tsx` against a memory router; a real browser's history
-  was checked by hand only. Those resets run in passive effects, after the commit that
+  (`keepSearch`), and go when the viewer leaves the search page any other
+  way (a destination in the bar, Back out of the results), on a sign-out,
+  and when the session expires (`resetUserState` and the signed-out effect:
+  they used to outlive both, so the next account on the tab found them in
+  the bar and had a search run for them). The search effect starts after
+  the commit a key lands in, so until the answer for the words in the field
+  is in, asked the way they are being asked, the page is searching
+  (`settled`, `searching` in `SearchView`): it does not count the last
+  answer under the new words, show its failure, or offer anything for it.
+  Ctrl or Cmd K puts the focus in the search field (there is no palette;
+  `lib/searchKeys.ts` moves the real focus through the results: Left and
+  Right in drawn order, Down and Up by row on the page) and does nothing
+  from another text field, while a player is up (`playerTarget`, so a
+  minimized one too), or while a card's menu, the add-to-list sheet, the
+  profile picker, a PIN prompt or any modal dialog is over the page
+  (`pageCovered`, which the search page's Escape obeys as well; Escape
+  closes the add-to-list sheet). The search page taking its address
+  (`showSearchPage`: a key typed, Enter from another page, "Find it") is
+  the one change of address that leaves a player on; in practice that is a
+  minimized one. Pinned by `App.searchRequest.test.tsx`,
+  `App.cardMenu.test.tsx`, `SearchView.test.tsx` and
+  `lib/searchKeys.test.ts`, against a memory router and a DOM with no
+  layout (the rows are given boxes); a real browser's history and the
+  arrow keys on a laid-out page were checked by hand only. Those resets run in passive effects, after the commit that
   already names the new profile, and React could paint that commit: the
   previous profile's hero showed under the new name for a frame. Until they
   run (`profileSwitchPending`), Home, the grids, My Library and an open title

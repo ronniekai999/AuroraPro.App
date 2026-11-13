@@ -6,6 +6,7 @@
 // call and so must run once per ask, never per keystroke.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Profiler } from 'react'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import type { Media } from '@/lib/types'
 
@@ -441,6 +442,144 @@ describe('a search that finds nothing', () => {
   })
 })
 
+// The search itself starts in an effect, after the commit a key lands in.
+// For that one commit the page still holds the LAST answer: its status line
+// (a live region, read out whole) said "0 results" for a first key and the
+// old count under the new words, and a failure or "a description search
+// found nothing" was shown for words that had not been tried. Each commit
+// is sampled here as it is made, before any effect has run.
+describe('what the page says in the commit a key lands in, before the search has started', () => {
+  interface Sample { status: string | null; statusDrawn: boolean; failed: boolean; byTitleInstead: boolean; describeOffered: boolean; empty: boolean; cards: number; holding: boolean; filters: boolean; actions: boolean; moodMark: boolean }
+  const samples: Sample[] = []
+  const sample = () => {
+    const page = document.querySelector('[data-search-results]')
+    if (!page) return
+    samples.push({
+      status: page.querySelector('[role="status"]')?.textContent ?? null,
+      // The line is for assistive tech only while the page below is the one saying nothing was found.
+      statusDrawn: !page.querySelector('[role="status"]')?.classList.contains('sr-only'),
+      failed: page.querySelector('[data-search-failed]') !== null,
+      byTitleInstead: page.querySelector('[data-search-by-title-instead]') !== null,
+      describeOffered: page.querySelector('[data-search-describe]') !== null,
+      empty: page.querySelector('[data-search-empty]') !== null,
+      cards: page.querySelectorAll('.search-best-open, .card-open, .mlr-main').length,
+      // The grid's shape, held while a first search is out.
+      holding: page.querySelector('.search-main > div > [aria-hidden="true"].poster-grid') !== null,
+      filters: page.querySelector('[data-search-filters]') !== null,
+      actions: page.querySelector('[data-search-actions]') !== null,
+      moodMark: page.querySelector('[data-search-read-as-mood]') !== null,
+    })
+  }
+  const page = ({ query, ...props }: { query: string; describe?: { query: string; n: number } | null }) => (
+    <Profiler id="search" onRender={sample}><SearchView {...base} onDescribe={vi.fn()} query={query} {...props} /></Profiler>
+  )
+  beforeEach(() => { samples.length = 0 })
+
+  it('says it is searching on the first key, and on a page opened with words already in the field', async () => {
+    const { rerender } = render(page({ query: '' }))
+    samples.length = 0
+    rerender(page({ query: 'h' }))
+    // Every commit from the key on, with no answer in: searching, and nothing counted.
+    expect(samples.length).toBeGreaterThan(0)
+    expect(samples.map(c => c.status)).toEqual(samples.map(() => 'Searching for "h"…'))
+    // Not taken for a search that found nothing: no empty page, and the line is drawn.
+    expect(samples.some(c => c.empty)).toBe(false)
+    expect(samples.every(c => c.statusDrawn)).toBe(true)
+    // The grid's shape is held from that first commit, not from the next.
+    expect(samples.every(c => c.holding)).toBe(true)
+    cleanup()
+    // "Find it" on a request, or Back to the page: mounted with its words.
+    samples.length = 0
+    render(page({ query: 'harbor' }))
+    expect(samples.length).toBeGreaterThan(0)
+    expect(samples.map(c => c.status)).toEqual(samples.map(() => 'Searching for "harbor"…'))
+  })
+
+  it('does not put the last answer\'s count under the next words while typing on', async () => {
+    const { rerender } = render(page({ query: 'har' }))
+    await settle(300)
+    asks[0].answer([media(1, 'Harbor Lights'), media(2, 'Harbor Nights'), media(3, 'Harvest')])
+    await settle()
+    expect(status()).toBe('3 results for "har"')
+    samples.length = 0
+    rerender(page({ query: 'harb' }))
+    expect(samples.length).toBeGreaterThan(0)
+    expect(samples.map(c => c.status)).toEqual(samples.map(() => 'Searching for "harb"…'))
+    // The last results stay up meanwhile, as before; what is said of them is that a search is out.
+    expect(samples.every(c => c.cards === 3)).toBe(true)
+    // Nor is the other way to search offered for words that have not been answered.
+    expect(samples.some(c => c.describeOffered)).toBe(false)
+    await settle(300)
+    asks[1].answer([media(1, 'Harbor Lights')])
+    await settle()
+    expect(status()).toBe('1 result for "harb"')
+  })
+
+  // What is offered FOR an answer goes with it: narrowing it to a kind,
+  // the party and the request, the mark that says the model produced it.
+  it('offers nothing for the last answer once the words have moved on, on a wide screen', async () => {
+    vi.stubGlobal('matchMedia', (q: string) => ({ matches: q === '(min-width: 768px)', media: q, addEventListener() {}, removeEventListener() {} }))
+    const wide = (props: { query: string; describe?: { query: string; n: number } | null }) => (
+      <Profiler id="search" onRender={sample}>
+        <SearchView {...base} onDescribe={vi.fn()} onWatchTogether={vi.fn()} {...props} />
+      </Profiler>
+    )
+    const { rerender } = render(wide({ query: 'rainy sunday', describe: { query: 'rainy sunday', n: 1 } }))
+    await settle()
+    asks[0].answer([media(1, 'Harbor Lights'), media(2, 'Harbor Nights')], 'semantic')
+    await settle()
+    // The answer's own page: its mark, its filters, its actions.
+    expect(document.querySelector('[data-search-read-as-mood]')).not.toBeNull()
+    expect(document.querySelector('[data-search-filters]')).not.toBeNull()
+    expect(document.querySelector('[data-search-actions]')).not.toBeNull()
+    samples.length = 0
+    rerender(wide({ query: 'rainy sundays', describe: null }))
+    expect(samples.length).toBeGreaterThan(0)
+    expect(samples.map(c => c.status)).toEqual(samples.map(() => 'Searching for "rainy sundays"…'))
+    expect(samples.some(c => c.moodMark)).toBe(false)
+    expect(samples.some(c => c.filters)).toBe(false)
+    expect(samples.some(c => c.actions)).toBe(false)
+    vi.unstubAllGlobals()
+  })
+
+  it('does not show one search\'s failure for the next words', async () => {
+    const { rerender } = render(page({ query: 'har' }))
+    await settle(300)
+    asks[0].fail(new Error('HTTP 503'))
+    await settle()
+    expect(status()).toBe('The search did not work.')
+    expect(document.querySelector('[data-search-failed]')).not.toBeNull()
+    samples.length = 0
+    rerender(page({ query: 'harb' }))
+    expect(samples.length).toBeGreaterThan(0)
+    expect(samples.map(c => c.status)).toEqual(samples.map(() => 'Searching for "harb"…'))
+    expect(samples.some(c => c.failed)).toBe(false)
+  })
+
+  it('does not say a search by description found nothing in the commit it is asked for', async () => {
+    const { rerender } = render(page({ query: 'cozy' }))
+    await settle(300)
+    asks[0].answer([media(1, 'Cozy Corner')])
+    await settle()
+    expect(status()).toBe('1 result for "cozy"')
+    samples.length = 0
+    rerender(page({ query: 'cozy', describe: { query: 'cozy', n: 1 } }))
+    expect(samples.length).toBeGreaterThan(0)
+    expect(samples.map(c => c.status)).toEqual(samples.map(() => 'Looking for titles like "cozy"…'))
+    expect(samples.some(c => c.byTitleInstead)).toBe(false)
+    // Once the server has answered, and with title matches: now it is said.
+    await settle()
+    asks[1].answer([media(1, 'Cozy Corner')], 'literal')
+    await settle()
+    expect(document.querySelector('[data-search-by-title-instead]')).not.toBeNull()
+    // And the same words picked again as a plain search are searched again, not read as answered.
+    samples.length = 0
+    rerender(page({ query: 'cozy', describe: null }))
+    expect(samples.map(c => c.status)).toEqual(samples.map(() => 'Searching for "cozy"…'))
+    expect(samples.some(c => c.byTitleInstead)).toBe(false)
+  })
+})
+
 // While nothing is typed, the page offers what this profile searched for
 // lately.
 describe('recent searches', () => {
@@ -458,6 +597,24 @@ describe('recent searches', () => {
     expect(onPickRecent).toHaveBeenCalledWith('harbor')
   })
 
+  // With nothing typed they are the one thing on the page to act on. They
+  // sat in the second column there too: a narrow list at the far edge of an
+  // otherwise empty page.
+  it('lead the page while nothing is typed: in the main column, under its heading, with only the hint beside them', () => {
+    render(<SearchView {...base} query="" recent={['night train', 'harbor']} onPickRecent={vi.fn()} onClearRecent={vi.fn()} onDescribe={vi.fn()} />)
+    expect(section()!.closest('.search-main')).not.toBeNull()
+    expect(section()!.closest('aside')).toBeNull()
+    expect(document.querySelectorAll('[data-search-recent]')).toHaveLength(1)
+    // Headed as the main column's sections are, not as the second column's.
+    expect(screen.getByRole('heading', { name: 'Recent searches' }).className).toContain('search-h2')
+    expect(screen.getByRole('heading', { name: 'Recent searches' }).className).not.toContain('search-aside-h')
+    // After the line that says what the field is for.
+    const status = document.querySelector('.search-status')!
+    expect(status.compareDocumentPosition(section()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const aside = document.querySelector('aside.search-aside')!
+    expect([...aside.children].map(c => c.className)).toEqual(['search-hint'])
+  })
+
   // They used to go once something was typed. They stay beside the results
   // now: a search that was not the one wanted is one press from another.
   it('stay beside the results once something is typed, and still search when picked', async () => {
@@ -468,6 +625,8 @@ describe('recent searches', () => {
     await settle()
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Search Results')
     expect(section()!.closest('aside')).not.toBeNull()
+    expect(document.querySelectorAll('[data-search-recent]')).toHaveLength(1)
+    expect(screen.getByRole('heading', { name: 'Recent searches' }).className).toContain('search-aside-h')
     fireEvent.click(within(section()!).getByRole('button', { name: 'night train' }))
     expect(onPickRecent).toHaveBeenCalledWith('night train')
   })

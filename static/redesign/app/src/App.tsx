@@ -98,6 +98,7 @@ import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { anchorFor, ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
 import { ScanProgressBar } from '@/components/ScanProgressBar'
 import { searchField } from '@/lib/searchKeys'
+import { hasInAppEntryBehind } from '@/lib/historyBack'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
@@ -3251,7 +3252,11 @@ export default function App() {
     // shared link) has no in-app entry behind it; going back(-1) would
     // leave the SPA, so route home instead. selectedMedia is cleared by
     // the URL-sync effect once the path stops being /title/:id.
-    if (location.key !== 'default') {
+    // (lib/historyBack says when an entry of the app is behind this one.
+    // Where the step lands is then an address of the app like any other:
+    // the URL-sync effect and the redirects for pages a session is not
+    // shown apply to it exactly as they do to the browser's own Back.)
+    if (hasInAppEntryBehind(location.key, window.history.state)) {
       navigate(-1)
     } else {
       navigate('/', { replace: true })
@@ -3260,6 +3265,18 @@ export default function App() {
 
   // Handle keyboard shortcuts
   useEffect(() => {
+    // Whether something is over the page, so that a key meant for the page
+    // must leave it alone: a card's menu, the add-to-list sheet, the profile
+    // picker, a PIN prompt, or any modal dialog (one that says it is, or one
+    // that has made the page inert or hidden it from assistive tech, as the
+    // Radix dialogs do). One answer for the search page's Escape and for
+    // Ctrl or Cmd K. The player is not in it: Escape closes a player, and
+    // while one casts the page under it is still the viewer's to use; the
+    // shortcut has its own rule for a player below.
+    const pageCovered = () =>
+      !!(contextMenu || addToListMedia || profilesGateOpen || pinTarget)
+      || document.querySelector('[aria-modal="true"]') !== null
+      || !!searchField()?.closest('[inert], [aria-hidden="true"]')
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         // The PIN prompt's Escape cancels it (Radix); it must not also navigate
@@ -3269,7 +3286,13 @@ export default function App() {
         // must NOT unmount it (that kills the cast) — fall through to the
         // normal app navigation below instead.
         if ((playerTarget || playerLoading) && !playerRemoteActiveRef.current) closePlayer(true)
+        // The add-to-list sheet had no Escape of its own, so the key went
+        // to the page behind it: on the search page it cleared the words,
+        // or went Back, with the sheet still up. Escape closes the sheet.
+        else if (addToListMedia) setAddToListMedia(null)
         else if (view === 'search') {
+          // Not behind anything else that is over the page either.
+          if (pageCovered()) return
           // On the search page Escape clears the field, then leaves: the
           // first press takes the words (the focus goes to the field; it may
           // have been on a result, which is about to go), and with none left
@@ -3303,14 +3326,14 @@ export default function App() {
           target.isContentEditable
         )
         if (inEditable && target !== searchInputRef.current) return
-        if (playerTarget || contextMenu || addToListMedia) return
-        if (profilesGateOpen || pinTarget) return
-        // Nor under any other modal dialog. (The palette opened over one,
-        // with a field of its own; this field is in the page behind it, and
-        // a dialog that holds the focus would hand the key on to the
-        // fallback below, which moves the page.)
+        // Not while a player is up, minimized included (playerTarget).
+        if (playerTarget) return
+        // Nor under anything else that is over the page (pageCovered). The
+        // palette opened over a dialog, with a field of its own; this field
+        // is in the page behind it, and a dialog that holds the focus would
+        // hand the key on to the fallback below, which moves the page.
+        if (pageCovered()) return
         const field = searchField()
-        if (document.querySelector('[aria-modal="true"]') || field?.closest('[inert], [aria-hidden="true"]')) return
         e.preventDefault()
         // The bar is always on screen (it is sticky), and a plain focus()
         // on something sticky scrolls the page to where the bar sits in the
@@ -3708,6 +3731,13 @@ export default function App() {
   // login. Hoisted above the storage useEffect so both the explicit
   // logout and the cross-tab path can share it.
   const resetUserState = useCallback(() => {
+    // What was typed in the search field goes with whoever typed it. It
+    // stayed in the bar across a sign-out: the next person to sign in on
+    // the tab found the last one's words there, a search ran for them under
+    // the new account, and opening a result filed them in the new
+    // account's recent searches. (A session that expires does not come
+    // through here: the signed-out effect below clears them for both.)
+    setSearchQuery('')
     setSearchDescribe(null)
     forgetDescribedAnswer()
     setLibraryServerFor(null)
@@ -5986,6 +6016,12 @@ export default function App() {
   // the rotation had kept turning while nobody was signed in.
   useEffect(() => {
     if (user !== false) return
+    // The search field's words too (see resetUserState): nobody is signed
+    // in, so they are nobody's. The address is left where it was, as on any
+    // page a session expires on: on /search the next sign-in finds the page
+    // with nothing typed. (A described ask needs no clearing here: it is
+    // stamped with who made it and handed to the page only for them.)
+    setSearchQuery('')
     heroLoadRef.current++
     heroPoolRef.current = []
     setHeroPool(pool => (pool.length ? [] : pool))

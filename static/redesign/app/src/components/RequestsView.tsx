@@ -151,7 +151,11 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
   const [confirming, setConfirming] = useState<number | null>(null)
   const [busy, setBusy] = useState<number | null>(null)
   const busyRef = useRef<number | null>(null)
-  const [wrong, setWrong] = useState<{ id: number; says: string } | null>(null)
+  // `above`: the row was leaving the list being shown as this was set, so
+  // it was said above the list. It is announced once, where it first
+  // appears; drawn in the other place later (the viewer changes the
+  // filter), it is plain text there.
+  const [wrong, setWrong] = useState<{ id: number; says: string; above?: boolean } | null>(null)
   // The server's answer to a delete of a request that is not there: someone
   // (another tab, an admin) deleted it first. It is deleted, which is what
   // was asked for; "try again" could never work.
@@ -215,7 +219,8 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
         setConfirming(null)
         setFocusTo({ kind: 'after', ids: [req.id, ...after] })
         onRequestMoved?.(req.id, 'processing')
-        setWrong({ id: req.id, says: 'It is with the downloader now and can no longer be deleted.' })
+        // Under any filter but All the row, now Processing, leaves the list.
+        setWrong({ id: req.id, says: 'It is with the downloader now and can no longer be deleted.', above: filter !== 'all' && filter !== 'processing' })
       } else {
         setWrong({ id: req.id, says: 'It could not be deleted. Try again in a moment.' })
       }
@@ -324,7 +329,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
         </>
       )}
 
-      {wrongOutOfView && <p className="req-wrong req-wrong-page" role="alert" data-requests-wrong="">{wrongOutOfView}</p>}
+      {wrongOutOfView && <p className="req-wrong req-wrong-page" role={wrong?.above ? 'alert' : undefined} data-requests-wrong="">{wrongOutOfView}</p>}
 
       {filtered.length === 0 ? (
         <div className="req-none" data-requests-none="">
@@ -399,7 +404,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                   <span className="req-status-note" title={failedSays ? req.error_message : undefined}>
                     {failedSays || arrived || (status?.note ?? '')}
                   </span>
-                  {wrong?.id === req.id && <span className="req-wrong" role="alert">{wrong.says}</span>}
+                  {wrong?.id === req.id && <span className="req-wrong" role={wrong.above ? undefined : 'alert'}>{wrong.says}</span>}
                 </div>
                 <div
                   className="req-acts"
