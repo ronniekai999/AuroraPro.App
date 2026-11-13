@@ -26,7 +26,6 @@ import { adminFailure, type Failure } from './adminFailure'
 import { FailureNote, FailureText, StandingNotice, StatusLine, useSaid } from './AdminNotes'
 import { useConfirmedAction } from './useConfirmedAction'
 import { PHASE_WORDS, backupPanelMounted, clearRestoreOutcome, discoverRestore, finishRestore, followRestore, useRestoreOutcome, useRestoreWatch } from './restoreOutcome'
-import { failureReason } from '@/lib/failureWords'
 import {
   parseReferralOptionsSetting,
   serializeReferralOptions,
@@ -270,11 +269,13 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
         </p>
         <p className="text-ink-2 text-xs mb-4 leading-relaxed">
           Once the file is uploaded, the restore runs on the server: closing or reloading this tab does
-          not stop it, and this page finds it again. Restarting or updating the server while it runs can
-          stop it part way. The restore wraps every change in a single transaction. If any statement
-          fails, the entire restore rolls back and the database is left in an empty (wiped) state — you
-          can retry with a different file. Legacy <code>.sql.gz</code> backups need to be restored via the
-          command line: <code>gunzip &lt; file.sql.gz | psql $DATABASE_URL</code>.
+          not stop it, and this page finds it again. It clears the old data and loads the backup in one
+          transaction: if anything fails, or the server is restarted or updated before it ends, nothing is
+          changed, and the restore has to be run again. While it runs the rest of Aurora waits for the
+          database, and the database needs room for a second copy of the data. When it succeeds everyone
+          is signed out, you included, since a backup holds no sessions: sign in again to see that it
+          finished, before restarting Aurora. Legacy <code>.sql.gz</code> backups need to be restored via
+          the command line: <code>gunzip &lt; file.sql.gz | psql $DATABASE_URL</code>.
         </p>
         <div className="flex gap-3 flex-wrap items-center">
           <input
@@ -306,8 +307,9 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
         {restoring && (
           <div ref={progressRef} tabIndex={-1} role="region" aria-label="Restore in progress" className="mt-3 min-w-0 text-[14px] leading-snug">
             <p role="status" className="text-ink [overflow-wrap:anywhere]">
-              Restoring the database from {restoring.file}: {running ? PHASE_WORDS[running.phase] : 'starting'}.
-              {' '}It runs on the server, and goes on if this tab is closed.
+              Restoring the database from {restoring.file}: {running ? PHASE_WORDS[running.phase] : 'asking the server how far it has got'}.
+              {' '}It runs on the server, and goes on if this tab is closed. When it succeeds everyone is signed
+              out, you included: sign in again to see that it finished, before restarting Aurora.
             </p>
             {unreadable && (
               <div className="mt-2">
@@ -350,20 +352,22 @@ function AdminBackupRestore({ downloadBackup, accountId }: {
       >
         Everything Aurora holds now is replaced by what is in this file{restoreFlow.asked ? ` (${(restoreFlow.asked.size / 1024 / 1024).toFixed(1)} MB)` : ''}:
         accounts, profiles, libraries, watch history, lists and settings. What is there now cannot be brought
-        back except from another backup. Aurora must be restarted once the restore is done. Once the file is
-        uploaded the restore runs on the server, and closing or reloading this tab does not stop it; restarting
-        or updating the server before it ends can stop it part way and leave the database empty.
+        back except from another backup. When the restore succeeds everyone is signed out, you included, since a
+        backup holds no sessions: sign in again to see that it finished, then restart Aurora. Once the file is
+        uploaded the restore runs on the server, and closing or reloading this tab does not stop it. It replaces
+        everything in one step: if it fails, or the server is restarted or updated before it ends, nothing is
+        changed and it has to be run again. While it runs, the rest of Aurora waits for the database.
       </ConfirmDialog>
     </div>
   )
 }
 
 /** A request that got no answer from Aurora: the connection, or a proxy in
- *  front of it that gave up (Aurora answers neither 502 nor 504, and its
- *  own 503 carries a reason). The restore may have started. */
+ *  front of it that gave up (Aurora answers this route with none of 502, 503
+ *  or 504). The restore may have started. */
 function isLost(e: unknown): boolean {
   if (e instanceof NetworkError) return true
-  return e instanceof APIError && (e.status === 502 || e.status === 504 || (e.status === 503 && failureReason(e) !== 'shutting_down'))
+  return e instanceof APIError && (e.status === 502 || e.status === 503 || e.status === 504)
 }
 
 /** What an upload that did not start a restore is said to have done. Every
@@ -376,7 +380,6 @@ function restoreFailure(e: unknown): Failure {
     400: 'The server refused this file, and the database was not changed.',
     409: 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.',
     413: 'The file is too large to restore from here, and the database was not changed.',
-    reason: { shutting_down: 'The server is shutting down, so the restore did not start and the database was not changed. Try again once it is back.' },
     noAnswer: lost,
     otherwise: 'The restore did not start, and the database was not changed. Read what the server said before trying again.',
   })

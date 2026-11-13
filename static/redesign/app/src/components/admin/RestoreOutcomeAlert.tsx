@@ -3,8 +3,9 @@
 // a session that has the admin UI, so a profile with a limit is never shown
 // it; it waits until an admin session in this tab has the admin UI again.
 // While mounted it also keeps the restore's status read (the restore runs on
-// the server, and the tab follows it from wherever the admin is), and looks
-// once for a restore already running, so a reload mid-restore finds it.
+// the server, and the tab follows it from wherever the admin is), takes up a
+// restore this tab followed before a reload, and with none followed looks for
+// one already running.
 //
 // Kept out of the Admin page's chunk: App loads it with the rest of the app.
 

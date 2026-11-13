@@ -2873,8 +2873,10 @@ export async function getUpdateStatus(signal?: AbortSignal): Promise<UpdateStatu
 
 // A database restore runs as a job on the server (POST /api/admin/restore
 // answers 202 with this status once it has started); the Admin page follows
-// it here. In memory on the server: a restart forgets both halves.
-export type RestorePhase = 'validating' | 'wiping' | 'restoring'
+// it here. In memory on the server: a restart forgets both halves. The job
+// checks the file ('validating'), then clears the old data and loads the
+// backup in one transaction ('replacing'): it commits whole or not at all.
+export type RestorePhase = 'validating' | 'replacing'
 export interface RestoreRun {
   id: string
   /** The uploaded file's name, as the browser gave it. */
@@ -2890,8 +2892,9 @@ export interface RestoreResult {
   succeeded: boolean
   /** The phase it ended in. */
   phase: RestorePhase
-  /** What it left: nothing changed, possibly an empty database, or the backup. */
-  database: 'unchanged' | 'may_be_empty' | 'restored'
+  /** What it left: what was there before, the backup, or (when the
+   *  database connection was lost as it committed) one of the two. */
+  database: 'unchanged' | 'restored' | 'unknown'
   /** The server's own sentence. */
   message: string
   /** What psql or pg_restore wrote, capped by the server. */

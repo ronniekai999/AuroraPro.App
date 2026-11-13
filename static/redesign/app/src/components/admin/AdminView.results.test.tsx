@@ -66,7 +66,7 @@ afterEach(() => { resetRestoreOutcomeForTest(); vi.unstubAllGlobals() })
 
 /** A restore job's status as the server reports it. */
 const RUN = { id: 'j1', file: 'aurora.dump', phase: 'validating', started_at: '2026-11-13T10:00:00Z' }
-const ENDED = { id: 'j1', file: 'aurora.dump', started_at: '2026-11-13T10:00:00Z', ended_at: '2026-11-13T10:05:00Z', succeeded: true, phase: 'restoring', database: 'restored', message: 'Restore complete.' }
+const ENDED = { id: 'j1', file: 'aurora.dump', started_at: '2026-11-13T10:00:00Z', ended_at: '2026-11-13T10:05:00Z', succeeded: true, phase: 'replacing', database: 'restored', message: 'Restore complete.' }
 
 async function openSection(user: User, name: string) {
   const view = render(<MemoryRouter><AdminView currentAdminId={1} /></MemoryRouter>)
@@ -273,7 +273,7 @@ describe('failures said beside what failed', () => {
     expect(alertLines(await screen.findByRole('alert'))).toEqual(['A backup or restore is already running. Try again when it has finished.', 'The server said: another backup or restore is already in progress'])
   })
 
-  it('says a restore that failed after the wipe may have left the database empty, beside the button that asked', async () => {
+  it('says a restore that failed, and that the database is as it was, beside the button that asked', async () => {
     const user = userEvent.setup()
     // The upload is taken (202); the job then fails, as its status says.
     let started = false
@@ -281,7 +281,7 @@ describe('failures said beside what failed', () => {
       if (url === '/api/admin/restore') { started = true; return json(202, { running: RUN, last: null }) }
       if (url === '/api/admin/restore/status') {
         return json(200, started
-          ? { running: null, last: { ...ENDED, succeeded: false, database: 'may_be_empty', message: 'restore failed; database is in wiped state' } }
+          ? { running: null, last: { ...ENDED, succeeded: false, database: 'unchanged', message: 'the restore failed and its transaction was rolled back' } }
           : { running: null, last: null })
       }
       return json(503, { error: 'unavailable' })
@@ -292,8 +292,8 @@ describe('failures said beside what failed', () => {
     const d = await screen.findByRole('alertdialog')
     await user.click(within(d).getByRole('button', { name: 'Restore database' }))
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
-    const said = 'The restore failed after the old data had been cleared, so the database may now be empty. Read what the server said, then restore again from a backup that works.'
-    expect(alertLines(await screen.findByRole('alert'))).toEqual([said, 'The server said: restore failed; database is in wiped state'])
+    const said = 'The restore failed and everything it had done was undone, so the database is as it was. Read what the server said before trying again.'
+    expect(alertLines(await screen.findByRole('alert'))).toEqual([said, 'The server said: the restore failed and its transaction was rolled back'])
   })
 
   it('says a sweep that did not start, and a suggestion that could not be accepted, beside each', async () => {
@@ -483,8 +483,7 @@ describe('a restore’s other answers', () => {
     ['no answer', () => Promise.reject(new TypeError('Failed to fetch')), LOST],
     ['a proxy that gave up (504)', async () => json(504, { error: 'gateway timeout' }), LOST],
     ['a proxy that gave up (502)', async () => new Response('<html>Bad gateway</html>', { status: 502, headers: { 'content-type': 'text/html' } }), LOST],
-    ['a proxy that gave up (503, no reason of Aurora’s)', async () => json(503, { error: 'service unavailable' }), LOST],
-    ['a server shutting down (503 shutting_down)', async () => json(503, { error: { code: 503, reason: 'shutting_down', message: 'the server is shutting down; no restore was started' } }), 'The server is shutting down, so the restore did not start and the database was not changed. Try again once it is back.'],
+    ['a proxy that gave up (503)', async () => json(503, { error: 'service unavailable' }), LOST],
     ['a file refused (400)', async () => json(400, { error: { code: 400, message: 'upload is not a pg_dump custom archive' } }), 'The server refused this file, and the database was not changed.'],
     ['a server error before the job (500)', async () => json(500, { error: { code: 500, message: 'failed to create temp file for upload' } }), 'The restore did not start, and the database was not changed. Read what the server said before trying again.'],
     ['another restore running (409)', async () => json(409, { error: { code: 409, message: 'another backup or restore is already in progress' } }), 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.'],

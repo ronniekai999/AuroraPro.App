@@ -147,10 +147,10 @@ func TestDrainState_SumsTranscodeAndDirectPlay(t *testing.T) {
 	}
 }
 
-// TestDrainState_CountsARunningRestore — a restart kills a running database
-// restore, and one killed after its wipe leaves the database empty. The deploy
-// scripts read held_by_viewer alone, so the restore is counted there: their
-// drain then waits for it as it waits for a viewer, with no change to them.
+// TestDrainState_CountsARunningRestore — a restart stops a running database
+// restore, which then rolls back and has to be run again. The deploy scripts
+// read held_by_viewer alone, so the restore is counted there: their drain
+// then waits for it as it waits for a viewer, with no change to them.
 func TestDrainState_CountsARunningRestore(t *testing.T) {
 	tm := drainTestManager(t)
 	running := true

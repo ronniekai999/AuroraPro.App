@@ -17,17 +17,6 @@ Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
 
-# A stop waits for a running database restore (up to 4 minutes, then the
-# server stops it): one killed part way leaves the database empty. For that
-# wait to mean anything the stop's SIGTERM must reach the server alone, not
-# the restore's psql and pg_restore beside it (the default, control-group,
-# sends it to every process in the unit, and pg_restore cancels its own query
-# on SIGTERM), and systemd must not SIGKILL the unit first (the default
-# TimeoutStopSec is 90 s). With mixed, whatever is left when the server exits
-# gets SIGKILL; the server stops its transcodes itself on the way out.
-KillMode=mixed
-TimeoutStopSec=5min
-
 # Security hardening
 NoNewPrivileges=yes
 ProtectSystem=strict

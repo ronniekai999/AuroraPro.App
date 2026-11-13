@@ -74,7 +74,8 @@ type StreamState struct {
 	// here they were invisible to both halves of the deploy gate.
 	DirectPlay int `json:"direct_play"`
 	// Restore is 1 while a database restore is running, else 0. A restart
-	// kills it, and one killed after its wipe leaves the database empty.
+	// stops it, and its transaction rolls back: the old data stays, and the
+	// admin has to run it again.
 	Restore int `json:"restore"`
 	// HeldByViewer is TranscodeHeld + DirectPlay + Restore — what a restart
 	// would interrupt (a running restore counts as one), and the only field

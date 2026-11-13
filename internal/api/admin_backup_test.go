@@ -37,6 +37,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -727,144 +728,457 @@ func restoreAsJob(t *testing.T, h *AdminHandler, ctx context.Context, dump []byt
 	return st.Running.ID
 }
 
-// mediaItemsReadable reports whether a fresh connection can read the
-// media_items table, i.e. whether the wipe has dropped it.
-func mediaItemsReadable(t *testing.T, dbURL string) bool {
+// restoreFixture is a seeded database, a backup of it, and then a change the
+// backup does not have: the seeded media item deleted and a row added that
+// only the live database holds. A restore that committed brings the first
+// back and drops the second; one that rolled back leaves both as they were.
+type restoreFixture struct {
+	dbURL     string
+	seed      seedRow
+	dump      []byte
+	liveOnly  string // a library name only the live database has
+	tables    int    // public tables before the restore
+	jobs      *RestoreJobs
+	h         *AdminHandler
+	realPgRst string
+}
+
+func newRestoreFixture(t *testing.T) *restoreFixture {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	pool, dbURL := requireBackupTestDB(t)
+	f := &restoreFixture{dbURL: dbURL, seed: seedTestData(t, pool)}
+	f.dump = callBackup(t, dbURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, dbURL)
+	if _, err := pool.Exec(ctx, `DELETE FROM media_items WHERE id = $1`, f.seed.mediaID); err != nil {
+		t.Fatalf("delete the seeded item: %v", err)
+	}
+	f.liveOnly = "live-only " + time.Now().UTC().Format("150405.000000000")
+	if _, err := pool.Exec(ctx, `INSERT INTO libraries (name, type, paths, owner_id) VALUES ($1, 'movie', ARRAY['/tmp/live-only'], $2)`,
+		f.liveOnly, f.seed.userID); err != nil {
+		t.Fatalf("insert the live-only library: %v", err)
+	}
+	f.tables = f.publicTables(t)
+	real, err := exec.LookPath("pg_restore")
+	if err != nil {
+		t.Skip("pg_restore not on PATH")
+	}
+	f.realPgRst = real
+	f.jobs = NewRestoreJobs(context.Background())
+	f.h = &AdminHandler{databaseURL: dbURL}
+	f.h.SetRestoreJobs(f.jobs)
+	return f
+}
+
+func (f *restoreFixture) query(t *testing.T, ctx context.Context, sql string, args ...any) int {
+	t.Helper()
+	pool, err := pgxpool.New(ctx, f.dbURL)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	defer pool.Close()
 	var n int
-	return pool.QueryRow(ctx, `SELECT count(*) FROM media_items`).Scan(&n) == nil
+	if err := pool.QueryRow(ctx, sql, args...).Scan(&n); err != nil {
+		t.Fatalf("%s: %v", sql, err)
+	}
+	return n
+}
+
+func (f *restoreFixture) publicTables(t *testing.T) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return f.query(t, ctx, `SELECT count(*)::int FROM pg_tables WHERE schemaname = 'public'`)
+}
+
+// assertOldData fails unless the database is as it was before the restore:
+// every table there, the seeded item still gone, the live-only row still in.
+func (f *restoreFixture) assertOldData(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if got := f.publicTables(t); got != f.tables {
+		t.Errorf("public tables after the failed restore: %d, want %d as before", got, f.tables)
+	}
+	if n := f.query(t, ctx, `SELECT count(*)::int FROM media_items WHERE id = $1`, f.seed.mediaID); n != 0 {
+		t.Errorf("the seeded item, deleted after the backup, is back (%d): the restore committed", n)
+	}
+	if n := f.query(t, ctx, `SELECT count(*)::int FROM libraries WHERE name = $1`, f.liveOnly); n != 1 {
+		t.Errorf("the live-only library: %d rows, want 1: the old data is not intact", n)
+	}
+	if n := f.query(t, ctx, `SELECT count(*)::int FROM users WHERE id = $1`, f.seed.userID); n != 1 {
+		t.Errorf("the seeded user: %d rows, want 1", n)
+	}
+}
+
+// assertRestored fails unless the backup's data is what the database holds.
+func (f *restoreFixture) assertRestored(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if n := f.query(t, ctx, `SELECT count(*)::int FROM media_items WHERE id = $1`, f.seed.mediaID); n != 1 {
+		t.Errorf("the seeded item after the restore: %d rows, want 1", n)
+	}
+	if n := f.query(t, ctx, `SELECT count(*)::int FROM libraries WHERE name = $1`, f.liveOnly); n != 0 {
+		t.Errorf("the live-only library after the restore: %d rows, want 0", n)
+	}
+}
+
+// wrapPgRestore writes a stand-in for pg_restore that runs the real one for
+// everything but the restore's stream (`-f -`), and for that runs body, a
+// bash fragment with $REAL, "$@" and $KEY (the --restrict-key) set.
+func (f *restoreFixture) wrapPgRestore(t *testing.T, body string) {
+	t.Helper()
+	script := "#!/bin/bash\nREAL='" + f.realPgRst + "'\nstreaming=\nKEY=\n" +
+		"for a in \"$@\"; do case \"$a\" in -) streaming=1 ;; --restrict-key=*) KEY=\"${a#--restrict-key=}\" ;; esac; done\n" +
+		"if [ -z \"$streaming\" ]; then exec \"$REAL\" \"$@\"; fi\n" + body + "\n"
+	path := filepath.Join(t.TempDir(), "pg_restore")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write the pg_restore stand-in: %v", err)
+	}
+	f.jobs.tools.pgRestore = path
+}
+
+// pauseAtFirstCopy makes the stream stop for secs seconds at its first COPY:
+// the wipe has run, so the transaction holds its locks, and nothing has
+// committed.
+func (f *restoreFixture) pauseAtFirstCopy(t *testing.T, secs int) {
+	f.wrapPgRestore(t, `"$REAL" "$@" | awk -v secs=`+strconv.Itoa(secs)+` '{print} !d && /^COPY / {fflush(); system("sleep " secs); d=1}'
+exit ${PIPESTATUS[0]}`)
+}
+
+// waitForTheLock waits until the restore's psql holds an ACCESS EXCLUSIVE lock
+// on the table whose oid is given: its transaction has dropped it.
+func (f *restoreFixture) waitForTheLock(t *testing.T, oid uint32) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		n := f.query(t, ctx, `SELECT count(*)::int FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+			WHERE a.application_name = $1 AND l.relation = $2 AND l.mode = 'AccessExclusiveLock' AND l.granted`,
+			restoreAppName, oid)
+		cancel()
+		if n > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the restore's transaction never held the lock; status %+v", f.jobs.Status())
+}
+
+func (f *restoreFixture) mediaItemsOID(t *testing.T) uint32 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return uint32(f.query(t, ctx, `SELECT 'public.media_items'::regclass::oid::int`))
 }
 
 // TestARestoreFinishesWhenItsRequestIsCancelledMidRestore is the hazard the
 // restore job exists for, end to end against PostgreSQL. The restore used to
 // run on the upload's request: a reload, a closed tab or a dropped connection
 // after the wipe killed pg_restore and left the database empty. Here the
-// request's context is cancelled with the wipe committed and pg_restore about
-// to run, and the restore must still finish with the data back.
+// request's context is cancelled while the restore's transaction holds its
+// locks, and the restore must still finish with the backup's data.
 func TestARestoreFinishesWhenItsRequestIsCancelledMidRestore(t *testing.T) {
-	pool, dbURL := requireBackupTestDB(t)
-	seed := seedTestData(t, pool)
-	dump := callBackup(t, dbURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if _, err := pool.Exec(ctx, `DELETE FROM media_items WHERE id = $1`, seed.mediaID); err != nil {
-		t.Fatalf("perturb media_items: %v", err)
-	}
-	pool.Close()
-
-	h := &AdminHandler{databaseURL: dbURL}
-	rj := NewRestoreJobs(context.Background())
-	h.SetRestoreJobs(rj)
-	atRestore := make(chan struct{})
-	goOn := make(chan struct{})
-	rj.phaseHookForTest = func(p RestorePhase) {
-		if p == RestoreRestoring {
-			close(atRestore)
-			<-goOn
-		}
-	}
+	f := newRestoreFixture(t)
+	f.pauseAtFirstCopy(t, 3)
+	oid := f.mediaItemsOID(t)
 	reqCtx, cancelRequest := context.WithCancel(context.Background())
-	id := restoreAsJob(t, h, reqCtx, dump)
-	select {
-	case <-atRestore:
-	case <-time.After(time.Minute):
-		t.Fatalf("the restore did not reach pg_restore; status %+v", rj.Status())
-	}
-	// Past the wipe: the old tables are gone. This is the moment a cancelled
-	// request used to leave the database empty.
-	if mediaItemsReadable(t, dbURL) {
-		t.Fatal("media_items is still readable at the restoring phase; the wipe did not run first")
-	}
+	id := restoreAsJob(t, f.h, reqCtx, f.dump)
+	f.waitForTheLock(t, oid)
 	cancelRequest()
-	close(goOn)
-
-	got := waitRestoreEnd(t, rj, id)
+	got := waitRestoreEnd(t, f.jobs, id)
 	if !got.Succeeded || got.Database != RestoreDBRestored {
 		t.Fatalf("outcome %+v, want succeeded with the database restored", got)
 	}
-	fresh, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("reconnect after restore: %v", err)
-	}
-	defer fresh.Close()
+	f.assertRestored(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var gotTitle, gotEmbedding string
-	if err := fresh.QueryRow(ctx, `SELECT title, embedding::text FROM media_items WHERE id = $1`, seed.mediaID).Scan(&gotTitle, &gotEmbedding); err != nil {
+	pool, err := pgxpool.New(ctx, f.dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.QueryRow(ctx, `SELECT title, embedding::text FROM media_items WHERE id = $1`, f.seed.mediaID).Scan(&gotTitle, &gotEmbedding); err != nil {
 		t.Fatalf("read restored media_item: %v", err)
 	}
-	if gotTitle != seed.title {
-		t.Errorf("title %q, want %q", gotTitle, seed.title)
+	if gotTitle != f.seed.title {
+		t.Errorf("title %q, want %q", gotTitle, f.seed.title)
 	}
-	assertVectorEqual(t, seed.embedding, gotEmbedding)
+	assertVectorEqual(t, f.seed.embedding, gotEmbedding)
+}
+
+// TestAReadDuringTheRestoreWaitsAndThenSeesTheNewData: while the transaction
+// runs it holds an ACCESS EXCLUSIVE lock on every table it dropped, so another
+// connection's read of one waits rather than failing ("relation does not
+// exist" was the old wipe's answer), and once the restore commits it sees the
+// backup's rows.
+func TestAReadDuringTheRestoreWaitsAndThenSeesTheNewData(t *testing.T) {
+	f := newRestoreFixture(t)
+	f.pauseAtFirstCopy(t, 4)
+	oid := f.mediaItemsOID(t)
+	id := restoreAsJob(t, f.h, context.Background(), f.dump)
+	f.waitForTheLock(t, oid)
+
+	type answer struct {
+		n   int
+		err error
+	}
+	read := make(chan answer, 1)
+	readCtx, cancelRead := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancelRead()
+	reader, err := pgxpool.New(readCtx, f.dbURL)
+	if err != nil {
+		t.Fatalf("connect the reader: %v", err)
+	}
+	defer reader.Close()
+	go func() {
+		var n int
+		err := reader.QueryRow(readCtx, `SELECT count(*)::int FROM media_items WHERE id = $1 /* restore-reader-probe */`, f.seed.mediaID).Scan(&n)
+		read <- answer{n, err}
+	}()
+	// The read is waiting on the restore's lock, not failing.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		n := f.query(t, ctx, `SELECT count(*)::int FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%restore-reader-probe%' AND pid <> pg_backend_pid()`)
+		cancel()
+		if n > 0 {
+			break
+		}
+		select {
+		case a := <-read:
+			t.Fatalf("the read answered during the restore (%d, %v); it should wait for the transaction", a.n, a.err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the read never waited on the restore's lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	a := <-read
+	if a.err != nil || a.n != 1 {
+		t.Fatalf("the waiting read answered %d, %v; want the backup's row (1)", a.n, a.err)
+	}
+	if got := waitRestoreEnd(t, f.jobs, id); !got.Succeeded {
+		t.Fatalf("outcome %+v", got)
+	}
+	f.assertRestored(t)
+}
+
+// TestARestoreIsNeverCommittedUnlessPgRestoreSucceeded pins the guard. The
+// stand-in pg_restore writes a stream that looks whole (it stops at the end
+// of a COPY block and ends with its \unrestrict) and then exits 1. psql could
+// run a COMMIT after it; only this process's refusal to write one keeps the
+// partial load (the old tables wiped, one table loaded) from committing.
+func TestARestoreIsNeverCommittedUnlessPgRestoreSucceeded(t *testing.T) {
+	f := newRestoreFixture(t)
+	f.wrapPgRestore(t, `"$REAL" "$@" | awk '{print} /^\\\.$/ {exit}'
+printf '\n\\unrestrict %s\n' "$KEY"
+exit 1`)
+	id := restoreAsJob(t, f.h, context.Background(), f.dump)
+	got := waitRestoreEnd(t, f.jobs, id)
+	if got.Succeeded || got.Phase != RestoreReplacing || got.Database != RestoreDBUnchanged {
+		t.Fatalf("outcome %+v, want failed in replacing with the database unchanged", got)
+	}
+	if !strings.Contains(got.Message, "pg_restore failed") {
+		t.Errorf("message %q does not name pg_restore's failure", got.Message)
+	}
+	f.assertOldData(t)
+}
+
+// TestARestoreWhosePgRestoreIsKilledMidStreamLeavesTheOldData: pg_restore
+// killed part way through a COPY. The old non-atomic restore left the
+// database empty here.
+func TestARestoreWhosePgRestoreIsKilledMidStreamLeavesTheOldData(t *testing.T) {
+	f := newRestoreFixture(t)
+	f.wrapPgRestore(t, `"$REAL" "$@" | awk '{print} /^COPY / {c=1} c && ++n > 2 {exit}'
+kill -KILL $$`)
+	id := restoreAsJob(t, f.h, context.Background(), f.dump)
+	got := waitRestoreEnd(t, f.jobs, id)
+	if got.Succeeded || got.Database != RestoreDBUnchanged {
+		t.Fatalf("outcome %+v, want failed with the database unchanged", got)
+	}
+	f.assertOldData(t)
+}
+
+// TestALockTimeoutAbortsTheRestoreAndKeepsTheOldData: an open transaction
+// elsewhere holds a lock the wipe needs. Past the lock timeout the restore
+// fails, and since its transaction never committed, safely: the old data
+// stays and the admins stay signed in.
+func TestALockTimeoutAbortsTheRestoreAndKeepsTheOldData(t *testing.T) {
+	f := newRestoreFixture(t)
+	f.jobs.tools.lockTimeout = time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	holder, err := pgxpool.New(ctx, f.dbURL)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer holder.Close()
+	tx, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `LOCK TABLE users IN ACCESS SHARE MODE`); err != nil {
+		t.Fatalf("lock users: %v", err)
+	}
+	id := restoreAsJob(t, f.h, context.Background(), f.dump)
+	got := waitRestoreEnd(t, f.jobs, id)
+	_ = tx.Rollback(ctx)
+	if got.Succeeded || got.Phase != RestoreReplacing || got.Database != RestoreDBUnchanged {
+		t.Fatalf("outcome %+v, want failed in replacing with the database unchanged", got)
+	}
+	if !strings.Contains(got.Stderr, "lock timeout") {
+		t.Errorf("stderr %q does not carry the lock timeout", got.Stderr)
+	}
+	f.assertOldData(t)
+}
+
+// TestABackupWithLargeObjectsIsRefusedBeforeAnythingIsTouched: pg_restore
+// writes BEGIN and COMMIT around large objects, and that COMMIT would end the
+// restore's transaction part way. The table of contents is checked first.
+func TestABackupWithLargeObjectsIsRefusedBeforeAnythingIsTouched(t *testing.T) {
+	pool, _ := requireBackupTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var lo int64
+	if err := pool.QueryRow(ctx, `SELECT lo_from_bytea(0, 'aurora')::bigint`).Scan(&lo); err != nil {
+		t.Fatalf("create a large object: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `SELECT lo_unlink($1)`, lo) })
+	f := newRestoreFixture(t)
+	id := restoreAsJob(t, f.h, context.Background(), f.dump)
+	got := waitRestoreEnd(t, f.jobs, id)
+	if got.Succeeded || got.Phase != RestoreValidating || got.Database != RestoreDBUnchanged {
+		t.Fatalf("outcome %+v, want refused while validating with the database unchanged", got)
+	}
+	if !strings.Contains(got.Message, "BLOB") && !strings.Contains(got.Message, "LARGE OBJECT") {
+		t.Errorf("message %q does not name the large objects", got.Message)
+	}
+	f.assertOldData(t)
 }
 
 // TestATruncatedArchiveIsRefusedInTheJobWithTheDatabaseUntouched: the full
-// read of the archive (deep-debug H8) moved from the request into the job. A
-// dump cut mid-data passes the handler's cheap checks, so the POST answers
-// 202; the job must refuse it before the wipe and say the database is
-// unchanged, and the data must still be there.
+// read of the archive (deep-debug H8) runs in the job, before the transaction
+// takes any lock. A dump cut mid-data passes the handler's cheap checks, so
+// the POST answers 202; the job must refuse it in its validation.
 func TestATruncatedArchiveIsRefusedInTheJobWithTheDatabaseUntouched(t *testing.T) {
-	pool, dbURL := requireBackupTestDB(t)
-	seed := seedTestData(t, pool)
-	dump := callBackup(t, dbURL)
-	cut := dump[:len(dump)*2/3]
-
-	h := &AdminHandler{databaseURL: dbURL}
-	h.SetRestoreJobs(NewRestoreJobs(context.Background()))
-	id := restoreAsJob(t, h, context.Background(), cut)
-	got := waitRestoreEnd(t, h.restores(), id)
+	f := newRestoreFixture(t)
+	id := restoreAsJob(t, f.h, context.Background(), f.dump[:len(f.dump)*2/3])
+	got := waitRestoreEnd(t, f.jobs, id)
 	if got.Succeeded || got.Phase != RestoreValidating || got.Database != RestoreDBUnchanged || got.Stderr == "" {
 		t.Fatalf("outcome %+v, want refused while validating, database unchanged, with pg_restore's words", got)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var n int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM media_items WHERE id = $1`, seed.mediaID).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("the seeded row after a refused archive: count %d, err %v; the database was touched", n, err)
+	f.assertOldData(t)
+}
+
+// TestARestoreStoppedByShutdownLeavesTheOldData: a stop cancels the lifecycle
+// context in the middle of the transaction. psql is interrupted, nothing
+// commits, and the old data stays: the restore is lost and has to be run
+// again. (The old restore left the database empty here.)
+func TestARestoreStoppedByShutdownLeavesTheOldData(t *testing.T) {
+	f := newRestoreFixture(t)
+	base, stopServer := context.WithCancel(context.Background())
+	defer stopServer()
+	f.jobs = NewRestoreJobs(base)
+	f.h.SetRestoreJobs(f.jobs)
+	f.pauseAtFirstCopy(t, 30)
+	oid := f.mediaItemsOID(t)
+	id := restoreAsJob(t, f.h, context.Background(), f.dump)
+	f.waitForTheLock(t, oid)
+	stopServer()
+	got := waitRestoreEnd(t, f.jobs, id)
+	if got.Succeeded || got.Stopped != "shutdown" || got.Phase != RestoreReplacing || got.Database != RestoreDBUnchanged {
+		t.Fatalf("outcome %+v, want stopped by shutdown in replacing with the database unchanged", got)
+	}
+	f.assertOldData(t)
+}
+
+// TestPsqlReachingEndOfInputWithoutTheCommitRollsBack pins what the guard
+// rests on, without this process's interrupt: when pg_restore dies part way
+// (under systemd's default stop every process in the unit gets SIGTERM at
+// once, pg_restore included), psql reads the end of its input with the
+// transaction open and no COMMIT. psql is not run with --single-transaction,
+// so it commits nothing at the end of its input; it exits, its connection
+// ends, and PostgreSQL rolls the wipe and the partial load back. Both cuts:
+// between statements (after a whole COPY block) and inside a COPY.
+func TestPsqlReachingEndOfInputWithoutTheCommitRollsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// keep reports whether a line of pg_restore's output is kept; the
+		// stream ends after the first line it rejects.
+		cut func(line string, copyLines *int) bool
+	}{
+		{"after a whole COPY block", func(line string, n *int) bool {
+			if line == `\.` {
+				*n = -1
+				return true
+			}
+			return *n >= 0
+		}},
+		{"inside a COPY", func(line string, n *int) bool {
+			if strings.HasPrefix(line, "COPY ") {
+				*n = 1
+				return true
+			}
+			if *n > 0 {
+				*n++
+			}
+			return *n < 3
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRestoreFixture(t)
+			tmp := filepath.Join(t.TempDir(), "backup.dump")
+			if err := os.WriteFile(tmp, f.dump, 0o600); err != nil {
+				t.Fatalf("write the dump: %v", err)
+			}
+			out, err := exec.Command(f.realPgRst, "--no-owner", "--no-privileges", "--no-comments", "--restrict-key=k1", "-f", "-", tmp).Output()
+			if err != nil {
+				t.Fatalf("pg_restore -f -: %v", err)
+			}
+			var kept []string
+			n := 0
+			for _, line := range strings.Split(string(out), "\n") {
+				if !tc.cut(line, &n) {
+					break
+				}
+				kept = append(kept, line)
+			}
+			if len(kept) == 0 || len(kept) > len(strings.Split(string(out), "\n"))-10 {
+				t.Fatalf("the cut kept %d lines; it should end the stream part way", len(kept))
+			}
+			connURL, pgEnv := pgConnEnv(f.dbURL)
+			psql := exec.Command("psql", "-X", "--quiet", "--no-password", "--set", "ON_ERROR_STOP=on", "-f", "-", connURL)
+			psql.Env = append(os.Environ(), pgEnv...)
+			psql.Stdin = strings.NewReader(restorePreamble(restoreLockTimeout) + strings.Join(kept, "\n") + "\n")
+			res, err := psql.CombinedOutput()
+			t.Logf("psql: %v %s", err, res)
+			f.assertOldData(t)
+		})
 	}
 }
 
-// TestARestoreStoppedByShutdownAfterTheWipeSaysTheDatabaseMayBeEmpty: what the
-// job does NOT protect against. A shutdown whose wait runs out cancels the
-// lifecycle context; a restore stopped past the wipe leaves the database
-// empty, and the outcome must say so rather than "unchanged". The database is
-// restored again afterwards for the tests that follow.
-func TestARestoreStoppedByShutdownAfterTheWipeSaysTheDatabaseMayBeEmpty(t *testing.T) {
-	pool, dbURL := requireBackupTestDB(t)
-	seedTestData(t, pool)
-	dump := callBackup(t, dbURL)
-	pool.Close()
-	t.Cleanup(func() { callRestore(t, dbURL, dump) })
-
-	base, stopServer := context.WithCancel(context.Background())
-	defer stopServer()
-	h := &AdminHandler{databaseURL: dbURL}
-	rj := NewRestoreJobs(base)
-	h.SetRestoreJobs(rj)
-	atRestore := make(chan struct{})
-	rj.phaseHookForTest = func(p RestorePhase) {
-		if p == RestoreRestoring {
-			close(atRestore)
-			<-base.Done()
-		}
+// TestADroppedConnectionMidRestoreLeavesTheOldData: the restore's database
+// session is terminated in the middle of its transaction (a crash of psql, a
+// lost connection, an administrator's pg_terminate_backend). PostgreSQL rolls
+// the transaction back; the old data stays.
+func TestADroppedConnectionMidRestoreLeavesTheOldData(t *testing.T) {
+	f := newRestoreFixture(t)
+	f.pauseAtFirstCopy(t, 5)
+	oid := f.mediaItemsOID(t)
+	id := restoreAsJob(t, f.h, context.Background(), f.dump)
+	f.waitForTheLock(t, oid)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if n := f.query(t, ctx, `SELECT count(*)::int FROM (SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1) t`, restoreAppName); n != 1 {
+		t.Fatalf("terminated %d restore sessions, want 1", n)
 	}
-	id := restoreAsJob(t, h, context.Background(), dump)
-	<-atRestore
-	if rj.Drain(50 * time.Millisecond) {
-		t.Fatal("Drain reported nothing running")
+	got := waitRestoreEnd(t, f.jobs, id)
+	if got.Succeeded || got.Database != RestoreDBUnchanged {
+		t.Fatalf("outcome %+v, want failed with the database unchanged", got)
 	}
-	stopServer()
-	got := waitRestoreEnd(t, rj, id)
-	if got.Succeeded || got.Stopped != "shutdown" || got.Phase != RestoreRestoring || got.Database != RestoreDBMayBeEmpty {
-		t.Fatalf("outcome %+v, want stopped by shutdown in restoring, database may be empty", got)
-	}
-	if mediaItemsReadable(t, dbURL) {
-		t.Fatal("media_items is readable after a restore stopped past the wipe; the outcome's 'may be empty' was not exercised")
-	}
+	f.assertOldData(t)
 }

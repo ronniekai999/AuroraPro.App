@@ -343,28 +343,30 @@ func streamWithFlush(dst io.Writer, src io.Reader) error {
 //
 // Companion to Backup. Admin-only.
 //
-// Pipeline (steps 1-2 on the request; 3-5 in a job on the server's
-// lifecycle that outlives it, admin_restore_job.go, which answers its
-// progress at GET /api/admin/restore/status):
+// Pipeline (steps 1-2 on the request; 3-4 in a job on the server's
+// lifecycle that outlives it, admin_restore_job.go and
+// admin_restore_pipeline.go, which answers its progress at
+// GET /api/admin/restore/status):
 //   1. Validate magic bytes (custom format starts with "PGDMP") before
 //      doing anything destructive.
 //   2. Stream the upload to a temp file. pg_restore needs a seekable
 //      file (custom format has a table of contents it reads first, then
 //      jumps around in). We cap the file size at maxRestoreSizeBytes.
 //      The request answers 202 here, with the job's status.
-//   3. Read the whole archive (`pg_restore -f /dev/null`), which rejects a
-//      truncated or corrupt one before anything is touched.
-//   4. Wipe the public schema: per-object DROPs that preserve installed
-//      extensions (see restoreWipeSQL for the why).
-//   5. Run pg_restore with:
-//        --single-transaction  → BEGIN/COMMIT wrap; any failure rolls back
+//   3. Validate, touching nothing: the client programs' --restrict-key,
+//      the archive's table of contents (only entry types that run in a
+//      transaction), and a full read (`pg_restore -f /dev/null`).
+//   4. In ONE transaction: the per-object wipe that preserves installed
+//      extensions (see restoreWipeSQL), then the SQL `pg_restore -f -`
+//      makes of the archive with:
 //        --no-owner            → skip ALTER OWNER statements
 //        --no-privileges       → skip GRANT/REVOKE statements
 //        --no-comments         → skip COMMENT ON statements (including the
 //                                COMMENT ON EXTENSION lines that require
 //                                extension-owner privilege)
-//        --exit-on-error       → bail on first error rather than continuing
-//                                with cascading downstream failures
+//      run by one psql session with ON_ERROR_STOP, and a COMMIT written
+//      only once pg_restore has exited 0. Any failure rolls back to the
+//      old data.
 //
 // Why we no longer line-filter the dump (2026-05-18 rearchitecture):
 //   The old plain-format + bufio.Scanner filter pipeline could mangle
@@ -372,7 +374,9 @@ func streamWithFlush(dst io.Writer, src io.Reader) error {
 //   for example, where a single row spans several KB. The corruption
 //   manifested as invalid syntax errors mid-COPY ("0..074918" — a
 //   double-dot from a row split mid-number). Custom format is binary
-//   and goes straight to pg_restore without our code touching it.
+//   and goes straight to pg_restore without our code touching it; the
+//   SQL pg_restore makes of it is copied to psql byte for byte (io.Copy),
+//   never read line by line.
 //
 // CRITICAL: Aurora's own pgxpool connections are still pointed at this DB
 // and may have cached metadata or prepared statements. After a successful
@@ -597,11 +601,6 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		h.backupRestoreMu.Unlock()
 	})
 	switch {
-	case errors.Is(err, errRestoresClosed):
-		// A reason, so the Admin page can tell this refusal (nothing was
-		// started) from a proxy's 503 (no answer from Aurora at all).
-		writeErrorReason(w, http.StatusServiceUnavailable, "shutting_down", err.Error())
-		return
 	case errors.Is(err, errRestoreRunning):
 		writeError(w, http.StatusConflict, "another backup or restore is already in progress; please wait for it to complete")
 		return

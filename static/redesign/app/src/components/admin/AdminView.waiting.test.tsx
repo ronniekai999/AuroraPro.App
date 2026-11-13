@@ -283,7 +283,7 @@ describe('a restore left by its way out', () => {
   // status says so.
   let started = false
   const statusAnswer = () => new Response(JSON.stringify(started
-    ? { running: null, last: { id: 'j1', file: 'aurora.dump', started_at: '', ended_at: '', succeeded: true, phase: 'restoring', database: 'restored', message: 'Restore complete.' } }
+    ? { running: null, last: { id: 'j1', file: 'aurora.dump', started_at: '', ended_at: '', succeeded: true, phase: 'replacing', database: 'restored', message: 'Restore complete.' } }
     : { running: null, last: null }), { status: 200, headers: { 'content-type': 'application/json' } })
   async function leaveRestore(answer: Promise<Response>) {
     started = false

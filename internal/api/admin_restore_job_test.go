@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -56,8 +57,8 @@ type fakeRestore struct {
 	ctx context.Context
 	// path is the archive it was handed.
 	path string
-	// hold, when non-nil, is waited on once the restoring phase begins
-	// (or until the job's context ends, as a killed pg_restore would).
+	// hold, when non-nil, is waited on once the replacing phase begins
+	// (or until the job's context ends, as an interrupted psql would).
 	hold chan struct{}
 	// started is closed when the pipeline is running.
 	started chan struct{}
@@ -68,7 +69,7 @@ func newFakeRestore() *fakeRestore {
 	return &fakeRestore{
 		hold:    make(chan struct{}),
 		started: make(chan struct{}),
-		end:     restoreEnd{ok: true, phase: RestoreRestoring, database: RestoreDBRestored, message: "Restore complete."},
+		end:     restoreEnd{ok: true, phase: RestoreReplacing, database: RestoreDBRestored, message: "Restore complete."},
 	}
 }
 
@@ -79,13 +80,13 @@ func (f *fakeRestore) run(ctx context.Context, _ string, path string, setPhase f
 	f.mu.Unlock()
 	close(f.started)
 	setPhase(RestoreValidating)
-	setPhase(RestoreWiping)
-	setPhase(RestoreRestoring)
+	setPhase(RestoreReplacing)
 	if f.hold != nil {
 		select {
 		case <-f.hold:
 		case <-ctx.Done():
-			return restoreEnd{phase: RestoreRestoring, database: RestoreDBMayBeEmpty, message: "restore failed (signal: killed); database is in wiped state, retry with a valid backup."}
+			// As psql interrupted mid-transaction: rolled back.
+			return restoreEnd{phase: RestoreReplacing, database: RestoreDBUnchanged, message: "the restore failed and its transaction was rolled back — the database was NOT modified: signal: interrupt"}
 		}
 	}
 	return f.end
@@ -187,8 +188,8 @@ func TestARestoreHoldsTheBackupLockForItsWholeLife(t *testing.T) {
 		name string
 		end  restoreEnd
 	}{
-		{"one that succeeds", restoreEnd{ok: true, phase: RestoreRestoring, database: RestoreDBRestored, message: "ok"}},
-		{"one that fails", restoreEnd{phase: RestoreRestoring, database: RestoreDBMayBeEmpty, message: "restore failed"}},
+		{"one that succeeds", restoreEnd{ok: true, phase: RestoreReplacing, database: RestoreDBRestored, message: "ok"}},
+		{"one that fails", restoreEnd{phase: RestoreReplacing, database: RestoreDBUnchanged, message: "restore failed"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeRestore()
@@ -262,10 +263,9 @@ func TestTheRestoreStatusFollowsTheJob(t *testing.T) {
 	rj := h.restores()
 	gates := map[RestorePhase]chan struct{}{
 		RestoreValidating: make(chan struct{}),
-		RestoreWiping:     make(chan struct{}),
-		RestoreRestoring:  make(chan struct{}),
+		RestoreReplacing:  make(chan struct{}),
 	}
-	reached := make(chan RestorePhase, 3)
+	reached := make(chan RestorePhase, 2)
 	rj.phaseHookForTest = func(p RestorePhase) {
 		reached <- p
 		<-gates[p]
@@ -290,7 +290,7 @@ func TestTheRestoreStatusFollowsTheJob(t *testing.T) {
 		}
 		return got
 	}
-	for _, p := range []RestorePhase{RestoreValidating, RestoreWiping, RestoreRestoring} {
+	for _, p := range []RestorePhase{RestoreValidating, RestoreReplacing} {
 		if got := <-reached; got != p {
 			t.Fatalf("reached %q, want %q", got, p)
 		}
@@ -310,77 +310,56 @@ func TestTheRestoreStatusFollowsTheJob(t *testing.T) {
 	}
 }
 
-// TestShutdownWaitsForARunningRestore: main calls Drain before it cancels the
-// lifecycle context, and Drain holds until the restore has ended and let the
-// lock go; meanwhile no new restore starts.
-func TestShutdownWaitsForARunningRestore(t *testing.T) {
+// TestARestorePublishesTheDrainSnapshotWhenItStartsAndEnds: main hands
+// SetOnChange the drain snapshot's publish, so the deploy scripts see a restore
+// at once rather than at the next 10-second tick, and see it end. Running()
+// is what the snapshot counts.
+func TestARestorePublishesTheDrainSnapshotWhenItStartsAndEnds(t *testing.T) {
 	f := newFakeRestore()
 	h := newJobHandler(t, context.Background(), f)
+	var mu sync.Mutex
+	var seen []bool
+	h.restores().SetOnChange(func() {
+		mu.Lock()
+		seen = append(seen, h.restores().Running())
+		mu.Unlock()
+	})
+	snapshot := func() []bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]bool(nil), seen...)
+	}
 	st := startRestore(t, h, context.Background())
 	<-f.started
-
-	drained := make(chan bool, 1)
-	go func() { drained <- h.restores().Drain(time.Minute) }()
-	select {
-	case <-drained:
-		t.Fatal("Drain returned while the restore was still running")
-	case <-time.After(50 * time.Millisecond):
-	}
-	if !h.restores().Running() {
-		t.Fatal("the restore stopped running while shutdown waited")
+	if got := snapshot(); len(got) != 1 || !got[0] {
+		t.Fatalf("publishes after the start: %v, want one that sees it running", got)
 	}
 	close(f.hold)
-	select {
-	case ok := <-drained:
-		if !ok {
-			t.Fatal("Drain reported the restore still running")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Drain did not return once the restore ended")
+	waitRestoreEnd(t, h.restores(), st.Running.ID)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(snapshot()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
 	}
-	// Drain returns once the job has let its lock go.
-	if !h.backupRestoreMu.TryLock() {
-		t.Fatal("the lock is still held when Drain returns")
+	if got := snapshot(); len(got) != 2 || got[1] {
+		t.Fatalf("publishes after the end: %v, want a second that sees none running", got)
 	}
-	h.backupRestoreMu.Unlock()
-	if last := h.restores().Status().Last; last == nil || last.ID != st.Running.ID || !last.Succeeded {
-		t.Fatalf("outcome after the wait: %+v", last)
-	}
-
-	// After Drain no restore starts: 503, nothing run, the lock free.
-	f2 := newFakeRestore()
-	h.restores().run = f2.run
-	rec := httptest.NewRecorder()
-	h.Restore(rec, restoreRequest(t, context.Background(), "late.dump", archiveLike()))
-	if rec.Code != http.StatusServiceUnavailable || errorReasonOf(rec) != "shutting_down" {
-		t.Fatalf("a restore after shutdown began: %d %q, want 503 shutting_down", rec.Code, errorReasonOf(rec))
-	}
-	select {
-	case <-f2.started:
-		t.Fatal("a restore started after shutdown began")
-	default:
-	}
-	waitUnlocked(t, h)
 }
 
-// TestARestoreStillRunningAfterTheWaitIsStoppedByShutdown: the wait is
-// bounded; past it main cancels the lifecycle context, which kills the
-// restore, and its outcome says why and that the database may be empty.
-func TestARestoreStillRunningAfterTheWaitIsStoppedByShutdown(t *testing.T) {
+// TestAServerStopStopsTheRestore: a stop cancels the lifecycle context, which
+// stops the job (its transaction rolls back, pinned against PostgreSQL in
+// admin_backup_test.go), and its outcome says why. The shutdown does not wait
+// for it.
+func TestAServerStopStopsTheRestore(t *testing.T) {
 	f := newFakeRestore()
 	base, cancelServer := context.WithCancel(context.Background())
 	defer cancelServer()
 	h := newJobHandler(t, base, f)
 	st := startRestore(t, h, context.Background())
 	<-f.started
-
-	if h.restores().Drain(30 * time.Millisecond) {
-		t.Fatal("Drain reported nothing running while the restore was held")
-	}
 	cancelServer()
 	got := waitRestoreEnd(t, h.restores(), st.Running.ID)
-	if got.Succeeded || got.Stopped != "shutdown" || got.Database != RestoreDBMayBeEmpty {
-		t.Fatalf("outcome %+v, want failed, stopped by shutdown, may be empty", got)
+	if got.Succeeded || got.Stopped != "shutdown" || got.Database != RestoreDBUnchanged {
+		t.Fatalf("outcome %+v, want failed, stopped by shutdown, unchanged", got)
 	}
 	if !strings.Contains(got.Message, "shutting down") {
 		t.Errorf("message %q does not say the server stopped it", got.Message)
@@ -388,11 +367,43 @@ func TestARestoreStillRunningAfterTheWaitIsStoppedByShutdown(t *testing.T) {
 	waitUnlocked(t, h)
 }
 
+// TestAValidationStoppedByAShutdownIsNotCalledABadFile: a stop during the
+// check of the file is said as a stop, not as an unreadable archive.
+func TestAValidationStoppedByAShutdownIsNotCalledABadFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, script string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return path
+	}
+	tools := restoreTools{
+		pgRestore: write("pg_restore", `case "$*" in
+*--help*) echo "  --restrict-key=RESTRICT_KEY" ;;
+*-l*) echo "215; 1259 16390 TABLE public users aurora" ;;
+*) exec sleep 30 ;;
+esac
+`),
+		psql: write("psql", `echo '  \unrestrict RESTRICT_KEY'
+`),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
+	end := tools.runPipeline(ctx, "postgres://aurora@127.0.0.1:1/none", "/some.dump", func(RestorePhase) {})
+	if end.ok || end.phase != RestoreValidating || end.database != RestoreDBUnchanged {
+		t.Fatalf("outcome %+v, want refused while validating with the database unchanged", end)
+	}
+	if !strings.Contains(end.message, "stopped while it checked the file") || strings.Contains(end.message, "not a complete") {
+		t.Errorf("message %q; want the stop, not a bad archive", end.message)
+	}
+}
+
 // TestThePipelineValidatesBeforeTheWipe runs the real pipeline on an upload
-// that passes the handler's cheap checks but is no archive: pg_restore's
-// validation must refuse it in the job, before psql is ever run (the URL here
-// points nowhere, so a wipe would fail with phase "wiping"), and the status
-// must say the database was not changed.
+// that passes the handler's cheap checks but is no archive: pg_restore must
+// refuse it in the job's validation, before psql is ever run (the URL here
+// points nowhere, so reaching the transaction would end in phase
+// "replacing"), and the status must say the database was not changed.
 func TestThePipelineValidatesBeforeTheWipe(t *testing.T) {
 	if _, err := exec.LookPath("pg_restore"); err != nil {
 		t.Skip("pg_restore not on PATH")
@@ -462,7 +473,7 @@ func TestTheRouterServesMainsRestoreJobs(t *testing.T) {
 		t.Fatalf("read the user: %v", err)
 	}
 	rj := NewRestoreJobs(ctx)
-	rj.last = &RestoreResult{ID: "from-main", Succeeded: true, Phase: RestoreRestoring, Database: RestoreDBRestored}
+	rj.last = &RestoreResult{ID: "from-main", Succeeded: true, Phase: RestoreReplacing, Database: RestoreDBRestored}
 	svc := healthTestService()
 	router := NewRouter(RouterDeps{Cfg: &config.Config{}, AuthSvc: svc, Queries: f.q, StartTime: time.Now(), RestoreJobs: rj})
 	read := func(rt int64) *httptest.ResponseRecorder {
@@ -483,5 +494,104 @@ func TestTheRouterServesMainsRestoreJobs(t *testing.T) {
 	}
 	if rr := read(f.kidRT); rr.Code != http.StatusForbidden || errorReasonOf(rr) != "profile_restricted" {
 		t.Fatalf("the kid's status read: %d %s; want 403 profile_restricted", rr.Code, rr.Body.String())
+	}
+}
+
+// TestTheTableOfContentsCheckReadsEachEntrysType: the types are read from
+// `pg_restore -l` lines, several of them more than one word, and only the
+// transaction-safe ones pass.
+func TestTheTableOfContentsCheckReadsEachEntrysType(t *testing.T) {
+	for line, want := range map[string]string{
+		"215; 1259 16390 TABLE public users aurora":                    "TABLE",
+		"4400; 0 16390 TABLE DATA public users aurora":                 "TABLE DATA",
+		"301; 1259 16400 SEQUENCE OWNED BY public users_id_seq aurora": "SEQUENCE OWNED BY",
+		"3; 3079 16485 EXTENSION - pg_trgm ":                           "EXTENSION",
+		"4380; 2613 16999 BLOB - 16999 aurora":                         "BLOB",
+		"4381; 0 0 BLOBS - BLOBS ":                                     "BLOBS",
+		"12; 1262 16384 DATABASE - aurora aurora":                      "DATABASE",
+		"13; 6100 16500 SUBSCRIPTION - sub aurora":                     "SUBSCRIPTION",
+		"14; 1259 16600 SOMETHING NEW public x aurora":                 "SOMETHING",
+		"; Archive created at 2026-11-13 10:00:00 UTC":                 "",
+		"": "",
+		"4449; 0 0 COMMENT - SCHEMA \"public\" aurora":            "COMMENT",
+		"5000; 2606 17000 FK CONSTRAINT public x x_y_fkey aurora": "FK CONSTRAINT",
+		"5001; 0 17001 MATERIALIZED VIEW DATA public mv aurora":   "MATERIALIZED VIEW DATA",
+	} {
+		if got := restoreTOCEntryType(line); got != want {
+			t.Errorf("restoreTOCEntryType(%q) = %q, want %q", line, got, want)
+		}
+	}
+	for _, refused := range []string{"BLOB", "BLOBS", "BLOB METADATA", "LARGE OBJECT", "DATABASE", "DATABASE PROPERTIES", "SUBSCRIPTION", "TABLESPACE", "SOMETHING"} {
+		if restoreTOCAllowed[refused] {
+			t.Errorf("%s is allowed; it cannot run inside the restore's transaction (or is unknown)", refused)
+		}
+	}
+}
+
+// fakeTools writes stand-in pg_restore and psql programs that answer --help
+// with the given text.
+func fakeTools(t *testing.T, pgRestoreHelp, psqlHelp string) restoreTools {
+	t.Helper()
+	dir := t.TempDir()
+	write := func(name, help string) string {
+		path := filepath.Join(dir, name)
+		script := "#!/bin/sh\ncat <<'HELP'\n" + help + "\nHELP\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return path
+	}
+	return restoreTools{pgRestore: write("pg_restore", pgRestoreHelp), psql: write("psql", psqlHelp)}
+}
+
+// TestClientProgramsWithoutRestrictKeyAreRefused: pg_restore's output is run
+// through psql, which obeys backslash commands in it; only the \restrict pair
+// (pg_restore --restrict-key, August 2025) keeps a crafted archive from making
+// psql run shell commands. Older programs are refused before anything runs.
+func TestClientProgramsWithoutRestrictKeyAreRefused(t *testing.T) {
+	ctx := context.Background()
+	newPgRestore := "  --restrict-key=RESTRICT_KEY  use provided string as psql \\restrict key"
+	newPsql := "  \\unrestrict RESTRICT_KEY  exit restricted mode if key matches"
+	if got := fakeTools(t, newPgRestore, newPsql).missingRestrictSupport(ctx); got != "" {
+		t.Fatalf("both programs have it, yet %q is reported missing", got)
+	}
+	if got := fakeTools(t, "  --no-owner", newPsql).missingRestrictSupport(ctx); got != "pg_restore" {
+		t.Errorf("an old pg_restore: reported %q, want pg_restore", got)
+	}
+	if got := fakeTools(t, newPgRestore, "  \\warn TEXT"); got.missingRestrictSupport(ctx) != "psql" {
+		t.Errorf("an old psql: reported %q, want psql", got.missingRestrictSupport(ctx))
+	}
+	// Through the pipeline: refused while validating, nothing changed, and
+	// the archive is never read.
+	end := fakeTools(t, "  --no-owner", newPsql).runPipeline(ctx, "postgres://aurora@127.0.0.1:1/none", "/nonexistent.dump", func(RestorePhase) {})
+	if end.ok || end.phase != RestoreValidating || end.database != RestoreDBUnchanged || !strings.Contains(end.message, "--restrict-key") {
+		t.Fatalf("pipeline with an old pg_restore: %+v", end)
+	}
+}
+
+// TestThePsqlProgressReaderFindsTheCommitLines: the commit block's lines are
+// what decide restored, unchanged or unknown; they may arrive split across
+// writes, and only exact lines with this restore's marker count.
+func TestThePsqlProgressReaderFindsTheCommitLines(t *testing.T) {
+	p := newRestoreProgress("m1")
+	for _, chunk := range []string{"WARNING:  something\naurora-restore commit", "ting m1\n", "psql:<stdin>:9: ERROR:  deferred check failed\n"} {
+		_, _ = p.Write([]byte(chunk))
+	}
+	if committing, committed, failed := p.state(); !committing || committed || !failed {
+		t.Errorf("after a failed COMMIT: committing=%v committed=%v failed=%v", committing, committed, failed)
+	}
+	p = newRestoreProgress("m2")
+	_, _ = p.Write([]byte("aurora-restore committing m1\nsays aurora-restore committed m2 inside\n"))
+	if committing, committed, _ := p.state(); committing || committed {
+		t.Errorf("another marker, or a marker inside a line, counted: committing=%v committed=%v", committing, committed)
+	}
+	_, _ = p.Write([]byte("aurora-restore committing m2\naurora-restore committed m2\n"))
+	if committing, committed, failed := p.state(); !committing || !committed || failed {
+		t.Errorf("after a COMMIT: committing=%v committed=%v failed=%v", committing, committed, failed)
+	}
+	big := strings.Repeat("x", 40*1024)
+	_, _ = p.Write([]byte(big + "\nlast line\n"))
+	if s := p.stderr(); len(s) > restoreStderrTail || !strings.HasSuffix(s, "last line") {
+		t.Errorf("the kept stderr is %d bytes ending %q; want at most %d ending with the last line", len(s), s[len(s)-12:], restoreStderrTail)
 	}
 }
