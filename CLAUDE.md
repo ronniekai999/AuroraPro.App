@@ -2022,14 +2022,16 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   `error.reason`; an abort says nothing). "Just now" is said only of a 5xx,
   a lost connection and the app's own failure; a 404 says the same whether
   or not the thing exists. The server's text is for the Admin page only, as
-  a secondary line (`serverSaidForAdmin`); views not yet moved onto the
-  helper still show it (known gap until they are). The browser's own alert,
+  a secondary line (`serverSaidForAdmin`); what is not yet on the helper
+  still shows it: the Admin page's panel loads and its update and
+  connection tests as their only line, and the manual match dialog after
+  its own sentence (known gap). The browser's own alert,
   confirm and prompt boxes are not used: `noNativeDialogs.test.ts` reads
   every source file with a scanner that blanks comments only (it knows
   strings, template literals, regular expressions and both comment kinds;
   a test compares what it blanks with TypeScript's own comment ranges over
-  every source file, so that holds for today's sources), with a list of
-  files still being moved off them. It matches written forms, so it does
+  every source file, so that holds for today's sources), with an
+  allowlist of exempt files, empty since the Admin page moved off them. It matches written forms, so it does
   not see a box reached by another route: an alias of `window` or of the
   function, a computed key or `Reflect.get`, a cast whose type has
   parentheses, or a name built at run time; JSX text holding `//` or `/*`
@@ -2085,6 +2087,50 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   and every test passes with the write owner made passive too; a password
   manager's handling of the two forms (one password input whose
   `autocomplete` switches) was not tested.
+
+### Admin page dialogs and the restore (web app)
+
+Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
+`adminFailure.ts`, `restoreOutcome.ts`, `RestoreOutcomeAlert.tsx`) and
+`components/settings/ConfirmDialog.tsx`.
+
+- No native alert, confirm or prompt (the app-wide guard's allowlist is
+  empty). Every confirmation is `ConfirmDialog` through
+  `useConfirmedAction`: one request per question; the dialog stays up while
+  it is out, and after `WAY_OUT_AFTER_MS` (10 s) offers a way out that
+  closes it and sends or aborts nothing, the panel then saying what is
+  still out and, when it lands, what came of it. While a request of a kind
+  is out no new question of that kind is asked (its opener is
+  `aria-disabled` and described by the waiting line). A refusal is said in
+  the dialog; a 404 closes it, reads the list again and says the thing was
+  already gone. A role question keeps the role it was asked about and sends
+  nothing if the row has changed since; a role change that may have
+  happened (5xx, no answer) reads the users again before saying so.
+  Approve and deny keep the ids that are out in a set, so one row's answer
+  never unlocks another row still out: the server's `Approve` checks the
+  status and then writes it with nothing atomic between.
+- Failures are said by kind through `adminFailure` over `lib/failureWords`,
+  with the server's text as a capped second line (`serverSaidForAdmin`).
+  A write that got no answer is said to have maybe happened.
+- A restore runs on its request's context on the server
+  (`internal/api/admin_backup.go`), so a reload, a closed tab or a lost
+  connection stops `pg_restore` part way and can leave the database empty.
+  The confirm says so before anything is sent. While a restore request is
+  out the page holds the browser's leave-this-page prompt
+  (`holdPageForRestore`: `preventDefault()` and a truthy `returnValue`,
+  for current browsers and for Chrome and Edge before 119), released in
+  the request's `finally`, whatever the Admin page does meanwhile. The
+  outcome goes to a module store keyed by the account id from before the
+  restore; the backup panel says it, or `RestoreOutcomeAlert` (mounted by
+  App for `adminUI && user`) does when the page is gone.
+- Known gaps: the server-side hazard itself is unfixed (a restore should
+  outlive its request); the outcome is memory only (a reload loses it) and
+  keyed by the pre-restore account id (after a restore from another
+  install's backup the admin may not be told); the leave-page prompt was
+  seen in no real browser; an answer that lands after its section was left
+  is said nowhere, except a restore's outcome and the AI settings' restart
+  notice; a dialog taller than the window keeps its focused button in view
+  and lets the title scroll away.
 
 ### Nullable database columns
 
