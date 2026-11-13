@@ -1,0 +1,10 @@
+{
+  "sha": "ff62add2c1f679e650fa7fb2fbe0a13dac342be0",
+  "verdict": "lows-only",
+  "summary": "Fresh-context review of a98a841..ff62add: CI's verify-bug-capture failure reproduced exactly (unwrapped headless shell, stock fontconfig: subpixel AA plus hinting) and resolved by pinning both off in the check; all six scenarios 0.00-0.14% under every fontconfig tried; mutations still fail. Remaining: CI runner settings stated though inferred (low); temp dir left on a failed launch, empty pictures dir per run, PR text stale (nits).",
+  "reviewer": "independent-review-subagent-2",
+  "findings": "4",
+  "diff_digest": "5493ec6b1dd59de1b9e33da9c9e52263f3c57b599bc86856238ca01c6a836952",
+  "branch": "claude/sweet-ride-8da9u4",
+  "recorded_at": "2026-11-13T18:50:36Z"
+}
