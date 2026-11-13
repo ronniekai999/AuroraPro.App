@@ -2023,10 +2023,11 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   a lost connection and the app's own failure; a 404 says the same whether
   or not the thing exists. The server's text is for the Admin page only, as
   a secondary line (`serverSaidForAdmin`); what is not yet on the helper
-  still shows it: on the Admin page its panel loads, its update and
-  connection tests, the stream diagnosis and the referral question's save
-  as their only line, and the manual match dialog after its own sentence
-  (known gap). The browser's own alert,
+  still shows it: on the Admin page its panel loads (the update status
+  among them), the update trigger, the AI providers' test, the stream
+  diagnosis and the referral question's save as their only line, the
+  download clients' connection test after "Failed:", and the manual match
+  dialog after its own sentence (known gap). The browser's own alert,
   confirm and prompt boxes are not used: `noNativeDialogs.test.ts` reads
   every source file with a scanner that blanks comments only (it knows
   strings, template literals, regular expressions and both comment kinds;
@@ -2115,8 +2116,9 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
 - The dialogs' and the actions' failures are said by kind through
   `adminFailure` over `lib/failureWords`, with the server's text as a
   capped second line (`serverSaidForAdmin`); a write that got no answer is
-  said to have maybe happened. (The panel loads and a few tests still show
-  the server's text alone: see the failure-words bullet above.)
+  said to have maybe happened. (The panel loads, two actions (the update
+  trigger and the referral question's save) and two tests still show the
+  server's text: see the failure-words bullet above.)
 - A restore runs on its request's context on the server
   (`internal/api/admin_backup.go`), so a reload, a closed tab or a lost
   connection stops `pg_restore` part way and can leave the database empty.
