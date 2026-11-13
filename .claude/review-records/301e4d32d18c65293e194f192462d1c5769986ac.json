@@ -1,0 +1,10 @@
+{
+  "sha": "301e4d32d18c65293e194f192462d1c5769986ac",
+  "verdict": "lows-only",
+  "summary": "One commit, re-checked by the bug report dialog's reviewer. Report a bug: the room kept for the corner button now survives the button being hidden (a phone page no longer jumps under a panel) and is kept at every width; every refusal goes through one re-announcing path, and a repeated identical refusal is announced by emptying the alert and filling it on the next frame. Admin: a failed read of the flagged list lands by the same numbering as an answer, and a landed read clears the error. All items done as meant; each new test fails without its behaviour. Open lows: a pending refill is not cancelled, so within one frame a different refusal can be overwritten or an error can return on a field just typed in; a repeat blinks the action row for one frame; in a background tab the refill waits until the tab is shown. Noted for the pairing page, which has not landed: its height arithmetic must count the reserve from 768px up.",
+  "reviewer": "fresh-context-agent-ad83f58e",
+  "findings": "3",
+  "diff_digest": "d82eee7a08477353e64ffec0823fcf69c39589b7355889223d51e1f3f4e351b8",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T20:24:04Z"
+}

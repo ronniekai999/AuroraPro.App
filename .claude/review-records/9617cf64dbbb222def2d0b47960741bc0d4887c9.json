@@ -1,0 +1,10 @@
+{
+  "sha": "9617cf64dbbb222def2d0b47960741bc0d4887c9",
+  "verdict": "lows-only",
+  "summary": "Search, step 2 of 4: a search that finds nothing lists titles that can be requested and takes the request on the search page; the hand-off of typed words to the Requests page's composer is removed. One commit, one pass by the search reviewer with the server's request handlers read: lows-only, no high or medium. No session that may not request can reach the lookup or the POST; another member's request is named only from a list the server returned under the admin powers; the POST and every outcome's wording match the server; one request per press; the earlier search rules are untouched. The tree is the builder's without its unfinished error screen. Open lows: Try again gives no feedback while it retries; the page promises a request before it has read whether the server takes requests; the config and the requests list are fetched at every empty answer; arriving matches are not announced; focus falls to the body in three places; a request's late answer after a sign-out or switch reaches the next owner's list; a refusal for requests being off says try again.",
+  "reviewer": "fresh-context-agent-a27d5c3e",
+  "findings": "7",
+  "diff_digest": "44c7fd5d9b2287ee16b378efc1a6c834ef5d1035381ee3d79dd919e104284e8a",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T21:53:58Z"
+}

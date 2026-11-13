@@ -16,14 +16,14 @@ const metaOf = (c: HTMLElement) => c.querySelector('.co-meta') as HTMLElement
 
 describe('MediaCardCinema meta row structure', () => {
   it('renders one .co-tok per token, and nothing else, as the row\'s children', () => {
-    const { container } = render(<MediaCardCinema item={item} onSelect={() => {}} showLength />)
+    const { container } = render(<MediaCardCinema item={item} onSelect={() => {}} onCardContext={() => {}} showLength />)
     const kids = [...metaOf(container).children]
     expect(kids).toHaveLength(4)
     for (const k of kids) expect(k).toHaveClass('co-tok')
   })
 
   it('puts each separator INSIDE the token it precedes, and none before the first', () => {
-    const { container } = render(<MediaCardCinema item={item} onSelect={() => {}} showLength />)
+    const { container } = render(<MediaCardCinema item={item} onSelect={() => {}} onCardContext={() => {}} showLength />)
     const [first, ...rest] = [...metaOf(container).children]
     expect(first.querySelector('.sep')).toBeNull()
     for (const k of rest) {
@@ -37,14 +37,14 @@ describe('MediaCardCinema meta row structure', () => {
   })
 
   it('wraps text tokens in .co-txt (the element that ellipsizes) and the rating in .star', () => {
-    const { container } = render(<MediaCardCinema item={item} onSelect={() => {}} showLength />)
+    const { container } = render(<MediaCardCinema item={item} onSelect={() => {}} onCardContext={() => {}} showLength />)
     const [rating, ...text] = [...metaOf(container).children]
     expect(rating.querySelector('.star')).not.toBeNull()
     expect(text.map(k => k.querySelector('.co-txt')?.textContent)).toEqual(['1999', '2h 16m', 'Science Fiction'])
   })
 
   it('renders a caller subtitle as a single ellipsizable token', () => {
-    const { container } = render(<MediaCardCinema item={item} onSelect={() => {}} subtitle="S5E14 · 23m left" />)
+    const { container } = render(<MediaCardCinema item={item} onSelect={() => {}} onCardContext={() => {}} subtitle="S5E14 · 23m left" />)
     const kids = [...metaOf(container).children]
     expect(kids).toHaveLength(1)
     expect(kids[0].querySelector('.sep')).toBeNull()

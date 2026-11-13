@@ -1,77 +1,26 @@
-// Aurora V2 — Companion shared UI primitives.
-//
-// Small, dependency-light bits shared across the companion surfaces so
-// the brand mark + OAuth provider treatment + reduced-motion handling
-// live in one place. Styling matches the mobile-companion mockup +
-// Aurora's index.css tokens.
+// What the companion's screens share: the header that says where you are,
+// and the sign-in providers' buttons.
 
-import { useEffect, useState } from 'react'
+import { AuroraMark } from '@/components/TopNav'
 import { AuroraWordmark } from '@/components/AuroraWordmark'
 
-// useReducedMotion — reactive `prefers-reduced-motion: reduce`. Used to
-// suppress the floating-reaction rise, mic pulse ring, and button hover
-// scale per the quality bar. SSR-safe (defaults to false when matchMedia
-// is unavailable) and updates live if the OS setting changes.
-export function useReducedMotion(): boolean {
-  const [reduced, setReduced] = useState<boolean>(() => {
-    if (typeof window === 'undefined' || !window.matchMedia) return false
-    return window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  })
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.matchMedia) return
-    const mql = window.matchMedia('(prefers-reduced-motion: reduce)')
-    const onChange = () => setReduced(mql.matches)
-    mql.addEventListener('change', onChange)
-    return () => mql.removeEventListener('change', onChange)
-  }, [])
-  return reduced
-}
-
-// AURORA_REDUCED_MOTION — a best-effort synchronous snapshot for the few
-// spots that only need a one-time class decision and can't take a hook
-// (e.g. a className built at module scope). Prefer useReducedMotion in
-// components. Guarded for SSR / older browsers.
-export const AURORA_REDUCED_MOTION: boolean =
-  typeof window !== 'undefined' && !!window.matchMedia
-    ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    : false
-
-// CompanionBrand — the Aurora logo mark + (optional) wordmark, matching
-// the mockup's glowing rounded-square mark.
-export function CompanionBrand({
-  size = 'md',
-  withWord = false,
-  className = '',
-}: {
-  size?: 'sm' | 'md' | 'lg'
-  withWord?: boolean
-  className?: string
-}) {
-  const dim = size === 'lg' ? 'h-16 w-16 rounded-[18px]' : size === 'sm' ? 'h-8 w-8 rounded-[10px]' : 'h-10 w-10 rounded-xl'
-  const icon = size === 'lg' ? 'h-9 w-9' : size === 'sm' ? 'h-5 w-5' : 'h-6 w-6'
+/** The app's mark and name, and that this is the companion: the first thing
+ *  on the join screen and while the session is checked. */
+export function CompanionHeader() {
   return (
-    <div className={`flex items-center gap-3 ${className}`}>
-      <div
-        className={`flex flex-shrink-0 items-center justify-center bg-gradient-to-br from-purple-500 to-purple-800 shadow-[0_0_28px_rgba(168,85,247,0.55)] ${dim}`}
-      >
-        <svg viewBox="0 0 24 24" fill="none" className={icon} aria-hidden="true">
-          <path d="M12 3C7 3 3 8 3 14c2-3 5-4 9-4s7 1 9 4c0-6-4-11-9-11z" fill="#fff" opacity=".95" />
-          <circle cx="12" cy="16" r="2.4" fill="#fff" />
-        </svg>
-      </div>
-      {withWord && (
-        // Drawn Borealis wordmark; carries
-        // its own accessible name "Aurora Pro", like the text it replaced.
-        <AuroraWordmark ink="#EDE9FE" className="h-[15px] w-auto" />
-      )}
-    </div>
+    <header className="flex h-11 flex-none items-center gap-2.5">
+      <AuroraMark />
+      {/* Carries the accessible name "Aurora Pro". */}
+      <AuroraWordmark ink="var(--ink)" className="h-[15px] w-auto" />
+      <span className="ml-auto text-[13px] text-ink-2">Companion</span>
+    </header>
   )
 }
 
 // ── OAuth providers — the 5 existing Aurora providers. Icons + brand
 // colors mirror App.tsx's OAuthSignInButton so the companion sign-in
-// reads as the same product. Kept here (not imported from App.tsx) so
-// the companion tree stays decoupled from the giant App module.
+// reads as the same product. Kept here because App.tsx does not export
+// its own, and importing that module would bring the whole app with it.
 
 export type CompanionOAuthProvider = 'google' | 'discord' | 'twitch' | 'facebook' | 'twitter'
 

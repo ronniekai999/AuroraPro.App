@@ -1,23 +1,18 @@
-// Aurora V2 — CompanionApp (mobile "second screen" root)
+// The phone companion's root: the "second screen" of a watch party, at
+// /join and /join/:code. It owns the session check, the sign-in, the switch
+// between the join screen and the room, and the companion's connection.
 //
-// Top-level tree for the watch-party mobile companion. Reachable at the
-// SPA routes /join and /join/:code (the integrator wires main.tsx to
-// render this component there). Self-contained: it owns the auth gate,
-// the join/room switch, and the useCompanion connection.
+// An Aurora account is required: the app's own sign-in and the sign-in
+// providers the server has on. There is no guest identity. Someone without
+// an account signs in once and is then a participant like any other.
 //
-// AUTH (locked decision = Option A): an Aurora account is REQUIRED. We
-// reuse the EXISTING JWT auth + the 5 existing OAuth providers. There is
-// NO guest token / anonymous identity here. A friend without an account
-// signs in once (one-tap OAuth or username/password) and is then a
-// normal participant.
-//
-// Mobile-first + Aurora-branded: a full-viewport (100dvh) dark gradient
-// shell, no desktop chrome, no video player. The phone opens ONLY the
-// room socket (chat/voice/reactions) via useCompanion.
+// A phone screen with none of the app's chrome and no player: the phone
+// opens the room socket only (chat, voice, reactions), through useCompanion.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import {
+  APIError,
   fetchMe,
   getSetupStatus,
   getStoredUser,
@@ -26,13 +21,13 @@ import {
   type SetupStatus,
   type User,
 } from '@/lib/api'
+import { waitPhrase } from '@/lib/profileRefusal'
 import { useCompanion } from '@/hooks/useCompanion'
 import { JoinScreen } from './JoinScreen'
 import { CompanionRoom } from './CompanionRoom'
 import {
-  CompanionBrand,
+  CompanionHeader,
   COMPANION_OAUTH_PROVIDERS,
-  useReducedMotion,
   type CompanionOAuthProvider,
 } from './companionUi'
 
@@ -74,6 +69,23 @@ export function CompanionApp() {
   const companion = useCompanion()
   const { join } = companion
 
+  // What is typed in a party's message field and not yet sent, by the
+  // party's code. Held here, above the room: when the connection is given
+  // up on, the room is replaced by the join screen, and the words must be
+  // there when the person rejoins. One person's: gone with a sign-out, and
+  // with a party the person chose to leave.
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const signedInAs = user?.id ?? null
+  const [draftsFor, setDraftsFor] = useState(signedInAs)
+  if (draftsFor !== signedInAs) {
+    setDraftsFor(signedInAs)
+    setDrafts({})
+  }
+  const roomCode = companion.state.code ?? ''
+  const setRoomDraft = useCallback((text: string) => {
+    setDrafts(d => (d[roomCode] === text ? d : { ...d, [roomCode]: text }))
+  }, [roomCode])
+
   // Auto-join once we have BOTH a route code AND an authenticated user
   // and we're idle. This covers the QR / deep-link path: scan → land on
   // /join/CODE → (sign in if needed) → connect automatically. We guard
@@ -100,8 +112,10 @@ export function CompanionApp() {
   }, [join, navigate, routeCode])
 
   const handleLeave = useCallback(() => {
+    const left = companion.state.code
     companion.leave()
     autoJoinedRef.current = null
+    if (left) setDrafts(d => { const { [left]: _gone, ...rest } = d; return rest })
     navigate('/join', { replace: true })
   }, [companion, navigate])
 
@@ -119,32 +133,10 @@ export function CompanionApp() {
   )
 
   return (
-    // Fixed-viewport app shell: h-[100dvh] + overflow-hidden so the
-    // CHAT region is the only scroll area (the page itself never
-    // scrolls under the composer / safe-area). 100dvh tracks mobile
-    // browser chrome better than 100vh.
-    <div className="aurora-companion-shell flex h-[100dvh] flex-col overflow-hidden bg-[#050505] text-white">
-      {/* Radial Aurora glow background, matching the mockup's screen bg.
-          STACKING CONTEXT: the document root. This is `fixed`, so its containing
-          block is the viewport and its parent chain is irrelevant — and no ancestor
-          here creates a context anyway (`.aurora-companion-shell` is a plain flex
-          block with no transform/filter/opacity/isolation, and the companion tree
-          has no `.animate-fade-in` root). At the root, `z-index: -1` paints after
-          the root element's own background and before in-flow content, which is
-          exactly where a full-bleed glow belongs. Motion-independent: nothing in
-          this chain is a stacking context by virtue of an animation, so
-          prefers-reduced-motion cannot relocate it. */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-0 -z-10"
-        style={{
-          background:
-            'radial-gradient(ellipse 90% 50% at 15% 8%, rgba(168,85,247,0.14) 0%, transparent 60%),' +
-            'radial-gradient(ellipse 70% 40% at 90% 100%, rgba(107,33,168,0.14) 0%, transparent 55%),' +
-            '#050505',
-        }}
-      />
-
+    // A fixed-height shell (100dvh, which follows a phone browser's own bars
+    // better than 100vh) that does not scroll: in the room the chat is the
+    // one thing that does, and the composer stays above the keyboard.
+    <div className="aurora-companion-shell flex h-[100dvh] flex-col overflow-hidden bg-surface-page text-ink">
       {!authChecked && !user ? (
         <BootSplash />
       ) : inRoom ? (
@@ -158,6 +150,8 @@ export function CompanionApp() {
           toggleMute={companion.toggleMute}
           leaveVoice={companion.leaveVoice}
           onLeave={handleLeave}
+          draft={drafts[roomCode] ?? ''}
+          onDraftChange={setRoomDraft}
         />
       ) : (
         <JoinScreen
@@ -182,27 +176,39 @@ export function CompanionApp() {
   )
 }
 
-// ── Boot splash while we verify the session on first load.
+// While the session is checked on first load.
 function BootSplash() {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-4">
-      <CompanionBrand size="lg" />
-      <p className="text-sm text-white/50">Loading…</p>
+    <div className="flex flex-1 flex-col px-4 pt-4">
+      <CompanionHeader />
+      <p role="status" className="m-auto text-[15px] text-ink-2">Loading…</p>
     </div>
   )
 }
 
-// ── Sign-in surface (Option A). One-tap OAuth for every enabled
-// provider + a collapsible username/password form. No guest path.
+/** Why a sign-in did not work, in the app's words. The server's own are
+ *  written for logs ("invalid credentials", "rate limit exceeded, try again
+ *  later"), and a request that never arrived is the browser's "Failed to
+ *  fetch". It never says which of the username and the password was wrong:
+ *  the server does not, on purpose. */
+function signInRefusal(err: unknown): string {
+  if (err instanceof APIError) {
+    if (err.status === 401) return 'That username and password do not match an account.'
+    if (err.status === 429) return `Too many tries. Try again ${waitPhrase(err.retryAfterSec, 'in a minute')}.`
+    if (err.status >= 500) return 'The server could not sign you in just now. Try again.'
+    return 'Sign-in did not work. Try again.'
+  }
+  if (err instanceof TypeError) return 'The server could not be reached. Check the connection and try again.'
+  return 'Sign-in did not work. Try again.'
+}
+
+// The sign-in: one button for each provider the server has on, and a
+// username and password form behind one press. There is no guest path.
 //
-// OAuth: navigates to the existing /api/auth/oauth/{provider}/start with
-// ?join=CODE so the code survives the round-trip (the server's success
-// page redirects back signed-in). Note: that server redirect currently
-// lands at `/` (the desktop app) rather than /v2/join/CODE — see the
-// integrationNotes about pointing the companion OAuth return at this
-// route for a seamless mobile return. Username/password sign-in, by
-// contrast, completes fully IN-PLACE here (no redirect) and is the
-// zero-friction path on the phone.
+// A provider's button goes to /api/auth/oauth/{provider}/start with
+// ?join=CODE, so the code survives the round trip. The server's return
+// from that currently lands on the app at `/`, not back on /v2/join/CODE.
+// A username and password sign-in completes here, with no redirect.
 function SignInSlot({
   setupStatus, joinCode, onLogin,
 }: {
@@ -210,11 +216,13 @@ function SignInSlot({
   joinCode?: string
   onLogin: (u: User) => void
 }) {
-  const reduced = useReducedMotion()
   const [pwOpen, setPwOpen] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  // Set as a sign-in is sent, not at the next render: two presses in one
+  // moment must not both pass.
+  const sending = useRef(false)
   const [error, setError] = useState<string | null>(null)
 
   const enabledProviders = useMemo<CompanionOAuthProvider[]>(() => {
@@ -229,36 +237,38 @@ function SignInSlot({
   }, [setupStatus])
 
   const submitPassword = useCallback(async () => {
+    // The fields and the button stay focusable while a sign-in is out, so a
+    // second press is refused here.
+    if (sending.current) return
     if (!username || !password) {
       setError('Enter your username and password.')
       return
     }
+    sending.current = true
     setSubmitting(true)
     setError(null)
     try {
       const u = await apiLogin(username, password)
       onLogin(u)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Sign-in failed.')
+      setError(signInRefusal(err))
     } finally {
+      sending.current = false
       setSubmitting(false)
     }
   }, [username, password, onLogin])
 
   return (
-    <div className="space-y-2.5">
-      {/* OAuth one-tap buttons */}
+    <div className="grid gap-2.5">
+      {/* One button for each provider the server has on, in the provider's
+          own colours: they are its mark, not the app's. */}
       {enabledProviders.map(p => {
         const meta = COMPANION_OAUTH_PROVIDERS[p]
         return (
           <a
             key={p}
             href={companionOAuthStartUrl(p, joinCode)}
-            className={[
-              'flex w-full items-center justify-center gap-3 rounded-2xl py-3 font-medium transition-ui',
-              reduced ? '' : 'motion-safe:hover:scale-[1.01]',
-              meta.className,
-            ].join(' ')}
+            className={`flex h-12 w-full items-center justify-center gap-3 rounded-control text-[15px] font-semibold transition-colors ${meta.className}`}
           >
             {meta.icon}
             Continue with {meta.label}
@@ -266,17 +276,19 @@ function SignInSlot({
         )
       })}
 
-      {/* Password sign-in (collapsible) */}
+      {/* Username and password, behind one press. */}
       {!pwOpen ? (
-        <button
-          type="button"
-          onClick={() => setPwOpen(true)}
-          className="w-full rounded-2xl border border-[var(--glow-border)] bg-white/[0.05] py-3 text-sm font-medium text-white/80 transition-colors hover:bg-white/[0.08]"
-        >
+        <button type="button" onClick={() => setPwOpen(true)} className="stage-btn stage-btn-ghost w-full">
           Sign in with username
         </button>
       ) : (
-        <div className="space-y-2.5 rounded-2xl border border-[var(--glow-border)] bg-white/[0.03] p-3">
+        <form
+          className="grid gap-2.5 rounded-control bg-surface-raised p-3"
+          onSubmit={e => { e.preventDefault(); void submitPassword() }}
+          noValidate
+        >
+          {/* Read-only, not disabled, while the sign-in is out: a disabled
+              field drops the focus it holds. */}
           <input
             type="text"
             value={username}
@@ -285,35 +297,35 @@ function SignInSlot({
             autoCapitalize="off"
             autoCorrect="off"
             autoComplete="username"
+            name="username"
             aria-label="Username"
-            disabled={submitting}
-            className="w-full rounded-xl border border-[var(--glow-border)] bg-white/[0.04] px-3.5 py-2.5 text-sm text-white placeholder:text-white/50 focus:border-purple-500/40 focus:outline-none"
+            // The button that opened the form is gone; the focus it held
+            // goes to the first thing to fill in.
+            autoFocus
+            readOnly={submitting}
+            className="companion-field w-full"
           />
           <input
             type="password"
             value={password}
             onChange={e => { setError(null); setPassword(e.target.value) }}
-            onKeyDown={e => { if (e.key === 'Enter') void submitPassword() }}
             placeholder="Password"
             autoComplete="current-password"
+            name="password"
             aria-label="Password"
-            disabled={submitting}
-            className="w-full rounded-xl border border-[var(--glow-border)] bg-white/[0.04] px-3.5 py-2.5 text-sm text-white placeholder:text-white/50 focus:border-purple-500/40 focus:outline-none"
+            readOnly={submitting}
+            className="companion-field w-full"
           />
-          <button
-            type="button"
-            onClick={() => void submitPassword()}
-            disabled={submitting}
-            className="w-full rounded-xl bg-gradient-to-br from-purple-500 to-purple-800 py-2.5 text-sm font-semibold text-white shadow-[0_8px_26px_rgba(168,85,247,0.4)] disabled:opacity-50"
-          >
+          {/* Above the button, so that a refusal is in sight wherever the
+              button that was pressed is. */}
+          <p role="alert" className={error ? 'text-[14px] leading-snug text-danger-ink' : 'sr-only'}>{error ?? ''}</p>
+          <button type="submit" aria-disabled={submitting} className="stage-btn stage-btn-primary w-full">
             {submitting ? 'Signing in…' : 'Sign in'}
           </button>
-        </div>
+        </form>
       )}
 
-      {error && <p className="text-center text-sm text-red-300">{error}</p>}
-
-      <p className="px-2 pt-1 text-center text-[11px] leading-snug text-white/50">
+      <p className="text-[13px] leading-snug text-ink-2">
         An Aurora account is required to join. No account? One tap with any provider above creates one.
       </p>
     </div>

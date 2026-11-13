@@ -1,0 +1,10 @@
+{
+  "sha": "8069388c1c947e416751444341110f66bdd63c65",
+  "verdict": "lows-only",
+  "summary": "The party mini dock and the minimised cast card on the app's tokens; the card bottom right, above the dock, left of the open party rail; toasts and the update notice 12px above the card at every width. Three passes by independent reviewers on the complete diff: fix-first (the party rail covered the card's buttons from 640px), fix-first (the card covered the bottom row of the dock's emoji picker; the builder showed the first fix proposed would have put the dock over dialog scrims, and the card is lowered instead), then lows-only on this patch (reviewed as 78bacd4, the same patch on the previous head; the reviewer built it and ran both layout audits and six mutations): stacked toasts can leave the top of a short landscape window with the dock up, the card's height is a fixed figure that scaled fonts can exceed, and the chat ticker can be drawn over the lowered card. All three are recorded as known items.",
+  "reviewer": "fresh-context-agent-a61707e9",
+  "findings": "3",
+  "diff_digest": "9cd735021840d97003b52120378c353b634a8396581ac8740e22ad19fa14bf2b",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T06:44:22Z"
+}

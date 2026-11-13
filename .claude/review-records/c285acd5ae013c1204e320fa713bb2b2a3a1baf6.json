@@ -1,0 +1,10 @@
+{
+  "sha": "c285acd5ae013c1204e320fa713bb2b2a3a1baf6",
+  "verdict": "lows-only",
+  "summary": "Title page (B2), five passes by one fresh-context reviewer. Pass 1 at 5a50fbd fix-first: the hero title could fall to about 2.4:1 over bright artwork when the action row wrapped; the trailer needed two presses and trapped no focus; the previous title's ambient colour leaked onto the next; the Continue card and the hero's Resume could disagree; episode rows had no number in their accessible name; touch targets under 44px. Pass 2 at 186620f fix-first: the contrast fix darkened the whole hero. Pass 3 at c6de8b6 fix-first: the reshaped backing's falloff ran past the window's edge (37 to 46 percent of the picture kept beside the text) under floors set just below it, with the full-width band still in place from 1024 to 1199. Pass 4 at d2f17c2 lows-only: a fixed 200px falloff from 1024 up, 59 and 67 percent kept at 1280 and 1440, floors at least twelve points above a full-width band; the contrast guarantee re-derived as a bound that holds while the text block's height is under about 0.87 of its width (today's tallest content leaves 85 to 125px of margin); lows: the probe checks one content height, and a short title does not in practice darken less. Applied as one squashed commit without the builder's unreviewed player commit; every title-page file byte-identical to the reviewed head except Skeletons.tsx, which keeps the cards follow-up's rail subtitle; two card-menu tests returned to this page's markup.",
+  "reviewer": "fresh-context-agent-a5d2bade",
+  "findings": "2",
+  "diff_digest": "b7e05c61a29678964c72778a6ab80e7a51dc51b39d4fafa0f2b9a7766a7f958e",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T02:40:32Z"
+}

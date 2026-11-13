@@ -1,16 +1,16 @@
 // Keyboard contract for a `role="radiogroup"` built from buttons.
 //
-// Settings has four of these (Glow, Typeface, Avatar, Content Tone) and none of
-// them implemented the pattern: every `role="radio"` was a natural tab stop and
+// Settings' radiogroups (Avatar, Content Tone and, at the time, two more) did
+// not implement the pattern: every `role="radio"` was a natural tab stop and
 // the arrow keys did nothing. That is worse than a plain button group, because
 // NVDA and JAWS switch into focus/forms mode the moment focus enters a `radio`
 // and hand the arrow keys to the application — which ignored them. So the only
 // key that worked was Tab, which is not how a radio group behaves anywhere else,
 // and 21 sequential stops replaced the 4 the pattern specifies.
 //
-// Aurora Stage Phase 7a. One helper rather than four copies, for the same reason
-// FONT_OPTIONS and MATURITY_OPTIONS are one list each: four hand-written
-// keyboard handlers is four chances to get the wrap arithmetic wrong.
+// One helper rather than a copy per group, for the same reason
+// MATURITY_OPTIONS is one list: every hand-written keyboard handler is a
+// chance to get the wrap arithmetic wrong.
 //
 // APG radiogroup, the parts that matter here:
 //   - Right/Down move to the next radio and CHECK it (radio groups activate on
@@ -28,16 +28,16 @@
  * Given the current index and a key, returns the index to move to — or null if
  * the key is not one this pattern handles (so the caller leaves it alone).
  */
-// UPDATE (Phase 9) — this IS now used by a tablist, `detail/DetailTabs`, so the
-// "deliberately NOT generalised to tabs" note above is out of date and was left
-// unedited when that happened. The generalisation is only safe under two
-// conditions, both of which DetailTabs had to be corrected to meet:
+// This was also used by a tablist for a while (the title page's tab strip,
+// since removed), so the "deliberately NOT generalised to tabs" note above is
+// a preference, not a limit. The generalisation is only safe under two
+// conditions, both of which that tablist had to be corrected to meet:
 //   1. The CALLER filters the keys. This helper maps ArrowUp/ArrowDown as well as
 //      Left/Right, because a radiogroup is orientation-agnostic. A horizontal
 //      tablist must not consume the vertical arrows — APG: "If the tab list is
 //      horizontal, it does not listen for Down Arrow or Up Arrow so those keys can
-//      provide their normal browser scrolling functions." DetailTabs passed the raw
-//      key through and preventDefault'ed the result, which broke page scrolling.
+//      provide their normal browser scrolling functions." Passing the raw key
+//      through and preventDefault'ing the result broke page scrolling.
 //   2. The caller owns the aria-selected / activation choice, which differs between
 //      the two patterns. This helper only does the index arithmetic.
 // AdminView still implements its own inline, and that remains fine.

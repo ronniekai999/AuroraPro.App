@@ -169,7 +169,7 @@ describe('remux clock: media time 0 is the measured key frame, not start_sec', (
     // start_sec clock called it 27 s and never offered the skip.
     video().currentTime = 2; fireEvent.timeUpdate(video())
     expect(screen.getByRole('slider', { name: 'Seek' })).toHaveAttribute('aria-valuenow', String(Math.floor(ORIGIN + 2)))
-    fireEvent.click(screen.getByRole('button', { name: 'Skip Intro' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip intro' })); await settle()
     // 24 s is inside what this session produced (19.9-39.9 s): a plain seek,
     // not a rebuild for a position "before the anchor".
     expect(rebuild).not.toHaveBeenCalled()
@@ -205,8 +205,8 @@ describe('remux clock: media time 0 is the measured key frame, not start_sec', (
 
   it('shifts subtitle cues to the measured start, beside the whole-second start_sec', async () => {
     render(<VideoPlayer target={movie} onClose={() => {}} />); await bootHls()
-    fireEvent.click(screen.getByRole('button', { name: 'Subtitles' }))
-    fireEvent.click(screen.getByRole('button', { name: /English subs/ })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /English subs/ })); await settle()
     // The endpoint Atoi()s `start`, so it stays start_sec; the measured start
     // rides beside it and replaces the server's key-frame prediction.
     expect(trackQuery(document.querySelector('track')!.getAttribute('src')))
@@ -293,7 +293,7 @@ describe('remux clock H1: an alignment that had no runway', () => {
   it('never jumps away from a scrub', async () => {
     render(<VideoPlayer target={movie} onClose={() => {}} onSeekRebuild={vi.fn()} />); await bootHls(ORIGIN.toFixed(6), 1)
     playing(); video().currentTime = 2; fireEvent.timeUpdate(video())
-    fireEvent.click(screen.getByRole('button', { name: 'Skip Intro' })); await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Skip intro' })); await settle()
     expect(video().currentTime).toBeCloseTo(24 - ORIGIN, 6)
     await levelUpdate(ORIGIN.toFixed(6), 3)
     expect(video().currentTime).toBeCloseTo(24 - ORIGIN, 6)
@@ -579,8 +579,8 @@ function watchTracks() {
     .map(el => el.getAttribute('src'))
 }
 async function pickSubtitle(name: RegExp | string = /English subs/) {
-  fireEvent.click(screen.getByRole('button', { name: 'Subtitles' }))
-  fireEvent.click(screen.getByRole('button', { name })); await settle()
+  fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' }))
+  fireEvent.click(screen.getByRole('menuitemradio', { name })); await settle()
 }
 // The stream info of a title the browser plays directly.
 function directPlayInfo() {
@@ -877,9 +877,9 @@ describe('remux clock: an error from a track no longer active', () => {
     return () => spy.mock.results.map(r => r.value as unknown).filter((el): el is HTMLTrackElement => el instanceof HTMLTrackElement)
   }
   const englishSelected = () => {
-    fireEvent.click(screen.getByRole('button', { name: 'Subtitles' }))
-    const selected = screen.getByRole('button', { name: /English subs/ }).className.includes('text-purple-300')
-    fireEvent.click(screen.getByRole('button', { name: 'Subtitles' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' }))
+    const selected = screen.getByRole('menuitemradio', { name: /English subs/ }).getAttribute('aria-checked') === 'true'
+    fireEvent.click(screen.getByRole('button', { name: 'Audio and subtitles' }))
     return selected
   }
 

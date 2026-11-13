@@ -35,75 +35,55 @@ export function SkeletonBlock({ className }: { className?: string }) {
   )
 }
 
-/** The poster-grid skeleton — the same column ladder every content grid
- *  uses (`grid-cols-2 sm:3 md:4 lg:5 xl:6 gap-5`), so the real grid lands
- *  on top of it without a column or gutter shift. */
-export function GridSkeleton({ count = 12, className }: { count?: number; className?: string }) {
+/** A card's caption while it loads: two bars in exactly the space the real
+ *  caption takes (10px gap, a 14px/1.4 title line, 2px, a 16px facts line),
+ *  so the row does not change height when the cards arrive. */
+function CaptionSkeleton() {
   return (
-    <div
-      aria-hidden="true"
-      className={cn('grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5', className)}
-    >
+    <div className="mt-2.5 h-[38px]">
+      <SkeletonBlock className="mt-[3px] h-3.5 w-3/4 rounded-chip" />
+      <SkeletonBlock className="mt-1.5 h-3 w-1/2 rounded-chip" />
+    </div>
+  )
+}
+
+/** The poster-grid skeleton: the same grid every content grid uses
+ *  (.poster-grid), each tile a poster with its caption, so the real grid
+ *  lands on top of it without a column, gutter or row-height shift. */
+export function GridSkeleton({ count = 12, className, compact = false }: { count?: number; className?: string; compact?: boolean }) {
+  return (
+    <div aria-hidden="true" className={cn('poster-grid', compact && 'is-compact', className)}>
       {Array.from({ length: count }).map((_, i) => (
-        <SkeletonBlock key={i} className="aspect-[2/3]" />
+        <div key={i}>
+          <SkeletonBlock className="aspect-[2/3] rounded-art" />
+          <CaptionSkeleton />
+        </div>
       ))}
     </div>
   )
 }
 
-/** The hero's shape (Stage refresh, L2): the real hero's frame — its height
- *  utilities, full bleed, the same gradient floor the placeholder had — with
- *  its content bottom-anchored at the page gutter over the real footer's
- *  `pb-9`, and (full size only) the match ring's disc top-right at the ring's
- *  own insets. So the pick arriving fills the shapes in instead of replacing
- *  a centred mark.
+/** Tonight's hero, as shapes: the real hero's frame (its height and its
+ *  content row's padding, word for word) with the title block's lines and
+ *  buttons bottom left, so the pick arriving fills the shapes in instead of
+ *  replacing them. `kids` draws the children's larger title and two buttons.
  *
- *  `title` replaces the title bars with real text (the browse pages know
- *  theirs before the list arrives) and `aside` takes the slot "Not tonight"
- *  will occupy. Both are the CALLER's: HeroSection renders this for every
- *  missing pick, which is also the permanent state of an empty library or a
- *  failed hero fetch, so what the frame says is not this component's to
- *  decide. The footer uses its own class string, not the real hero's:
- *  verify-page-alignment needs that one unique in HeroSection.tsx. */
-export function HeroSkeleton({ compact = false, title, aside }: { compact?: boolean; title?: ReactNode; aside?: ReactNode }) {
+ *  `aside` takes the picks' place at the right and is the CALLER's:
+ *  HeroSection renders this while a pick is on its way, and what the frame
+ *  says meanwhile is not this component's to decide. */
+export function HeroSkeleton({ kids = false, aside }: { kids?: boolean; aside?: ReactNode }) {
   return (
-    <section className={cn(
-      'relative w-full overflow-hidden bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505]',
-      compact ? 'h-[250px]' : 'h-[62vh] min-h-[480px] max-h-[680px]',
-    )}>
-      {!compact && (
-        <SkeletonBlock className="absolute top-6 right-[var(--page-pad-x)] md:top-11 md:right-[calc(var(--page-pad-x)+4px)] h-[84px] w-[84px] rounded-full" />
-      )}
-      <div className="stage-gutter absolute inset-x-0 bottom-0 z-20 flex flex-col gap-4 pb-9 sm:flex-row sm:items-end sm:justify-between">
-        <div className="min-w-0 flex-1 max-w-2xl">
-          {compact ? (
-            <>
-              <SkeletonBlock className="h-3.5 w-24 rounded-md mb-3" />
-              {title ?? <SkeletonBlock className="h-10 w-[min(320px,70%)] rounded-lg mb-2.5" />}
-              <SkeletonBlock className="h-4 w-[min(300px,80%)] rounded-md mb-4" />
-              <div className="flex flex-wrap gap-3">
-                <SkeletonBlock className="h-11 w-[104px] rounded-full" />
-                <SkeletonBlock className="h-11 w-[124px] rounded-full" />
-              </div>
-            </>
-          ) : (
-            <>
-              <SkeletonBlock className="h-7 w-[min(214px,60%)] rounded-full mb-3" />
-              <SkeletonBlock className="h-4 w-[min(470px,85%)] rounded-md mb-3" />
-              {title ?? (
-                <div className="space-y-2.5 mb-4">
-                  <SkeletonBlock className="h-11 md:h-16 w-[min(560px,92%)] rounded-xl" />
-                  <SkeletonBlock className="h-11 md:h-16 w-[min(380px,64%)] rounded-xl" />
-                </div>
-              )}
-              <SkeletonBlock className="h-4 w-[min(520px,88%)] rounded-md mb-5" />
-              <div className="flex flex-wrap gap-3">
-                <SkeletonBlock className="h-12 w-[118px] rounded-full" />
-                <SkeletonBlock className="h-12 w-[132px] rounded-full" />
-                <SkeletonBlock className="h-12 w-[150px] rounded-full" />
-              </div>
-            </>
-          )}
+    <section className="relative flex min-h-[420px] w-full flex-col justify-end overflow-hidden bg-surface-page lg:h-[440px]">
+      <div className="stage-gutter relative flex w-full flex-col gap-6 pb-6 pt-[176px] lg:flex-row lg:items-end lg:justify-between lg:gap-12 lg:pb-9 lg:pt-0">
+        <div className="flex min-w-0 max-w-[620px] flex-1 flex-col gap-3.5">
+          {!kids && <SkeletonBlock className="h-3.5 w-48 rounded-chip" />}
+          <SkeletonBlock className={kids ? 'h-12 w-[min(520px,90%)] rounded-control lg:h-[76px]' : 'h-11 w-[min(460px,90%)] rounded-control lg:h-[68px]'} />
+          <SkeletonBlock className="h-5 w-[min(380px,80%)] rounded-chip" />
+          {!kids && <SkeletonBlock className="h-3.5 w-[min(300px,70%)] rounded-chip" />}
+          <div className="flex flex-wrap gap-3">
+            <SkeletonBlock className={kids ? 'h-16 w-[230px] rounded-full' : 'h-12 w-[124px] rounded-full'} />
+            <SkeletonBlock className={kids ? 'h-16 w-[180px] rounded-full' : 'h-12 w-[112px] rounded-full'} />
+          </div>
         </div>
         {aside}
       </div>
@@ -111,69 +91,88 @@ export function HeroSkeleton({ compact = false, title, aside }: { compact?: bool
   )
 }
 
-/** A home rail's shape: the rail's wrapper (.rail-container, which has no
- *  shelf since the Stage refresh), a header line where the icon + title sit,
- *  and a row of card-sized tiles at the rail's real card widths (206px poster
- *  / 336px landscape) and 18px gap. The row mirrors .rail-scroll's 4px inline
- *  padding and the -4px margin that puts its first card on the gutter. It is
- *  clipped rather than scrolled — nothing to scroll to. */
-export function RailSkeleton({ aspect = 'poster', count = 8 }: { aspect?: 'poster' | 'landscape'; count?: number }) {
-  const tile = aspect === 'landscape' ? 'w-[336px] aspect-video' : 'w-[206px] aspect-[2/3]'
+/** A rail's shape: its wrapper, a title line, and a row of card-sized tiles
+ *  at the rail's real card widths (176px poster, 256px landscape) and 20px
+ *  gap, each with its caption. The row mirrors .rail-scroll's padding and the
+ *  -4px margin that puts its first card on the gutter. It is clipped rather
+ *  than scrolled: there is nothing to scroll to. */
+export function RailSkeleton({ aspect = 'poster', count = 8, subtitle = false }: {
+  aspect?: 'poster' | 'landscape'
+  count?: number
+  /** The rail this stands for has a line under its title (a recommender
+   *  rail's "Picked by Aurora"): without it the rail lands one line taller
+   *  than its skeleton and everything below it jumps. */
+  subtitle?: boolean
+}) {
+  const tile = aspect === 'landscape' ? 'w-[256px]' : 'w-[176px]'
+  const art = aspect === 'landscape' ? 'aspect-video' : 'aspect-[2/3]'
   return (
     <section className="rail-container" aria-hidden="true">
-      <div className="flex items-center gap-3.5 mb-3.5">
-        <SkeletonBlock className="h-7 w-7 rounded-lg" />
-        <SkeletonBlock className="h-5 w-44 rounded-md" />
+      {/* The title line: 22px at 1.2 leading, then the header's 8px margin. */}
+      {/* With a subtitle: the header's 6px gap, then its 13px line at 18px
+          leading, before the same 8px margin. */}
+      <div className={subtitle ? 'mb-2 flex flex-col gap-1.5' : 'mb-2'}>
+        <div className="flex h-[26px] items-center">
+          <SkeletonBlock className="h-5 w-44 rounded-chip" />
+        </div>
+        {subtitle && (
+          <div className="flex h-[18px] items-center">
+            <SkeletonBlock className="h-3 w-64 max-w-full rounded-chip" />
+          </div>
+        )}
       </div>
-      <div className="flex gap-[18px] overflow-hidden -mx-1 px-1 py-2">
+      <div className="-mx-1 flex gap-5 overflow-hidden px-1 pb-3 pt-2">
         {Array.from({ length: count }).map((_, i) => (
-          <SkeletonBlock key={i} className={cn('shrink-0 rounded-[var(--r-lg)]', tile)} />
+          <div key={i} className={cn('shrink-0', tile)}>
+            <SkeletonBlock className={cn('rounded-art', art)} />
+            <CaptionSkeleton />
+          </div>
         ))}
       </div>
     </section>
   )
 }
 
-/** The detail page's shape while its chunk or data loads: the 58vh hero
- *  band, then the body grid — poster column with the action stack, and the
- *  tab strip plus storyline lines on the right. Class strings mirror
- *  DetailView / DetailRail so the real page replaces this without moving:
- *  `stage-gutter pt-9 pb-12` and the 216px grid template are the same
- *  literals the page uses. (verify-page-alignment counts those literals
- *  per FILE, so reusing them here is fine; duplicating them inside
- *  DetailView.tsx itself would not be.) */
+/** The title page's shape while its chunk or data loads: the hero with the
+ *  title, the facts line and the action row at its foot, then the synopsis
+ *  and a few rows, in one column. The hero and column classes are the ones
+ *  DetailHero and DetailView use (`stage-detail-hero`, `stage-detail-herorow`,
+ *  `stage-gutter pt-8 pb-16`, the 1304px measure), so the real page replaces
+ *  this without moving. (verify-page-alignment counts those literals per
+ *  FILE, so reusing them here is fine.) */
 export function DetailSkeleton() {
   return (
     <div aria-hidden="true">
-      <div className="relative h-[58vh] min-h-[440px] max-h-[560px] overflow-hidden bg-gradient-to-br from-purple-950/30 via-[#0a0a0f] to-[#050505]">
-        <div className="absolute bottom-7 left-[var(--page-pad-x)] right-[var(--page-pad-x)] max-md:left-[18px] max-md:right-[18px] space-y-4">
-          <SkeletonBlock className="h-4 w-24 rounded-md" />
-          <SkeletonBlock className="h-12 w-[min(560px,80%)] rounded-lg" />
-          <SkeletonBlock className="h-4 w-[min(360px,60%)] rounded-md" />
-        </div>
-      </div>
-      <div className="stage-gutter pt-9 pb-12">
-        <div className="grid grid-cols-1 lg:grid-cols-[216px_minmax(0,1fr)] gap-10">
-          <div className="space-y-5 max-lg:hidden">
-            <SkeletonBlock className="aspect-[2/3] rounded-2xl" />
-            <div className="space-y-2.5">
-              <SkeletonBlock className="h-12 rounded-full" />
-              <SkeletonBlock className="h-11 rounded-full" />
-              <SkeletonBlock className="h-10 rounded-xl" />
+      <div className="stage-detail-hero relative flex flex-col bg-surface-raised">
+        {/* The hero's Back row, at its height, so the page below does not
+            drop when the real hero replaces this. */}
+        <div className="stage-gutter pt-3 lg:pt-4"><div className="h-11" /></div>
+        <div className="relative mt-auto stage-gutter pb-2">
+          <div className="stage-detail-herorow flex items-end gap-8 max-w-[1304px]">
+            <SkeletonBlock className="hidden lg:block w-[176px] h-[264px] rounded-art flex-none" />
+            <div className="flex-1 min-w-0 flex flex-col gap-3.5">
+              <SkeletonBlock className="h-12 lg:h-16 w-[min(560px,80%)] rounded-lg" />
+              <SkeletonBlock className="h-4 w-[min(360px,60%)] rounded-md" />
+              <div className="flex flex-wrap gap-2">
+                <SkeletonBlock className="h-11 w-full sm:w-40 rounded-full" />
+                <SkeletonBlock className="h-11 w-28 rounded-control" />
+                <SkeletonBlock className="h-11 w-28 rounded-control" />
+              </div>
             </div>
           </div>
-          <div className="space-y-6">
-            <div className="flex gap-2">
-              <SkeletonBlock className="h-9 w-24 rounded-full" />
-              <SkeletonBlock className="h-9 w-24 rounded-full" />
-              <SkeletonBlock className="h-9 w-28 rounded-full" />
-            </div>
-            <div className="space-y-3 max-w-3xl">
-              <SkeletonBlock className="h-5 w-32 rounded-md" />
-              <SkeletonBlock className="h-4 w-full rounded-md" />
-              <SkeletonBlock className="h-4 w-[92%] rounded-md" />
-              <SkeletonBlock className="h-4 w-[78%] rounded-md" />
-            </div>
+        </div>
+      </div>
+      <div className="stage-gutter pt-8 pb-16">
+        <div className="flex flex-col gap-12 max-w-[1304px]">
+          <div className="space-y-3 max-w-[820px]">
+            <SkeletonBlock className="h-4 w-full rounded-md" />
+            <SkeletonBlock className="h-4 w-[92%] rounded-md" />
+            <SkeletonBlock className="h-4 w-[78%] rounded-md" />
+          </div>
+          <div className="space-y-3">
+            <SkeletonBlock className="h-6 w-32 rounded-md" />
+            <SkeletonBlock className="h-[72px] rounded-control" />
+            <SkeletonBlock className="h-[72px] rounded-control" />
           </div>
         </div>
       </div>

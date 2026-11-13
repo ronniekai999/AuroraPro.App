@@ -425,6 +425,10 @@ export interface CodeInfo {
     party_name?: string
     host_username?: string
     participant_count?: number
+    // When it started, and when it is planned to. A party held for a
+    // planned start is "active" here before anyone is watching.
+    started_at?: string | null
+    scheduled_start_at?: string | null
   }
   room?: {
     code?: string

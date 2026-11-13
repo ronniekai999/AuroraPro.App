@@ -132,6 +132,8 @@ export interface UIMedia {
   progress?: number
   cast?: string[]
   tags?: string[]
+  // The server's sort key for the title, when it sent one.
+  sortTitle?: string
   // LLM-generated per-pick reason — populated for Discover-rail items
   // and Hero picks (recommender/discover.go:406 + hero rerank). Lets the
   // card surface "why this was picked for you" as a hover tooltip
@@ -327,11 +329,49 @@ export function backdropSrcSet(url: string | undefined): string | undefined {
 export class APIError extends Error {
   status: number
   body: unknown
-  constructor(status: number, message: string, body: unknown) {
+  /** The response's Retry-After, in seconds, when it sent a usable one. */
+  retryAfterSec?: number
+  constructor(status: number, message: string, body: unknown, retryAfterSec?: number) {
     super(message)
     this.status = status
     this.body = body
+    this.retryAfterSec = retryAfterSec
   }
+}
+
+/** A request that got no answer at all: `fetch` itself rejected (the
+ *  network, DNS, a refused connection, CORS). Raised only by fetchOrLost,
+ *  never by a failure after an answer came, so lib/failureWords can say "the
+ *  server could not be reached" truthfully. A TypeError, as fetch's own
+ *  rejection is, and with its message, so code that read that shape before
+ *  (AuthView, DeviceApprovalView) reads it the same. An abort, or a
+ *  timeout's TimeoutError, is passed through as it was. */
+export class NetworkError extends TypeError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'NetworkError'
+  }
+}
+
+/** `fetch`, with a rejection that is not an abort turned into NetworkError. */
+async function fetchOrLost(input: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init)
+  } catch (err) {
+    // An abort, whatever it was given as its reason (`abort('superseded')`
+    // rejects with that value, which has no name).
+    if (init.signal?.aborted) throw err
+    const name = err && typeof err === 'object' ? (err as { name?: unknown }).name : undefined
+    if (name === 'AbortError' || name === 'TimeoutError') throw err
+    throw new NetworkError(err instanceof Error ? err.message : 'Failed to fetch', { cause: err })
+  }
+}
+
+/** A Retry-After header as whole seconds; undefined for none, a date, or junk. */
+function retryAfterSeconds(res: Response): number | undefined {
+  const raw = res.headers.get('Retry-After')
+  if (!raw || !/^\d+$/.test(raw.trim())) return undefined
+  return Number(raw.trim())
 }
 
 // Exported for components that need to proactively refresh the
@@ -451,7 +491,7 @@ export async function apiFetchResponse(path: string, opts: FetchResponseOpts = {
     }
     // deep-debug H10 — auth rides the httpOnly access cookie (same-origin
     // credentials below); no Authorization header is set from JS.
-    return fetch(path, {
+    return fetchOrLost(path, {
       method: opts.method || 'GET',
       headers,
       body: opts.body ?? undefined,
@@ -510,7 +550,7 @@ export async function apiFetch<T = unknown>(path: string, opts: FetchOpts = {}):
         if (typeof nested === 'string') message = nested
       }
     }
-    throw new APIError(res.status, message, body)
+    throw new APIError(res.status, message, body, retryAfterSeconds(res))
   }
   return (await parseBody()) as T
 }
@@ -544,6 +584,7 @@ export function mapMedia(item: ServerMediaItem): UIMedia {
       ...(item.has_hdr ? ['HDR'] : []),
       ...(item.content_rating ? [item.content_rating] : []),
     ],
+    ...(item.sort_title ? { sortTitle: item.sort_title } : {}),
     // Carry the LLM-generated reason through to the UI layer. For
     // non-personalized endpoints (listMedia, search, etc.) the field
     // is absent on the server response and the spread leaves it
@@ -566,6 +607,44 @@ export async function login(username: string, password: string): Promise<User> {
   // pass silently, putting us back to polling forever.
   resetSessionEndedLatch()
   return tokens.user
+}
+
+// Changes the account password. The server then ends EVERY session on the
+// account, this one included, so the caller signs the app out afterwards.
+//
+// Not through apiFetch: that answers any 401 by refreshing the session and
+// sending the request again, and here a 401 is also how the server says the
+// current password is wrong, so each wrong try would be made, counted against
+// the route's limit and logged twice. Only a 401 that is NOT that answer (an
+// expired access token) is refreshed and retried, once.
+export const WRONG_CURRENT_PASSWORD = 'current password is incorrect'
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  const send = () => fetchOrLost('/api/auth/change-password', {
+    method: 'POST',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    credentials: 'same-origin',
+  })
+  const read = async (res: Response): Promise<{ body: unknown; message: string }> => {
+    let body: unknown = null
+    try { body = await res.json() } catch { /* not JSON */ }
+    const errField = body && typeof body === 'object' ? (body as Record<string, unknown>).error : undefined
+    const message = typeof errField === 'string'
+      ? errField
+      : errField && typeof errField === 'object' && typeof (errField as Record<string, unknown>).message === 'string'
+        ? (errField as Record<string, unknown>).message as string
+        : `HTTP ${res.status}`
+    return { body, message }
+  }
+  let res = await send()
+  if (res.ok) return
+  let failure = await read(res)
+  if (res.status === 401 && failure.message !== WRONG_CURRENT_PASSWORD && await tryRefresh()) {
+    res = await send()
+    if (res.ok) return
+    failure = await read(res)
+  }
+  throw new APIError(res.status, failure.message, failure.body, retryAfterSeconds(res))
 }
 
 export async function logout(): Promise<void> {
@@ -662,17 +741,20 @@ export interface SearchResult {
 }
 export async function searchMedia(
   query: string,
-  limit = 30,
-  signal?: AbortSignal,
-  mode?: 'literal' | 'semantic',
+  limit: number,
+  signal: AbortSignal | undefined,
+  // Always named. Left out, the server chooses by itself whether the words
+  // are a title or a description, and a description costs it a model call:
+  // a search asked for at every keystroke must never leave it that choice.
+  // (The palette this app had did, on every key.)
+  mode: 'literal' | 'semantic',
 ): Promise<SearchResult> {
   if (!query.trim()) return { items: [], mode: 'literal' }
-  const params = new URLSearchParams({ q: query, limit: String(limit) })
-  if (mode) params.set('mode', mode)
+  const params = new URLSearchParams({ q: query, limit: String(limit), mode })
   const res = await apiFetchResponse(`/api/media/search?${params.toString()}`, {
     signal,
   })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) throw new APIError(res.status, `HTTP ${res.status}`, null, retryAfterSeconds(res))
   const items = (await res.json()) as ServerMediaItem[]
   const modeHeader = res.headers.get('X-Search-Mode') || 'literal'
   return {
@@ -699,6 +781,10 @@ export interface HeroPick {
   // future confidence-aware copy without changing the current ring.
   matchConfidence?: number
   matchModelVersion?: string
+  // The pick's place in the slate as the server sent it. An exposure is
+  // reported under this, not under the pick's place in the pool as it is
+  // now, which shifts when a title is taken out of it (a low rating).
+  position?: number
 }
 export interface HeroPersonalization {
   coldStart: boolean
@@ -734,9 +820,10 @@ export async function getHeroPool(
     qs ? `/api/me/hero?${qs}` : '/api/me/hero', { signal },
   )
   return {
-    picks: (resp.picks || []).map(p => ({
+    picks: (resp.picks || []).map((p, position) => ({
       media: mapMedia(p.item), reason: p.reason, score: p.score, match: p.match,
       matchConfidence: p.match_confidence, matchModelVersion: p.match_model_version,
+      position,
     })),
     // Defaults preserve the pre-personalization-field behavior for any
     // server older than this change (cold_start=false hides the hint).
@@ -770,7 +857,7 @@ export async function recordRecommendationExposure(input: {
     }),
   })
   if (res.status === 202) return false
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) throw new APIError(res.status, `HTTP ${res.status}`, null, retryAfterSeconds(res))
   return true
 }
 
@@ -985,8 +1072,9 @@ export async function searchForMatch(
 export async function manualMatch(
   mediaItemId: number,
   body: { tmdb_id?: number; tvdb_id?: number; type: 'movie' | 'show' },
+  signal?: AbortSignal,
 ): Promise<void> {
-  await apiFetch(`/api/media/${mediaItemId}/match`, { method: 'POST', body })
+  await apiFetch(`/api/media/${mediaItemId}/match`, { method: 'POST', body, signal })
 }
 
 // Phase 5.3 — scan status. Mirrors `models.ScanProgress` exactly.
@@ -2035,8 +2123,10 @@ export async function updateAdminOAuth(body: Partial<{
   twitter_client_secret: string
   twitter_redirect_url: string
   twitter_bypass_invite: boolean
-}>): Promise<OAuthSettings> {
-  return apiFetch<OAuthSettings>('/api/admin/oauth', { method: 'PUT', body })
+}>): Promise<{ ok: boolean }> {
+  // The server answers an acknowledgement, not the settings: read them again
+  // with getAdminOAuth.
+  return apiFetch<{ ok: boolean }>('/api/admin/oauth', { method: 'PUT', body })
 }
 
 // Phase 4.6 — profiles. Aurora supports per-account "profiles" (think
@@ -2103,8 +2193,10 @@ export async function listProfiles(signal?: AbortSignal): Promise<Profile[]> {
   const res = await apiFetch<Profile[]>('/api/profiles', { signal })
   return res || []
 }
-export async function createProfile(name: string): Promise<Profile> {
-  return apiFetch<Profile>('/api/profiles', { method: 'POST', body: { name } })
+// `extra.max_age_rating` creates the profile with a content limit already on
+// it, so there is no moment at which a child's new profile has none.
+export async function createProfile(name: string, extra: { max_age_rating?: string } = {}): Promise<Profile> {
+  return apiFetch<Profile>('/api/profiles', { method: 'POST', body: { name, ...extra } })
 }
 // updateProfile patches one profile — only the keys provided are written
 // (the server's UpdateProfileRequest uses optional pointers). The onboarding
@@ -2124,7 +2216,7 @@ export async function deleteProfile(id: number): Promise<void> {
 // Account-level identity shown to OTHER signed-in members — distinct from
 // the Netflix-style sub-profiles above (Profile), which stay private to the
 // account. Server: /api/me/profile (self) + /api/members/{username} (any
-// member). Social handles travel bare; SettingsView normalizes pasted
+// member). Social handles travel bare; the profile page normalizes pasted
 // URLs/@s via lib/socialLinks before submit and the server re-validates.
 
 export interface MemberProfile {
@@ -2233,8 +2325,11 @@ export async function getMemberProfile(username: string, signal?: AbortSignal): 
   return apiFetch<MemberProfileResponse>(`/api/members/${encodeURIComponent(username)}`, { signal })
 }
 
-export async function setDefaultProfile(id: number): Promise<void> {
-  await apiFetch(`/api/profiles/${id}/default`, { method: 'POST' })
+// Making a LOCKED profile the default needs its PIN or the account password
+// (`unlock`), unless the session already acts as it: every session with no
+// binding acts as the default.
+export async function setDefaultProfile(id: number, unlock?: ProfileUnlock): Promise<void> {
+  await apiFetch(`/api/profiles/${id}/default`, { method: 'POST', body: unlock })
 }
 
 // Binds `id` as this session's server-side acting profile (issue #462) —
@@ -2634,7 +2729,12 @@ export interface CompanionPartyPreview {
   partyName?: string
   mediaTitle?: string
   mediaPoster?: string
+  /** Everyone in the room, phones included. */
   participantCount?: number
+  /** Null while the party has not started: the server holds a planned
+   *  party before anyone is watching. */
+  startedAt?: string | null
+  scheduledStartAt?: string | null
 }
 
 export async function getCompanionPartyPreview(
@@ -2652,6 +2752,8 @@ export async function getCompanionPartyPreview(
     mediaTitle: p?.media_title,
     mediaPoster: p?.media_poster,
     participantCount: p?.participant_count,
+    startedAt: p?.started_at ?? null,
+    scheduledStartAt: p?.scheduled_start_at ?? null,
   }
 }
 
@@ -2978,6 +3080,8 @@ export interface RequestsConfig {
   enabled: boolean
   has_radarr: boolean
   has_sonarr: boolean
+  /** A 4K downloader is set up for movies or shows. */
+  has_4k?: boolean
 }
 
 export async function listRequests(signal?: AbortSignal): Promise<MediaRequest[]> {
@@ -3127,6 +3231,43 @@ export async function createRequest(payload: CreateRequestPayload): Promise<Medi
   return apiFetch<MediaRequest>('/api/requests', { method: 'POST', body: payload })
 }
 
+// Playback health (GET /api/admin/playback-qoe): counts and timings of
+// playback sessions over a recent period. The server keeps them for 30 days
+// and refuses a longer period.
+export interface PlaybackHealthDelivery {
+  /** direct_play | direct_stream | transcode */
+  decision: string
+  count: number
+  /** Null when no session of this kind measured it. */
+  p50_first_frame_ms: number | null
+  p95_first_frame_ms: number | null
+}
+export interface PlaybackHealthSummary {
+  window_hours: number
+  sessions: number
+  p50_first_frame_ms: number | null
+  p95_first_frame_ms: number | null
+  /** Sessions played as they are, as a share of all sessions (0 to 1). */
+  direct_play_ratio: number
+  /** Time spent buffering over time spent watching. */
+  rebuffer_ratio: number
+  /** Failed endings over sessions that reported any ending. */
+  error_rate: number
+  /** Sessions that never reported an ending, over `settled_sessions`. */
+  abandoned_ratio: number
+  /** Sessions old enough to have reported an ending. */
+  settled_sessions: number
+  by_decision: PlaybackHealthDelivery[]
+  /** Sessions with subtitles drawn into the picture. */
+  burn_in_sessions: number
+  /** Why sessions were not played as they are, most common first. */
+  top_reasons: { reason: string; count: number }[]
+}
+export const PLAYBACK_HEALTH_MAX_HOURS = 30 * 24
+export async function getPlaybackHealth(hours: number, signal?: AbortSignal): Promise<PlaybackHealthSummary> {
+  return apiFetch<PlaybackHealthSummary>(`/api/admin/playback-qoe?hours=${hours}`, { signal })
+}
+
 // Admin approval queue (carve-out C). Requests held by the per-user quota
 // gate land in 'pending_approval'; these helpers back the admin Pending
 // Approvals section. All three are admin-gated server-side via the
@@ -3146,9 +3287,11 @@ export async function denyRequest(id: number): Promise<void> {
 // directly from TMDB CDN (the items aren't in the library yet, so
 // the image proxy doesn't have them). This is the same pattern V1
 // uses (aurora_pro.html does `https://image.tmdb.org/t/p/w500${path}`).
-export function tmdbPosterURL(path?: string): string {
+/** A TMDB poster at one of TMDB's own widths: w500 for a card, w154 for a
+ *  thumb a few dozen pixels wide. */
+export function tmdbPosterURL(path?: string, size: 'w154' | 'w500' = 'w500'): string {
   if (!path) return ''
-  return `https://image.tmdb.org/t/p/w500${path.startsWith('/') ? path : '/' + path}`
+  return `https://image.tmdb.org/t/p/${size}${path.startsWith('/') ? path : '/' + path}`
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -3507,7 +3650,7 @@ export async function submitBugReport(
         } before submitting again.`
       }
     }
-    throw new APIError(res.status, message, body)
+    throw new APIError(res.status, message, body, retryAfterSeconds(res))
   }
   return (await parseBody()) as BugReportSubmitResult
 }

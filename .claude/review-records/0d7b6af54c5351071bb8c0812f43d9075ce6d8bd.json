@@ -1,0 +1,10 @@
+{
+  "sha": "0d7b6af54c5351071bb8c0812f43d9075ce6d8bd",
+  "verdict": "lows-only",
+  "summary": "Search, step 3 of 4: the My requests page as designed (status chips with counts, a row per request with its status and one sentence in the server's own terms, Find it, Try again and delete where each applies); the page's own composer is gone and its ask row opens the search page. Four commits, two passes by the search reviewer with the server's request handlers read. Pass 1 fix-first (Find it opened an empty search page; with the admin powers Try again on another member's failed request took it over and deleted theirs; the delete question dropped the keyboard's focus). Pass 2 lows-only: all resolved, with Try again only on the caller's own rows and never on a request an admin turned down. The tree is the builder's without its unfinished error screen. Open lows: a delete of a request already deleted elsewhere says try again; an explanation is lost when the patched row leaves a filtered list; Find it does not change the address.",
+  "reviewer": "fresh-context-agent-a27d5c3e",
+  "findings": "2",
+  "diff_digest": "1acc7e54dfd0ff7d604f5aba22a2147136d726a3cf35b908f9066e8402d3a2d7",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T22:58:22Z"
+}

@@ -1,10 +1,13 @@
-// Which surface the player is presenting (Aurora Stage Phase 7b, D5/D6).
+// Which surface the player is presenting.
 //
 // Extracted from VideoPlayer so the precedence can be tested without a DOM. It
-// looks like a formality and isn't: App drives `<main>`'s dim + `inert` +
-// scroll lock off this value, so getting it backwards means a minimized cast
-// widget reports 'theater' and leaves the whole app dimmed, unscrollable and
+// looks like a formality and isn't: App makes `<main>` inert and locks its
+// scroll off this value, so getting it backwards means a minimized cast
+// widget reports 'theater' and leaves the whole app unscrollable and
 // unclickable with no visible player to close.
+//
+// 'theater' is the name for "in the window": the picture edge to edge, or
+// boxed beside the party panel. Either way the page behind is covered.
 
 export type PlayerSurface = 'theater' | 'fullscreen' | 'minimized'
 

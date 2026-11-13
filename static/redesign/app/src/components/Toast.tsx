@@ -13,23 +13,27 @@ export interface Toast {
   id: string
   message: string
   type: 'success' | 'error' | 'info'
+  /** The one thing to do about it (Undo). Such a toast stays longer, and
+   *  goes when its action is pressed. The action runs once at most. */
+  action?: { label: string; run: () => void }
 }
+
+/** How long a toast stays: long enough to read, and to reach its action. */
+const STAY_MS = 3000
+const STAY_WITH_ACTION_MS = 7000
 
 export function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: string) => void }) {
   return (
     // 2026-05-27 (holistic deep-debug H1) — opt out of html2canvas
     // bug-report captures. Toasts are transient meta-UI, not the
     // page content the user is trying to demo, so they shouldn't
-    // leak into bug evidence. Matches the launcher + modal opt-out.
+    // leak into bug evidence. Matches the bug report dialog's opt-out.
     //
-    // 2026-05-27 polish pass — `bottom-[5.5rem]` (was `bottom-6`)
-    // so the toast column stacks ABOVE the bug-report launcher pill
-    // (which sits at `bottom-5` = 1.25rem in BugReportButton).
-    // Previously the launcher was at `bottom: 5rem` to clear the
-    // toast column; that flipped the natural "launcher in corner,
-    // toasts stack above" pattern users expect. Now the launcher
-    // owns the corner and toasts respect it.
-    <div className="fixed bottom-[5.5rem] right-6 z-[200] flex flex-col gap-3" data-screenshot-exclude="true">
+    // In the bottom left corner, at the page's own margin, above the phone's
+    // tab bar where there is one and above the update notice while that is
+    // up; clear of the player's own things in that corner (its controls in
+    // the window, its card while it casts minimized). All in .toast-stack.
+    <div className="toast-stack" data-screenshot-exclude="true">
       {toasts.map(t => (
         <ToastItem key={t.id} t={t} onRemove={onRemove} />
       ))}
@@ -46,7 +50,12 @@ export function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove
 // `onRemove` (App's removeToast) is a stable useCallback, so this timer
 // effect only re-runs on pause toggle, not every parent render.
 function ToastItem({ t, onRemove }: { t: Toast; onRemove: (id: string) => void }) {
-  const [paused, setPaused] = useState(false)
+  // The timer waits while the pointer is on the toast or the focus is in
+  // it, each for itself: one flag for both let the pointer leaving restart
+  // the timer under a viewer whose focus was still on Undo.
+  const [hovered, setHovered] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const paused = hovered || focused
   // Exit: the toast used to vanish in one frame when its timer fired or the
   // × was clicked (App's removeToast filters it out of the array). It now
   // plays .toast.is-leaving (toastOut, --dur-base) and asks to be removed
@@ -64,40 +73,44 @@ function ToastItem({ t, onRemove }: { t: Toast; onRemove: (id: string) => void }
   useEffect(() => () => { if (leaveTimer.current !== null) window.clearTimeout(leaveTimer.current) }, [])
   useEffect(() => {
     if (paused || leaving) return
-    const id = window.setTimeout(leave, 3000)
+    const id = window.setTimeout(leave, t.action ? STAY_WITH_ACTION_MS : STAY_MS)
     return () => window.clearTimeout(id)
-  }, [paused, leaving, leave])
+  }, [paused, leaving, leave, t.action])
+  // The action is taken once. The toast stays on the page for its exit
+  // (220ms) with the button still in it, and a second Enter there ran the
+  // action again: an Undo, undone.
+  const acted = useRef(false)
+  const act = () => {
+    if (acted.current) return
+    acted.current = true
+    t.action?.run()
+    leave()
+  }
   return (
     <div
       className={`toast${leaving ? ' is-leaving' : ''}`}
       // Styling hook only: index.css tints the toast's glow by type.
       data-type={t.type}
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
-      onFocus={() => setPaused(true)}
-      onBlur={() => setPaused(false)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
     >
-      <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
-        t.type === 'success' ? 'bg-emerald-500/10 text-emerald-400' :
-        t.type === 'error' ? 'bg-red-500/10 text-red-400' :
-        'bg-purple-500/10 text-purple-400'
-      }`}>
-        <Icon name={t.type === 'success' ? 'check' : t.type === 'error' ? 'x' : 'info'} size={16} />
-      </div>
+      {/* A row of words. Only an error carries a mark: it is the one kind
+          that has to be told from the rest at a glance. */}
+      {t.type === 'error' && <Icon name="alertTriangle" size={16} className="toast-mark flex-none" />}
       {/* role on the message <p> (not the whole toast) so the live
-          region announces ONLY the message — not the "×" close glyph
-          or the decorative icon. */}
-      <p className="text-white/80 text-sm" role={t.type === 'error' ? 'alert' : 'status'}>{t.message}</p>
-      <button
-        type="button"
-        onClick={leave}
-        aria-label="Dismiss notification"
-        // The shared glyph instead of a bare "×" character, on a 28px
-        // target with a hover fill so it reads as a control.
-        className="ml-1 w-7 h-7 rounded-md inline-flex items-center justify-center text-white/50 hover:text-white hover:bg-white/[0.06] transition-colors flex-shrink-0"
-      >
-        <Icon name="x" size={14} />
-      </button>
+          region announces ONLY the message, not its buttons. */}
+      <p className="toast-text" role={t.type === 'error' ? 'alert' : 'status'}>{t.message}</p>
+      {t.action ? (
+        <button type="button" className="toast-action" onClick={act}>
+          {t.action.label}
+        </button>
+      ) : (
+        <button type="button" onClick={leave} aria-label="Dismiss notification" className="toast-x">
+          <Icon name="x" size={16} />
+        </button>
+      )}
     </div>
   )
 }

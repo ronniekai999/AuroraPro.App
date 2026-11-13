@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 // Exercise the real player/controls; mock only delivery, telemetry and CAF.
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
 import { createSession, getStreamInfo, keepalive, createCastToken, deleteSession } from '@/lib/streaming'
-import { markWatched, reportProgress } from '@/lib/api'
-import { CastMediaLoadError, type CastLoadArgs } from '@/lib/cast'
+import { APIError, markWatched, reportProgress } from '@/lib/api'
+import { CastMediaLoadError, CastSaidError, type CastLoadArgs } from '@/lib/cast'
+import { pushEscapeLayer } from '@/lib/escapeLayers'
 const fake = vi.hoisted(() => ({
   getter: null as null | ((at?: number) => Promise<unknown>),
   cast: {
@@ -115,13 +116,59 @@ function rejectReplacement(reason: string | null, identity: 'failed' | 'committe
 }
 async function advanceLoadWindow() { await act(async () => { vi.advanceTimersByTime(3100) }); await settle() }
 
+// The cast widget is a dialog, and one of the player's own surfaces. With
+// something of the player's or the party's left open (a reaction picker in
+// the rail) and the last press in the widget, Escape still closes that thing.
+// Read as some other dialog's key, it went past it to the app, which on a
+// title page goes back.
+function expectEscapeFromTheWidgetToCloseALayer() {
+  const layer = vi.fn(), app = vi.fn()
+  const drop = pushEscapeLayer(layer)
+  window.addEventListener('keydown', app)
+  fireEvent.keyDown(within(screen.getByRole('dialog', { name: 'Cast controls' })).getAllByRole('button')[0], { key: 'Escape' })
+  window.removeEventListener('keydown', app)
+  drop()
+  expect([layer.mock.calls.length, app.mock.calls.length]).toEqual([1, 0])
+}
+
 describe('Cast first-release regressions through VideoPlayer', () => {
+  // A double tap is a user seek like any other: while casting it has to reach
+  // the receiver through the path the skip button takes, not the frozen local
+  // element. Each case is held to the same literal expectation, so neither
+  // depends on the other having run.
+  describe('a double tap while casting', () => {
+    const receiverCalls = () => [
+      ...fake.cast.seek.mock.calls.map(c => ['seek', ...c]),
+      ...fake.cast.loadCurrent.mock.calls.map(c => ['load', ...c]),
+    ]
+    // The receiver is 50s into a cast anchored at source second 100 (the
+    // token's start_sec), so ten seconds on is source second 160.
+    const TEN_SECONDS_ON = [['load', 160]]
+    for (const how of ['skip button', 'double tap'] as const) {
+      it(`${how}: seeks the receiver, never the local element`, async () => {
+        const { view, element } = await connectedCast()
+        vi.spyOn(video(), 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 1000, height: 500, right: 1000, bottom: 500, x: 0, y: 0, toJSON: () => ({}) } as DOMRect)
+        fake.cast.remote.currentTime = 50; view.rerender(element()); await settle()
+        fake.cast.seek.mockClear(); fake.cast.loadCurrent.mockClear()
+        const localBefore = video().currentTime
+        if (how === 'skip button') fireEvent.click(screen.getByRole('button', { name: 'Skip forward 10 seconds' }))
+        else for (let i = 0; i < 2; i++) {
+          fireEvent.pointerUp(video(), { pointerType: 'touch', clientX: 800 })
+          fireEvent.click(video(), { clientX: 800 })
+        }
+        await settle(); view.rerender(element()); await settle()
+        expect(receiverCalls()).toEqual(TEN_SECONDS_ON)
+        expect(video().currentTime).toBe(localBefore)
+      })
+    }
+  })
   it('offers a working Stop control for an SDK-resumed cast without a local target', async () => {
     fake.cast.status.connected = true
     const close = vi.fn(), remote = vi.fn()
     const view = render(<VideoPlayer target={null} onClose={close} onRemoteActiveChange={remote} />)
     await settle()
     expect(screen.getByRole('dialog', { name: 'Cast controls' })).toBeInTheDocument()
+    expectEscapeFromTheWidgetToCloseALayer()
     expect(screen.getByText('Receiver title')).toBeInTheDocument()
     expect(remote).toHaveBeenLastCalledWith(true)
     expect(screen.queryByRole('button', { name: 'Expand player' })).toBeNull()
@@ -136,6 +183,7 @@ describe('Cast first-release regressions through VideoPlayer', () => {
     const view = render(element()); await bootHls()
     fake.cast.status.connected = true; view.rerender(element()); await settle()
     expect(minimized).toHaveBeenLastCalledWith(true)
+    expectEscapeFromTheWidgetToCloseALayer()
     fireEvent.click(screen.getByRole('button', { name: 'Expand player' })); await settle()
     expect(minimized).toHaveBeenLastCalledWith(false); expect(remote).toHaveBeenLastCalledWith(true)
     fireEvent.keyDown(window, { key: 'Escape' }); await settle(); expect(close).not.toHaveBeenCalled()
@@ -774,6 +822,35 @@ describe('Successful ACK and receiver status association', () => {
     expect(fake.cast.loadCurrent).not.toHaveBeenCalled(); expect(fake.cast.seek).not.toHaveBeenCalled()
   })
 
+  // A start that fails says so in the app's words: a Cast refusal in the
+  // sentence describeCastError gave it, anything else (lib/cast's own "cast
+  // SDK not ready") by its kind.
+  it('says a cast that could not start in the app\'s words', async () => {
+    const onToast = vi.fn()
+    fake.cast.start.mockRejectedValueOnce(new Error('cast SDK not ready'))
+    const element = () => <VideoPlayer target={movie} onClose={() => {}} onToast={onToast} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
+    expect(onToast).toHaveBeenCalledWith('Could not start casting just now.', 'error')
+    expect(onToast.mock.calls.flat().join(' ')).not.toMatch(/SDK/)
+    onToast.mockClear()
+    fake.cast.start.mockRejectedValueOnce(new CastSaidError('No Cast devices were found. Check that your Chromecast is on and on the same Wi-Fi network.'))
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
+    expect(onToast).toHaveBeenCalledWith('Cast failed: No Cast devices were found. Check that your Chromecast is on and on the same Wi-Fi network.', 'error')
+  })
+
+  // The stream a cast plays is minted on the server, which caps streams
+  // with a 429: the toast says what to do about a cap.
+  it('says a capped cast stream as a cap, not as too many tries', async () => {
+    const onToast = vi.fn()
+    vi.mocked(createCastToken).mockReset().mockRejectedValue(new APIError(429, 'maximum transcode sessions reached, try again later', null))
+    const element = () => <VideoPlayer target={movie} onClose={() => {}} onToast={onToast} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
+    expect(onToast).toHaveBeenCalledWith('Too many streams are running. Close one you have open, or try again later.', 'error')
+    expect(onToast.mock.calls.flat().join(' ')).not.toMatch(/Too many tries|maximum transcode/)
+  })
+
   it('also declines an existing TV clock discovered during the initial device picker', async () => {
     const target = { ...movie, resumePositionMs: 200000 }
     vi.mocked(createCastToken).mockResolvedValueOnce(castTokenFor('picker-new', 100))
@@ -991,4 +1068,60 @@ for(const reason of ['FINISHED','CANCELLED'] as const) it(`Independent 4cf first
   view.rerender(element());await settle();await advanceLoadWindow()
   expect(ended).toHaveBeenCalledTimes(reason==='FINISHED'?1:0)
   expect(fake.cast.stop).toHaveBeenCalledOnce()
+})
+
+// The card writes out the receiver's position only when the player can
+// vouch for it: the receiver's reading on a trusted clock, made absolute by
+// the cast's anchor. An unknown position is left out, never shown as 0:00.
+describe('the cast card\'s written position', () => {
+  async function minimisedCast() {
+    const close = vi.fn(), ended = vi.fn(async () => false)
+    const element = () => <VideoPlayer target={movie} onClose={close} onEnded={ended} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
+    return { view, element }
+  }
+  const position = () => document.querySelector('[data-cast-position]')
+
+  it('is the receiver\'s reading made absolute, beside the device', async () => {
+    const { view, element } = await minimisedCast()
+    const card = screen.getByRole('dialog', { name: 'Cast controls' })
+    Object.assign(fake.cast.remote, { currentTime: 41, updateSeq: fake.cast.remote.updateSeq + 1, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1 })
+    view.rerender(element()); await settle()
+    expect(card).toHaveTextContent('Casting to TV')
+    expect(position()?.textContent).toBe('· 2:21')
+    // The bar carries no value of its own: it is drawn, not read.
+    expect(card.querySelector('.player-cast-progress')).toHaveAttribute('aria-hidden', 'true')
+  })
+
+  // A cast token that names no start: the anchor is not known, so the
+  // receiver's reading cannot be made absolute.
+  it('is left out when the cast token names no start', async () => {
+    const { start_sec: _unknown, ...noStart } = castTokenFor('cast-copy')
+    void _unknown
+    vi.mocked(createCastToken).mockReset().mockResolvedValue({ ...noStart, segment_format: 'fmp4' } as Awaited<ReturnType<typeof createCastToken>>)
+    const { view, element } = await minimisedCast()
+    Object.assign(fake.cast.remote, { currentTime: 41, updateSeq: fake.cast.remote.updateSeq + 1, mediaStatusSeq: fake.cast.remote.mediaStatusSeq + 1 })
+    view.rerender(element()); await settle()
+    const card = screen.getByRole('dialog', { name: 'Cast controls' })
+    expect(card).toHaveTextContent('Casting to TV')
+    expect(position()).toBeNull()
+    expect(card.textContent).not.toMatch(/\d:\d\d/)
+  })
+
+  // The card's buttons, in the order the design gives them.
+  it('offers play or pause, expand and stop, in that order', async () => {
+    await minimisedCast()
+    const card = screen.getByRole('dialog', { name: 'Cast controls' })
+    expect(within(card).getAllByRole('button').map(b => b.getAttribute('aria-label'))).toEqual(['Pause', 'Expand player', 'Stop and close'])
+  })
+
+  it('is left out while the receiver\'s clock is not this media\'s', async () => {
+    const { view, element } = await minimisedCast()
+    Object.assign(fake.cast.remote, { clockContentId: null, currentTime: 41, updateSeq: fake.cast.remote.updateSeq + 1 })
+    view.rerender(element()); await settle()
+    expect(screen.getByRole('dialog', { name: 'Cast controls' })).toHaveTextContent('Casting to TV')
+    expect(position()).toBeNull()
+    expect(screen.getByRole('dialog', { name: 'Cast controls' }).textContent).not.toMatch(/0:00/)
+  })
 })

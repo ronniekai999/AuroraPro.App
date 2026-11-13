@@ -39,8 +39,8 @@ export function usePanelDismiss(
   // Not hypothetical. App rotates the home hero every 9 seconds, so opening
   // either panel from Home fired this on a loop for as long as it stayed open;
   // NotificationPanel's own open effect triggers it too via onMarkAllRead.
-  // Exactly the failure SearchPalette documents at length ("Phase 9 reintroduced
-  // the failure Phase 7b had documented") and that NotificationPanel's
+  // Exactly the failure the search palette this app once had documented at
+  // length ("Phase 9 reintroduced the failure Phase 7b had documented") and that NotificationPanel's
   // neighbouring effect already dodges with a ref. This hook was written thirty
   // lines away from both and repeated it.
   const onCloseRef = useRef(onClose)
@@ -78,8 +78,8 @@ export function usePanelDismiss(
       if (e.key !== 'Escape') return
       if (!node) return
       // Only when the panel actually owns focus. These are non-modal and several
-      // other Escape handlers are live at once (App's view-level handler, the
-      // palette's); swallowing every Escape from a panel that happens to be open
+      // other Escape handlers are live at once (App's view-level handler, a
+      // dialog's); swallowing every Escape from a panel that happens to be open
       // in the background is the bug ContextMenu's `stopPropagation` fixed from
       // the other direction.
       if (!node.contains(document.activeElement)) return
@@ -160,8 +160,8 @@ export function usePanelDismiss(
       // held focus, so `focusLost` is true and the restore would otherwise fire
       // — dragging a focus ring onto the trigger the user just pointed away
       // from. Where the outside target takes focus itself the browser corrects
-      // that a moment later, but where it deliberately does not (SearchPalette
-      // preventDefaults mousedown on its options to keep focus in the input)
+      // that a moment later, but where it deliberately does not (a control that
+      // preventDefaults mousedown to keep the focus where it is)
       // the stolen focus simply stays stolen.
       const active = document.activeElement
       const focusLost = !active || active === document.body

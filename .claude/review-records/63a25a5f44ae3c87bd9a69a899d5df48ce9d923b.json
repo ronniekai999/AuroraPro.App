@@ -1,0 +1,10 @@
+{
+  "sha": "63a25a5f44ae3c87bd9a69a899d5df48ce9d923b",
+  "verdict": "lows-only",
+  "summary": "The error screen: 'That did not load' with Reload, Go to Tonight, what the app saw, and the bug report form as a panel; the form extracted from its dialog into one shared implementation (checked line by line: no behaviour change; the dialog's tests untouched); the update notice still outside the boundary. Lows-only on the first pass. Queued: the description limit counted in characters where the server counts bytes; a send that lands during a dismissal not reported as sent; switch sentences that can be stale; the closure line hidden from assistive technology; collected text reaching the tracker as live markdown; nothing guarding the screen against its own errors; session changes heard through storage only.",
+  "reviewer": "fresh-context-agent-a2bf0f38",
+  "findings": "8",
+  "diff_digest": "d842ca81f9f0ce8371a50d1d09ca1a5024cf95e9f9bfb1cbb061c32382b32edd",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T03:43:45Z"
+}

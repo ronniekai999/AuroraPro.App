@@ -12,8 +12,7 @@
 // this" subtitle, so your own page is an exact preview of what opting in
 // would reveal.
 
-import { useEffect, useRef, useState } from 'react'
-import { Icon } from '@/components/Icon'
+import { useEffect, useRef, useState, type MouseEvent } from 'react'
 import { MediaRail } from '@/components/MediaRail'
 import { PageHeader } from '@/components/PageHeader'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
@@ -31,6 +30,7 @@ import {
 } from '@/lib/api'
 import { SOCIAL_NETWORKS, socialUrl } from '@/lib/socialLinks'
 import { type Media } from '@/lib/types'
+import { failureWords } from '@/lib/failureWords'
 
 function mapWatchToMedia(w: MemberRecentWatch): Media {
   return {
@@ -62,9 +62,12 @@ function watchedAgo(iso: string): string {
   return 'Watched ' + new Date(t).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })
 }
 
-export default function UserProfileView({ username, onSelect, onOpenMember }: {
+export default function UserProfileView({ username, onSelect, onCardContext, onOpenMember }: {
   username: string
   onSelect: (m: Media) => void
+  // The card menu (right click, More, a long press), required by every
+  // surface that renders a card: see MediaCardCinema.
+  onCardContext: (e: MouseEvent, m: Media) => void
   /** Navigate to another member's profile (follower/following rows). */
   onOpenMember?: (username: string) => void
 }) {
@@ -140,10 +143,8 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
       })
       .catch((e: unknown) => {
         if (cancelled) return
-        // apiFetch surfaces the server's message ("member not found") —
-        // show it rather than a generic failure so a dead link reads as
-        // exactly that.
-        setError(e instanceof Error ? e.message : 'Failed to load profile')
+        // A dead link (the server's 404) reads as exactly that.
+        setError(failureWords(e, 'load this page', { status: { 404: 'This member’s page is not available.' } }) ?? 'This page could not be loaded.')
       })
     return () => { cancelled = true }
   }, [username])
@@ -151,13 +152,12 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
   if (error) {
     return (
       <div className="animate-fade-in">
-        <div className="glass-panel rounded-2xl p-8 text-center">
-          <Icon name="user" size={28} className="text-white/25 mx-auto" />
-          <p className="text-white/80 text-sm font-medium mt-3">{error}</p>
-          {/* The link hint only makes sense for a 404 — under a 500 it
-              would blame the URL for a server problem. */}
+        <div role="alert" className="rounded-control bg-surface-raised p-6">
+          <p className="text-[15px] font-semibold text-ink">{error}</p>
+          {/* The hint about the link only makes sense for a 404: under a
+              500 it would blame the URL for a server problem. */}
           {error.toLowerCase().includes('not found') && (
-            <p className="text-white/50 text-xs mt-1">Check the link — profiles live at /user/&lt;username&gt;.</p>
+            <p className="mt-1 text-[13px] text-ink-2">Check the link: member pages live at /user/&lt;username&gt;.</p>
           )}
         </div>
       </div>
@@ -166,7 +166,7 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
   if (!resp) {
     return (
       <div className="animate-fade-in">
-        <p className="text-white/50 text-sm py-16 text-center">Loading profile…</p>
+        <p className="py-16 text-center text-sm text-ink-2">Loading the page…</p>
       </div>
     )
   }
@@ -185,80 +185,74 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
 
   return (
     <div className="animate-fade-in">
-      <PageHeader title={shownName} sub={isMe ? 'Your member profile' : 'Member profile'} />
+      <PageHeader title={shownName} sub={isMe ? 'Your member page' : 'Member page'} />
 
-      <div className="glass-panel rounded-2xl p-6 md:p-8">
-        <div className="flex flex-col sm:flex-row gap-6 items-start">
-          <ProfileAvatar avatarUrl={profile.avatar_url} name={shownName} size={96} />
+      <div className="rounded-control bg-surface-raised p-5 md:p-7">
+        <div className="flex flex-col items-start gap-5 sm:flex-row">
+          <ProfileAvatar avatarUrl={profile.avatar_url} name={shownName} memberKey={profile.user_id} size={96} />
           <div className="min-w-0 flex-1">
             <div className="flex items-start justify-between gap-4">
-              <h2 className="text-white text-xl font-semibold truncate">{shownName}</h2>
+              <h2 className="truncate font-display text-[22px] font-semibold text-ink">{shownName}</h2>
               {!isMe && (
                 // No aria-pressed: the accessible name itself flips
-                // (Follow/Following) — pairing both makes readers announce
-                // the state twice.
+                // (Follow/Following), and pairing both makes a screen
+                // reader announce the state twice.
                 <button
                   type="button"
                   onClick={toggleFollow}
                   disabled={followBusy}
-                  className={`flex-none px-4 py-2 rounded-lg text-sm border transition-colors disabled:opacity-50 ${
-                    isFollowing
-                      ? 'bg-purple-500/15 hover:bg-purple-500/25 border-purple-500/40 text-purple-200'
-                      : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.08] text-white/75'
-                  }`}
+                  className={`stage-btn flex-none ${isFollowing ? 'stage-btn-ghost is-on' : 'stage-btn-primary'}`}
                 >
                   {isFollowing ? 'Following' : 'Follow'}
                 </button>
               )}
             </div>
-            <p className="text-white/50 text-sm mt-0.5">
-              @{profile.username} &middot; Member since {Number.isNaN(memberYear) ? '—' : memberYear}
+            <p className="mt-0.5 text-sm text-ink-2">
+              @{profile.username} &middot; Member since {Number.isNaN(memberYear) ? 'an unknown year' : memberYear}
             </p>
-            <div className="flex items-center gap-3 mt-2 text-sm">
+            <div className="mt-1 flex flex-wrap items-center gap-x-1 text-sm">
               <button
                 type="button"
                 onClick={() => toggleConnections('followers')}
                 aria-expanded={expanded === 'followers'}
                 aria-controls="member-connections"
-                className="text-white/60 hover:text-white transition-colors"
+                className="-ml-2 min-h-11 rounded-control px-2 text-ink-2 transition-colors hover:text-ink"
               >
-                <span className="text-white font-medium">{followerCount}</span> follower{followerCount === 1 ? '' : 's'}
+                <span className="font-semibold tabular-nums text-ink">{followerCount}</span> follower{followerCount === 1 ? '' : 's'}
               </button>
-              <span className="text-white/20">&middot;</span>
               <button
                 type="button"
                 onClick={() => toggleConnections('following')}
                 aria-expanded={expanded === 'following'}
                 aria-controls="member-connections"
-                className="text-white/60 hover:text-white transition-colors"
+                className="min-h-11 rounded-control px-2 text-ink-2 transition-colors hover:text-ink"
               >
-                <span className="text-white font-medium">{resp.following_count}</span> following
+                <span className="font-semibold tabular-nums text-ink">{resp.following_count}</span> following
               </button>
             </div>
             {profile.bio && (
-              // whitespace-pre-line: the bio is the one multi-line profile
-              // field (the server preserves its newlines). break-words:
-              // member-authored text — a 500-char unbroken token (pasted
-              // URL) must wrap instead of forcing horizontal scroll.
-              <p className="text-white/70 text-sm mt-3 max-w-2xl whitespace-pre-line break-words">{profile.bio}</p>
+              // whitespace-pre-line: the bio is the one field with line
+              // breaks (the server keeps them). break-words: it is written
+              // by a member, and a 500-character unbroken token (a pasted
+              // URL) must wrap instead of scrolling the page sideways.
+              <p className="mt-2 max-w-2xl whitespace-pre-line break-words text-[15px] leading-relaxed text-ink">{profile.bio}</p>
             )}
             {socials.length > 0 && (
-              <div className="flex flex-wrap gap-2 mt-4">
+              <div className="mt-4 flex flex-wrap gap-2">
                 {socials.map(({ n, handle }) => (
                   <a
                     key={n.key}
                     href={socialUrl(n, handle)}
-                    // External, user-supplied destination (shape-validated
-                    // handle on a fixed domain) — never runs in our context.
+                    // An outside address a member supplied (a handle of a
+                    // checked shape on a fixed domain): it never runs here.
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="badge-glass inline-flex items-center gap-1.5 px-2.5 py-1 text-xs text-white/75 hover:text-white transition-colors"
+                    className="inline-flex min-h-11 items-center gap-1.5 rounded-control bg-surface-raised-2 px-3 text-[13px] font-semibold text-ink transition-colors hover:bg-action-soft"
                   >
-                    <Icon name="globe" size={12} className="text-white/40" />
                     {n.label}
-                    {/* Facebook handles run to 60 chars — cap the chip so
-                        one long handle can't overflow a phone viewport. */}
-                    <span className="text-white/50 inline-block max-w-[18ch] truncate">@{handle}</span>
+                    {/* Facebook handles run to 60 characters: capped so one
+                        long handle cannot overflow a phone. */}
+                    <span className="inline-block max-w-[18ch] truncate font-normal text-ink-2">@{handle}</span>
                   </a>
                 ))}
               </div>
@@ -267,32 +261,32 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
         </div>
 
         {expanded && (
-          <div id="member-connections" className="mt-5 pt-5 border-t border-white/[0.06]">
-            <p className="text-white/50 text-xs uppercase tracking-wide font-semibold mb-3">
+          <div id="member-connections" className="mt-5 border-t border-line pt-5">
+            <p className="mb-3 text-xs font-semibold text-ink-2">
               {expanded === 'followers' ? 'Followers' : 'Following'}
             </p>
-            {connections === null && <p className="text-white/50 text-sm">Loading…</p>}
+            {connections === null && <p className="text-sm text-ink-2">Loading…</p>}
             {connections !== null && connections.length === 0 && (
-              // A failed fetch must not masquerade as an empty list.
-              <p className="text-white/50 text-sm">
+              // A failed request must not pass for an empty list.
+              <p className="text-sm text-ink-2">
                 {connError
-                  ? 'Couldn’t load this list — try again.'
+                  ? 'This list could not be loaded. Try again.'
                   : expanded === 'followers' ? 'No followers yet.' : 'Not following anyone yet.'}
               </p>
             )}
             {connections !== null && connections.length > 0 && (
-              <div className="grid gap-2 sm:grid-cols-2">
+              <div className="grid gap-1 sm:grid-cols-2">
                 {connections.map(m => (
                   <button
                     key={m.user_id}
                     type="button"
                     onClick={() => onOpenMember?.(m.username)}
-                    className="flex items-center gap-3 min-w-0 text-left rounded-lg px-2 py-1.5 hover:bg-white/[0.05] transition-colors"
+                    className="flex min-h-11 min-w-0 items-center gap-3 rounded-control px-2 py-1.5 text-left transition-colors hover:bg-surface-raised-2"
                   >
-                    <ProfileAvatar avatarUrl={m.avatar_url} name={m.display_name || m.username} size={32} />
+                    <ProfileAvatar avatarUrl={m.avatar_url} name={m.display_name || m.username} memberKey={m.user_id} size={32} />
                     <span className="min-w-0">
-                      <span className="block text-white/85 text-sm truncate">{m.display_name || m.username}</span>
-                      <span className="block text-white/50 text-xs truncate">@{m.username}</span>
+                      <span className="block truncate text-sm font-semibold text-ink">{m.display_name || m.username}</span>
+                      <span className="block truncate text-xs text-ink-2">@{m.username}</span>
                     </span>
                   </button>
                 ))}
@@ -306,27 +300,27 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
         {historyVisible ? (
           watches.length > 0 ? (
             <MediaRail
-              title="Recently Finished"
+              title="Recently finished"
               subtitle={isMe
                 ? (!profile.share_watch_history
-                    ? 'Only you can see this — sharing is off in Settings'
-                    : 'Finished titles only — in-progress watches stay in Continue Watching')
+                    ? 'Only you can see this: sharing is off on your profile page'
+                    : 'Finished titles only. What is in progress stays in Continue Watching')
                 : undefined}
               items={watches.map(mapWatchToMedia)}
               aspect="poster"
               onSelect={onSelect}
+              onCardContext={onCardContext}
               cardSubtitleFor={m => watchedAt[m.id]}
             />
           ) : (
-            <p className="text-white/50 text-sm">
+            <p className="text-sm text-ink-2">
               {isMe
-                ? 'Nothing finished yet — titles show up here once you finish them. In-progress watches stay in Continue Watching.'
+                ? 'Nothing finished yet. Titles show here once you finish them; what is in progress stays in Continue Watching.'
                 : 'No finished titles yet.'}
             </p>
           )
         ) : (
-          <p className="text-white/50 text-sm flex items-center gap-2">
-            <Icon name="eye" size={14} className="text-white/25" />
+          <p className="text-sm text-ink-2">
             {isMe
               // The server hides the strip from a profile with a content
               // limit: it is the account default's history, not this one's.

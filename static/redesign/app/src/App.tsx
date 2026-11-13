@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy } from 'react'
-import { useNavigate, useLocation } from 'react-router'
-import { consumeDevicePairing, rememberDevicePairing } from '@/lib/devicePairing'
+import { useNavigate, useLocation, useNavigationType } from 'react-router'
+import { consumeDeviceIntent, consumeDevicePairing, forgetDeviceIntent } from '@/lib/devicePairing'
+import { undoMayRestore } from '@/lib/libraryUndo'
+import { ESCAPE_LAYERS_ATTR } from '@/lib/escapeLayers'
 import {
   fetchMe,
   getStoredUser,
@@ -13,6 +15,7 @@ import {
   addToLibrary,
   removeFromLibrary,
   libraryItemToMedia,
+  type LibraryItem,
   listMedia,
   mapMedia,
   listRecent,
@@ -27,23 +30,17 @@ import {
   type AnchorRailUI,
   type EngagementRailUI,
   type FollowedWatch,
-  getGamificationStats,
-  listActiveParties,
   type ActiveParty,
-  type GamificationStats,
   listContinueWatching,
   listRequests,
   getBugReportConfig,
   type BugReportConfig,
   mapContinueToMedia,
-  searchMedia,
   createQuickParty,
   sendPartyInvites,
-  listMyPartyInvites,
   rsvpPartyInvite,
   schedulePartyStart,
   type MyPartyInvite,
-  login as apiLogin,
   logout as apiLogout,
   posterURL,
   backdropURL,
@@ -52,8 +49,6 @@ import {
   listProfiles,
   activateProfile,
   getActiveProfile,
-  setProfileMaturity,
-  updateProfile,
   listWatchlists,
   addToWatchlist,
   submitMediaFeedback,
@@ -61,8 +56,6 @@ import {
   deleteMedia,
   markWatched,
   clearProgress,
-  getSetupStatus,
-  register,
   type ActivityEntry,
   type ContinueWatchingItem,
   type HeroPick,
@@ -73,20 +66,22 @@ import {
   type Profile,
   type ServerMediaItem,
   type ServerStats,
-  type SetupStatus,
   type Watchlist,
   type Episode as ApiEpisode,
   type User as ApiUser,
   listNotifications,
   markAllNotificationsRead,
   type AppNotification,
+  APIError,
 } from '@/lib/api'
 import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer'
 import { PartyPanel } from '@/components/PartyPanel'
 import { PartyInvite } from '@/components/PartyInvite'
-import { PartyHubModal } from '@/components/PartyHubModal'
 import { PartyComposerModal, type PartyComposerLaunch } from '@/components/PartyComposerModal'
-import { formatPartyTime, skipReasonCopy, inviteCodeFromLink } from '@/lib/partyInvites'
+import { formatPartyTime, plannedStartLabel, skipReasonCopy, inviteCodeFromLink } from '@/lib/partyInvites'
+import { firstEpisodeToPlay, regularSeasonsFirst, resolvePartyEpisodeId, startsLaterNotice } from '@/lib/partyEpisode'
+import { buildSlate, resumeLead, shownSlateIndex, whereYouAre, type SlateEntry } from '@/lib/tonightSlate'
+import { TonightLive } from '@/components/TonightLive'
 import {
   isPlaybackResolutionCurrent,
   partyPlayerDismissalKeyOnClose,
@@ -94,13 +89,19 @@ import {
   shouldClosePlayerOnPathChange,
 } from '@/lib/partyPlayer'
 import { HeroSection } from '@/components/HeroSection'
-import { AuroraWordmark } from '@/components/AuroraWordmark'
 import { MediaRail } from '@/components/MediaRail'
-import { BugReportButton } from '@/components/BugReportButton'
+import { BugReportHost } from '@/components/BugReportHost'
+import { useBugReportEntry } from '@/hooks/useBugReportEntry'
+import { focusPageStart } from '@/lib/returnFocus'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { anchorFor, ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
 import { ScanProgressBar } from '@/components/ScanProgressBar'
-import { SearchPalette } from '@/components/SearchPalette'
+import { searchField } from '@/lib/searchKeys'
+import AuthView from '@/components/AuthView'
+import { hasInAppEntryBehind } from '@/lib/historyBack'
+import { dropWaitingOpen, travelToTitle, watchCardPresses } from '@/lib/posterTravel'
+import { failureWords } from '@/lib/failureWords'
+import { ConfirmDialog } from '@/components/settings/ConfirmDialog'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
@@ -110,13 +111,24 @@ import { isRestrictedProfile, isSoleUnrestrictedProfile, loadStartupProfiles, re
 import { useProfileSwitch } from '@/lib/useProfileSwitch'
 import { useOnProfileChange } from '@/lib/useOnProfileChange'
 import { useProfileSwitchPending } from '@/lib/useProfileSwitchPending'
-import { TopNav } from '@/components/TopNav'
+import { BottomTabBar, TopNav, type NavPresence } from '@/components/TopNav'
+import { forgetDescribedAnswer } from '@/lib/describedSearch'
+import { forgetAccountRecentSearches, forgetRecentSearches, readRecentSearches, rememberSearch } from '@/lib/recentSearches'
+import { LibraryHeader, LibraryToolsProvider } from '@/components/LibraryHeader'
+import { BrowseTools, GenreChips, LetterStrip } from '@/components/BrowseControls'
+import { DEFAULT_BROWSE_SORT, fallbackGenres, readBrowseLayout, useGridLayout, writeBrowseLayout, type BrowseLayout } from '@/lib/browseLayout'
+import { LIBRARY_DESTINATION, hiddenFromRestricted, isLibraryView, libraryScopesFor, mayRenderHidden, navScopeFor } from '@/lib/navScope'
+import { settingsPaneFromPath, settingsPath, type SettingsPane } from '@/lib/settingsPanes'
+import { partyPresence, useActiveParties } from '@/hooks/useActiveParties'
+import { usePartyInvites } from '@/hooks/usePartyInvites'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
 import { usePanelDismiss } from '@/hooks/usePanelDismiss'
 import { useParty } from '@/hooks/useParty'
 import { useRealtime } from '@/hooks/useRealtime'
 import { useCatalogVersion } from '@/hooks/useCatalogVersion'
+import { useLetterJump } from '@/hooks/useLetterJump'
+import { fitsInPages } from '@/lib/letterJump'
 import { abortAfter, CATALOG_REFRESH_MAX_PAGES, loadedPageCount, refetchLoadedPages, withoutRemoved } from '@/lib/catalogUpdates'
 import { useNotificationSeed } from '@/hooks/useNotificationSeed'
 // 2026-06-17 (app split) — leaves extracted to shared modules so the
@@ -126,20 +138,20 @@ import { useNotificationSeed } from '@/hooks/useNotificationSeed'
 import { Icon } from '@/components/Icon'
 import { ToastContainer, type Toast } from '@/components/Toast'
 import { announceStaleBundle, isStaleBundleError } from '@/lib/buildUpdate'
-import { Spinner } from '@/components/ui/spinner'
-import { oauthProviderLabel, OAUTH_SIGN_IN_PROVIDERS, type OAuthProvider } from '@/lib/oauth'
+import { oauthProviderLabel } from '@/lib/oauth'
 import { type Media } from '@/lib/types'
 import { isResumable } from '@/lib/format'
-import { currentPreferredQuality } from '@/lib/appearance'
+import { currentPreferredQuality, readPrefsSnapshot, writePrefKey } from '@/lib/appearance'
 import { lockBodyScroll } from '@/lib/scrollLock'
 import { prewarm, cancelPrewarm, prewarmEnabled } from '@/lib/prewarm'
 import { shouldRefreshHome, shouldResetPersonalizedRails } from '@/lib/homeRefresh'
 import { pushSupported, bootResyncPush, unsubscribePushOnLogout } from '@/lib/push'
 import { syncAppBadge } from '@/lib/pwa'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
-import { DetailSkeleton, GridSkeleton, HeroSkeleton, RailSkeleton, SkeletonBlock } from '@/components/Skeletons'
+import { DetailSkeleton, GridSkeleton, RailSkeleton } from '@/components/Skeletons'
 import { useExitTransition } from '@/hooks/useExitTransition'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
+import { RestoreOutcomeAlert } from '@/components/admin/RestoreOutcomeAlert'
 
 // Chunk loaders, named so the nav can PREFETCH a view's code on hover /
 // focus of its tab (prefetchView, below) ahead of the click that needs it.
@@ -149,6 +161,8 @@ import ManualMatchModal from '@/components/admin/ManualMatchModal'
 // version of what `startTransition` cannot do here: each view mounts its
 // own <ViewSuspense>, and React shows a NEWLY mounted boundary's fallback
 // immediately, transition or not.
+// The title page's module, once its chunk has arrived (see DetailView, below).
+let detailModule: typeof import('@/components/DetailView') | null = null
 const VIEW_LOADERS = {
   admin: () => import('@/components/admin/AdminView'),
   collections: () => import('@/components/CollectionsView'),
@@ -156,20 +170,51 @@ const VIEW_LOADERS = {
   settings: () => import('@/components/SettingsView'),
   requests: () => import('@/components/RequestsView'),
   browse: () => import('@/components/BrowseView'),
-  detail: () => import('@/components/DetailView'),
+  detail: () => import('@/components/DetailView').then(m => { detailModule = m; return m }),
   library: () => import('@/components/LibraryView'),
   search: () => import('@/components/SearchView'),
   member: () => import('@/components/UserProfileView'),
   members: () => import('@/components/MembersView'),
   device: () => import('@/components/DeviceApprovalView'),
+  together: () => import('@/components/TogetherView'),
+  profile: () => import('@/components/MyProfileView'),
+  me: () => import('@/components/MeView'),
 } as const
-// Nav tab id → chunk. Home is eager (no entry); movies and shows share the
-// browse chunk; detail/member are never reached from a tab.
+// Destination or view id → chunk. Home is eager (no entry); movies and shows
+// share the browse chunk; member is never reached from the nav. The
+// Library destination ('catalog') warms the browse chunk, where it lands by
+// default; 'library' is the My Library scope's own view. 'detail' is not a
+// nav destination either: it is warmed when the pointer or the focus first
+// reaches a card (App, below), since a card is what opens it.
 const PREFETCH_BY_VIEW: Record<string, keyof typeof VIEW_LOADERS> = {
   admin: 'admin', collections: 'collections', calendar: 'calendar',
   settings: 'settings', requests: 'requests', movies: 'browse', shows: 'browse',
+  [LIBRARY_DESTINATION]: 'browse',
   library: 'library', search: 'search', members: 'members',
+  together: 'together', profile: 'profile', me: 'me', detail: 'detail',
 }
+// What a party's join that did not happen says, at App's entry points (the
+// bell, a calendar chip, Tonight's strip, a party link), by the `reason` the
+// party hook gives beside its words, never by its words. A reason not
+// listed here gets the general sentence, which promises a retry ("just
+// now") only for a server failure.
+function joinRefusalWords(code: string, reason: string | undefined): string {
+  switch (reason) {
+    case 'offline_room': return ROOM_OFFLINE
+    case 'network': return 'Could not reach the server. Check the connection and try again.'
+    case 'http_404': return `No party is using the code ${code} right now.`
+    case 'invalid_code': return 'A party code is 6 letters or digits.'
+    case 'signed_out': return 'Sign in to join a party.'
+  }
+  if (reason && /^http_5\d\d$/.test(reason)) return `Could not join party ${code} just now.`
+  return `Could not join party ${code}.`
+}
+// A room with no party running, said as the party hook says it.
+const ROOM_OFFLINE = 'Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.'
+
+// Play found nothing it can play for a title (no season, no episode with a
+// file, no file): said as such, not as a failure to reach anything.
+const NO_FILE_TO_PLAY = new Error('no file to play')
 const prefetched = new Set<keyof typeof VIEW_LOADERS>()
 function prefetchView(view: string): void {
   const key = PREFETCH_BY_VIEW[view]
@@ -214,26 +259,36 @@ const RequestsView = lazy(VIEW_LOADERS.requests)
 // the block in <ViewSuspense fallback={<BrowseLoadingState/>}> so the
 // chunk-load + data-load fallbacks are visually identical.
 const BrowseView = lazy(VIEW_LOADERS.browse)
-// 2.5 — Detail (hero, tabs, episodes, cast, files, recap, trailer). App owns
-// the data + handlers; the inline `resume` IIFE + `onEpisodeUnavailable`
-// closure stay in App's render block (they close over App state) and are
-// threaded in as props — NOT moved into the child. The lazy <DetailView>
-// keeps key={selectedMedia.id} so it remounts per title (resets active tab /
-// cast-expand — the one check the build can't catch). Loads on first
-// card→detail nav.
-const DetailView = lazy(VIEW_LOADERS.detail)
+// 2.5 — Detail, the title page (hero, episodes, cast, files, recap,
+// trailer). App owns the data + handlers; the inline `resume` IIFE +
+// `onEpisodeUnavailable` closure stay in App's render block (they close over
+// App state) and are threaded in as props — NOT moved into the child. The
+// lazy <DetailView> keeps key={selectedMedia.id} so it remounts per title
+// and nothing the page keeps for one title is carried to the next (the one
+// check the build can't catch). Loads on first card→detail nav.
+// The title page, lazy like the other views, with one difference: when its
+// chunk is already here (warmed when a card was first reached), the first
+// render gets it AT ONCE. A lazy component otherwise suspends on its first
+// render even for a module that has loaded, because a promise answers a
+// turn later: the page a card opens was a skeleton for that turn, and the
+// poster a press sends travelling (lib/posterTravel) had nothing to arrive
+// at. A thenable that answers synchronously is read by React.lazy without
+// suspending.
+const DetailView = lazy(() => {
+  const loaded = detailModule
+  if (!loaded) return VIEW_LOADERS.detail()
+  return { then: (resolve: (m: typeof loaded) => void) => { resolve(loaded) } } as unknown as Promise<typeof loaded>
+})
 // 2.6 — My Library (saved titles + Continue Watching). Shares isResumable,
 // MediaCardCinema, Icon, and the app-side Media type with the other views.
 // App owns the saved `library` state + `continueItems` and passes them as
 // props; the Resume pill resolves the freshest CW record via a ref. Loads
 // on first /library nav.
 const LibraryView = lazy(VIEW_LOADERS.library)
-// 2.7 — Search (debounced 300ms/keystroke results grid). Shares Icon,
-// MediaCardCinema, searchMedia, and the app-side Media type. App owns the
-// query string + library set and passes them as props; the debounce +
-// searchMedia call live in the view. No dependency on UpdatePanel's
-// ACTIVE_STATES/updateStateMeta/timeAgo (those stay in the admin chunk).
-// Loads on first /search nav.
+// 2.7 — Search: titles matched as you type, and a search by description
+// when asked for (Enter). App owns the query string, the ask and the library
+// set and passes them as props; the debounce and the searchMedia calls live
+// in the view. Loads on first /search nav.
 const SearchView = lazy(VIEW_LOADERS.search)
 // Social phase 1 — member profile page (/user/:username). Self-contained:
 // fetches its own data by username, so App only parses the URL (see
@@ -245,6 +300,11 @@ const UserProfileView = lazy(VIEW_LOADERS.member)
 // browse surfaces; this is an occasional destination like Settings).
 const MembersView = lazy(VIEW_LOADERS.members)
 const DeviceApprovalView = lazy(VIEW_LOADERS.device)
+// The Together hub, the viewer's own profile page, and the phone's account
+// page ("Me"), each loaded on first visit.
+const TogetherView = lazy(VIEW_LOADERS.together)
+const MyProfileView = lazy(VIEW_LOADERS.profile)
+const MeView = lazy(VIEW_LOADERS.me)
 
 
 /* ─────────────────────── MOCK DATA ─────────────────────── */
@@ -256,44 +316,9 @@ const DeviceApprovalView = lazy(VIEW_LOADERS.device)
 // because Search's deleted-mock-fallback path references them.
 
 /* ─────────────────── HOME REDESIGN HELPERS ───────────────────
- * 2026-06-05 (ui-refresh-2026 Home) — small pure helpers shared by the
- * greeting band, the hero match-ring / resume bar, and the Continue
- * Watching subtitle. Kept module-scoped (not inside a component) so
- * they're trivially testable and don't re-allocate per render. */
-
-// Time-of-day greeting word from the client clock (matches the mockup:
-// "Good {morning|afternoon|evening}").
-function greetingTimeOfDay(d: Date = new Date()): 'morning' | 'afternoon' | 'evening' {
-  const h = d.getHours()
-  // Small hours read as "Good evening" so the greeting never pairs
-  // "Good morning" with the "night" day-part (e.g. 2am → "morning…night").
-  if (h < 5) return 'evening'
-  if (h < 12) return 'morning'
-  if (h < 18) return 'afternoon'
-  return 'evening'
-}
-
-// Casual "night/evening" descriptor for the greeting subline ("Friday
-// night"). Mornings/afternoons keep their literal word so the copy
-// stays truthful ("Saturday morning"), evenings read as "night".
-function greetingDayPart(d: Date = new Date()): string {
-  const h = d.getHours()
-  if (h >= 21 || h < 5) return 'night'
-  if (h < 12) return 'morning'
-  if (h < 18) return 'afternoon'
-  return 'evening'
-}
-
-// First name for the greeting. The User record only carries `username`
-// (no display/first name field) — derive a friendly capitalized handle
-// from it. Strips a leading email-ish local part if a full email slips
-// in, then Title-cases the first token.
-function greetingFirstName(username?: string): string {
-  if (!username) return 'there'
-  const base = username.split('@')[0].split(/[._\s-]/)[0] || username
-  return base.charAt(0).toUpperCase() + base.slice(1)
-}
-
+ * Small pure helpers for Tonight's Continue Watching captions and the card
+ * menu. Kept module-scoped (not inside a component) so they're trivially
+ * testable and don't re-allocate per render. */
 
 // "{Xh Ym left}" / "{Ym left}" remaining-time label for a Continue
 // Watching record. Returns '' when we can't compute it honestly (no
@@ -330,406 +355,6 @@ function cwSubtitle(c: ContinueWatchingItem): string {
 }
 
 
-/* ─────────────────────── AUTH VIEW ─────────────────────── */
-// Maps server-side auth-failure messages to a small whitelist of
-// user-safe strings. Whitelist (not blacklist) so that an endpoint
-// which accidentally leaks stack-trace / schema detail won't surface
-// it through this UI.
-function filterAuthError(msg: string): string {
-  const lower = msg.toLowerCase()
-  const knownPatterns: Array<{ match: string; safe: string }> = [
-    { match: 'invalid credentials', safe: 'Invalid username or password.' },
-    { match: 'rate limit', safe: 'Too many attempts — please wait a moment and try again.' },
-    { match: 'rate-limited', safe: 'Too many attempts — please wait a moment and try again.' },
-    { match: 'too many requests', safe: 'Too many attempts — please wait a moment and try again.' },
-    { match: 'invite', safe: 'Invite code required or invalid.' },
-    { match: 'already exists', safe: 'That username or email is already in use.' },
-    { match: 'username', safe: 'Username is invalid or unavailable.' },
-    { match: 'email', safe: 'Email address is invalid or unavailable.' },
-    { match: 'password', safe: 'Password does not meet requirements.' },
-    { match: 'unauthorized', safe: 'Authentication required.' },
-    { match: 'forbidden', safe: 'You do not have permission to do that.' },
-    { match: 'network', safe: 'Network error — check your connection and try again.' },
-    { match: 'failed to fetch', safe: 'Network error — check your connection and try again.' },
-  ]
-  for (const p of knownPatterns) {
-    if (lower.includes(p.match)) return p.safe
-  }
-  return 'Login failed. Please try again.'
-}
-
-// AuthView — login + registration. Registration requires an invite
-// code in most deployments; the setup-status probe below relaxes that
-// for a fresh install.
-function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
-  const [isRegister, setIsRegister] = useState(false)
-  const [username, setUsername] = useState('')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [inviteCode, setInviteCode] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  // Phase 5 — setup wizard. On a fresh install (no users in DB),
-  // the first registrant becomes admin and no invite code is
-  // needed. Probe /api/auth/setup-status to detect the state and
-  // skip the invite-code field on the register form.
-  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    void getSetupStatus().then(s => { if (!cancelled) setSetupStatus(s) }).catch(() => { /* non-fatal */ })
-    return () => { cancelled = true }
-  }, [])
-  // Auto-flip to register mode on a fresh install so the first
-  // visitor knows what to do.
-  useEffect(() => {
-    if (setupStatus && !setupStatus.has_users) setIsRegister(true)
-  }, [setupStatus])
-  const inviteRequired = !!(setupStatus?.has_users)
-
-  const handleSubmit = useCallback(async (e?: React.FormEvent) => {
-    if (e) e.preventDefault()
-    setError(null)
-    if (isRegister) {
-      if (!username || !password) {
-        setError('Username and password are required.')
-        return
-      }
-      if (inviteRequired && !inviteCode) {
-        setError('Invite code is required.')
-        return
-      }
-      setSubmitting(true)
-      try {
-        const t = await register({ username, email, password, invite_code: inviteCode })
-        onLogin(t.user)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Register failed')
-      } finally { setSubmitting(false) }
-      return
-    }
-    if (!username || !password) {
-      setError('Username and password are required.')
-      return
-    }
-    setSubmitting(true)
-    try {
-      const user = await apiLogin(username, password)
-      onLogin(user)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Login failed'
-      // Bucket unknown error strings into a generic message; see
-      // filterAuthError above for the whitelist rationale.
-      setError(filterAuthError(msg))
-    } finally {
-      setSubmitting(false)
-    }
-  }, [isRegister, username, email, password, inviteCode, inviteRequired, onLogin])
-
-  return (
-    // Split layout (Aurora Stage Phase 7a): brand block BESIDE the card from lg
-    // up, stacked above it below. Previously the mark + wordmark + tagline sat
-    // in a 420px column above the form, which on a 1440x900 screen put a
-    // 14px logo and three lines of text in the middle of an otherwise empty
-    // page. The starfield and aurora wash are the backdrop the mockup's sign-in
-    // leans on, and a wide split is what lets them read.
-    <div className="min-h-screen flex items-center justify-center aurora-bg p-4 md:p-8">
-      <div className="w-full max-w-[980px] flex flex-col lg:flex-row lg:items-center gap-10 lg:gap-16">
-        {/* Brand block. lg:text-left / text-center so it reads as a heading
-            above the card on narrow screens and as a facing panel on wide. */}
-        <div className="flex-1 min-w-0 text-center lg:text-left">
-          <div className="inline-flex items-center justify-center w-[84px] h-[84px] rounded-[26px] bg-purple-600/20 border border-purple-500/30 mb-5">
-            <svg width="52" height="52" viewBox="0 0 36 36" fill="none">
-              <defs>
-                <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0" stopColor="#A855F7" />
-                  <stop offset="0.5" stopColor="#7C3AED" />
-                  <stop offset="1" stopColor="#22D3EE" />
-                </linearGradient>
-              </defs>
-              <circle cx="18" cy="18" r="16" fill="url(#auroraMarkA)" />
-              <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
-            </svg>
-          </div>
-          {/* Drawn Borealis wordmark. Stays
-              an h1 — the sign-in screen's only heading, and the card's own
-              "Welcome Back" is an h2 under it. The svg's role="img" +
-              aria-label give the h1 its accessible name "Aurora Pro" (the
-              old text version needed a whitespace hack for the same result).
-              Inline svg follows the parent's text-center/lg:text-left. */}
-          <h1 className="leading-none">
-            <AuroraWordmark className="inline-block h-8 lg:h-[46px] w-auto" />
-          </h1>
-          <p className="text-white/60 text-sm lg:text-base mt-3 max-w-[38ch] mx-auto lg:mx-0">
-            Your personal media universe — every film and series you own, on any screen.
-          </p>
-          {/* Invite hint, only when the server actually requires a code. It was
-              previously discoverable only by switching to register mode and
-              finding a fourth input; saying so up front is the difference
-              between "why can't I sign up" and "I need to ask for a code". */}
-          {isRegister && inviteRequired && (
-            <p className="text-purple-200/80 text-xs mt-4 inline-flex items-start gap-2 max-w-[42ch] mx-auto lg:mx-0">
-              <Icon name="key" size={13} className="mt-0.5 shrink-0" />
-              {/* "Signing up with a password needs a code", not a flat "this
-                  server is invite-only". An admin can set
-                  oauth_<provider>_bypass_invite, in which case the tiles forty
-                  pixels below this sentence work without one — and a
-                  categorical claim would send that user away. The backend
-                  exposes those flags on setup-status; reading them to say
-                  precisely which route is open is a follow-up, but the wording
-                  must not assert more than we check. */}
-              <span>Signing up with a password needs an invite code from this server&rsquo;s admin.</span>
-            </p>
-          )}
-        </div>
-
-        {/* Card */}
-        <form onSubmit={handleSubmit} className="glass-panel rounded-2xl p-7 sm:p-8 w-full lg:w-[428px] lg:flex-none">
-          <h2 className="text-white text-xl font-semibold mb-1">
-            {isRegister ? (setupStatus && !setupStatus.has_users ? 'Welcome to Aurora' : 'Create Account') : 'Welcome Back'}
-          </h2>
-          <p className="text-white/60 text-sm mb-6">
-            {isRegister
-              ? (setupStatus && !setupStatus.has_users
-                ? "You're the first user on this server — your account becomes the admin."
-                : 'Sign up to start streaming')
-              : 'Sign in to your media server'}
-          </p>
-
-          <div className="space-y-4">
-            <div>
-              <label htmlFor="login-username" className="block text-white/60 text-sm mb-2">Username</label>
-              <input
-                id="login-username"
-                type="text"
-                placeholder="Enter username"
-                className="w-full"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="username"
-                disabled={submitting}
-              />
-            </div>
-            {isRegister && (
-              <div>
-                <label htmlFor="login-email" className="block text-white/60 text-sm mb-2">Email</label>
-                <input
-                  id="login-email"
-                  type="email"
-                  placeholder="you@example.com"
-                  className="w-full"
-                  value={email}
-                  onChange={e => setEmail(e.target.value)}
-                  autoComplete="email"
-                  disabled={submitting}
-                />
-              </div>
-            )}
-            <div>
-              <label htmlFor="login-password" className="block text-white/60 text-sm mb-2">Password</label>
-              <input
-                id="login-password"
-                type="password"
-                placeholder="Enter password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full"
-                autoComplete={isRegister ? 'new-password' : 'current-password'}
-                disabled={submitting}
-              />
-            </div>
-            {isRegister && inviteRequired && (
-              <div>
-                <label htmlFor="login-invite" className="block text-white/60 text-sm mb-2">Invite Code</label>
-                <input
-                  id="login-invite"
-                  type="text"
-                  placeholder="From your server admin"
-                  className="w-full"
-                  value={inviteCode}
-                  onChange={e => setInviteCode(e.target.value.toUpperCase())}
-                  disabled={submitting}
-                />
-              </div>
-            )}
-          </div>
-
-          {error && (
-            <div role="alert" className="mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
-              {error}
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full mt-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-ui duration-200 motion-safe:hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed motion-safe:disabled:hover:scale-100 flex items-center justify-center gap-2"
-          >
-            {submitting ? (
-              <>
-                <Spinner className="size-4" />
-                {isRegister ? 'Creating account…' : 'Signing in…'}
-              </>
-            ) : isRegister ? 'Create Account' : 'Sign In'}
-          </button>
-
-          {/* OAuth sign-in row. The ?invite= query forwards an entered
-              invite code through the round-trip so register-mode
-              sign-ins claim it atomically server-side. Each button
-              renders only when its provider is enabled in setupStatus. */}
-          {/* Derived from the same list the tiles map, so the guard and the
-              grid can never disagree about whether any provider is enabled.
-              This was a five-term `||` that had to be edited in lockstep with
-              five separate render blocks. */}
-          {OAUTH_SIGN_IN_PROVIDERS.some(p => setupStatus?.[p.flag]) && (
-            <>
-              <div className="flex items-center gap-3 my-6">
-                <div className="flex-1 h-px bg-white/[0.06]" />
-                <span className="text-white/50 text-xs uppercase tracking-wider">or</span>
-                <div className="flex-1 h-px bg-white/[0.06]" />
-              </div>
-              {/* 2-up tile grid, from a list rather than five near-identical
-                  hand-written blocks. With all five providers enabled the
-                  stacked version was five full-width 44px rows plus the form
-                  above them — the card ran past the fold on a 900px screen.
-                  Two columns halves that.
-
-                  Odd counts: the last tile spans both columns so the grid never
-                  ends with a half-width orphan. That is the common case, since
-                  most servers enable one or three. */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {OAUTH_SIGN_IN_PROVIDERS
-                  .filter(p => setupStatus?.[p.flag])
-                  .map((p, i, list) => (
-                    <OAuthSignInButton
-                      key={p.provider}
-                      provider={p.provider}
-                      label={p.label}
-                      // Visible label is short so a 178px tile fits it; the
-                      // accessible name keeps the verb. Without this a tile
-                      // announced as "X, link" — which everywhere else on the
-                      // web is a close button — and the "or" divider that
-                      // supplies context does not travel to a links list.
-                      ariaLabel={`Continue with ${p.label}`}
-                      inviteCode={isRegister ? inviteCode : ''}
-                      disabled={submitting}
-                      className={list.length % 2 === 1 && i === list.length - 1 ? 'sm:col-span-2' : undefined}
-                    />
-                  ))}
-              </div>
-            </>
-          )}
-
-          <div className="mt-4 text-center">
-            <button
-              type="button"
-              onClick={() => { setIsRegister(!isRegister); setError(null) }}
-              className="text-purple-400 hover:text-purple-300 text-sm transition-colors"
-            >
-              {isRegister ? 'Already have an account? Sign In' : "Don't have an account? Register"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  )
-}
-
-// Phase B — OAuth sign-in button. Per-provider brand icon + colors.
-// Renders as an <a> rather than a button + window.location because
-// the browser handles the cross-site redirect natively (no JS state
-// to preserve at this point; the round-trip's success page sets
-// localStorage tokens before re-entering the SPA).
-function OAuthSignInButton({ provider, label, ariaLabel, inviteCode, disabled, className }: {
-  provider: OAuthProvider
-  label: string
-  // Full-sentence accessible name; the visible `label` stays short.
-  ariaLabel?: string
-  inviteCode: string
-  disabled: boolean
-  // Grid-placement class from the caller (the odd-count tile spans both
-  // columns). Placement belongs to the grid, not to the button.
-  className?: string
-}) {
-  // Build the start URL. inviteCode is forwarded as ?invite=CODE so
-  // the server can atomically claim it pre-flight (see
-  // oauth_handlers.go Start handler).
-  const params = new URLSearchParams()
-  if (inviteCode.trim()) params.set('invite', inviteCode.trim())
-  const qs = params.toString()
-  const href = `/api/auth/oauth/${provider}/start${qs ? '?' + qs : ''}`
-
-  // Per-provider visual treatment. Discord blurple, Twitch purple,
-  // Google neutral-with-color-mark. Each button keeps the same
-  // dimensions so the row reads as a uniform stack.
-  const config = {
-    google: {
-      bg: 'bg-white hover:bg-white/95 text-gray-800',
-      icon: (
-        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
-          <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" />
-          <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z" />
-          <path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" />
-          <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" />
-        </svg>
-      ),
-    },
-    discord: {
-      bg: 'bg-[#5865F2] hover:bg-[#4752C4] text-white',
-      icon: (
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z" />
-        </svg>
-      ),
-    },
-    twitch: {
-      bg: 'bg-[#9146FF] hover:bg-[#7c2fff] text-white',
-      icon: (
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714Z" />
-        </svg>
-      ),
-    },
-    facebook: {
-      bg: 'bg-[#1877F2] hover:bg-[#1665D8] text-white',
-      icon: (
-        // Official Facebook "f" mark.
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
-        </svg>
-      ),
-    },
-    twitter: {
-      // X's brand is solid black; we add a subtle lift on hover.
-      bg: 'bg-black hover:bg-zinc-800 text-white border border-white/10',
-      icon: (
-        // The X mark — official post-rebrand glyph.
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
-        </svg>
-      ),
-    },
-  }[provider]
-
-  return (
-    <a
-      href={disabled ? undefined : href}
-      aria-label={ariaLabel}
-      // aria-disabled rather than only dropping href: without it the element
-      // loses its `link` role entirely while submitting, so the tiles vanish
-      // from the accessibility tree instead of announcing as unavailable.
-      aria-disabled={disabled || undefined}
-      onClick={(e) => {
-        if (disabled) e.preventDefault()
-        else rememberDevicePairing(window.location.pathname, window.location.search)
-      }}
-      className={`w-full flex items-center justify-center gap-2.5 py-2.5 px-3 rounded-xl font-medium text-sm transition-ui duration-200 motion-safe:hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''} ${className ?? ''}`}
-    >
-      {config.icon}
-      {label}
-    </a>
-  )
-}
-
 // Views that render their own edge-to-edge hero and therefore opt out of
 // the .stage-page gutter, padding their inner sections with .stage-gutter.
 // Anything not listed here gets the standard page pad from App's wrapper.
@@ -739,6 +364,8 @@ const FULL_BLEED_VIEWS = new Set(['home', 'movies', 'shows', 'detail'])
 // (profileSwitchPending), module-level so it is the same array every time.
 const NO_MEDIA: Media[] = []
 const NO_CONTINUE: ContinueWatchingItem[] = []
+const NO_RECENT: string[] = []
+const NO_TOASTS: Toast[] = []
 
 /* ─────────────────────── HOME VIEW ─────────────────────── */
 // HomeView. Rails are cached at App level so navigating away-and-back
@@ -754,7 +381,12 @@ interface HomeViewProps {
     title: string
     items: Media[]
     aspect: 'poster' | 'landscape'
-    kind?: 'continue-watching'
+    // Which of Home's own rails this is, when it is one: Continue Watching,
+    // or one of the three built from the catalog. The recommender's rails
+    // have none.
+    kind?: 'continue-watching' | 'recent' | 'top-movies' | 'top-shows'
+    // Larger cards (the calmer Tonight of a profile with a content limit).
+    size?: 'default' | 'large'
     // QA 2026-05-25 — when present, MediaRail renders a clickable
     // "See All" affordance that routes here. Built-in rails wire it
     // ("Top Rated Movies" → /movies + sort=rating); curated/AI rails
@@ -763,15 +395,14 @@ interface HomeViewProps {
     seeAllTarget?: { view: 'movies' | 'shows'; sortBy?: 'rating' | 'recent' | 'title' | 'year' }
     // 2026-06-05 (Home redesign C/D) — optional presentation hints.
     //  • subtitle    — one-line "why it's here" under the rail title.
-    //  • aiPick      — show the "✨ AI PICK" chip (recommender rails).
-    //  • showBadges  — render 4K/HDR quality chips on the cards.
+    //  • aiPick      — the recommender built this rail: its header carries
+    //    the "Picked by Aurora" attribution, once, with the subtitle after it.
     //  • cardSubtitles — per-card subtitle override keyed by media id
     //    (Continue Watching uses it for "S2E4 · 23m left"); derived in
     //    the Home render where the source ContinueWatchingItem is in
     //    scope, since Media alone can't reconstruct the remaining time.
     subtitle?: string
     aiPick?: boolean
-    showBadges?: boolean
     cardSubtitles?: Record<number, string>
   }[]
   // App-level navigation callback so HomeView can request a route
@@ -780,7 +411,6 @@ interface HomeViewProps {
   // simply won't appear in that case).
   onNavigate?: (view: string, opts?: { sortBy?: 'rating' | 'recent' | 'title' | 'year' }) => void
   loading?: boolean
-  convoLoading?: boolean
   error?: string | null
   onRetry?: () => void
   // 2028-05-28 (deep-debug Bug C) — `continueItems` and `onPlayContinue`
@@ -790,21 +420,33 @@ interface HomeViewProps {
   // for the interceptor to attach to, the props are unreachable. Resume
   // now happens via card-click → detail view → Play; tracked as a separate
   // follow-up.
-  onCardContext?: (e: React.MouseEvent, m: Media) => void
-  // Phase 5.3 — hero reason + refresh + pause hooks.
+  onCardContext: (e: React.MouseEvent, m: Media) => void
+  // The hero (HeroSection). What it is: the title to resume, one of
+  // Aurora's picks, or the catalog's fallback; why Aurora picked it; the
+  // slate its filmstrip shows and which entry is up; and its place in the
+  // recommender's slate for the exposure report (none for a title Aurora
+  // did not pick).
+  heroKind?: 'resume' | 'pick' | 'catalog'
   heroReason?: string
-  // True when homeHero is the rails-derived catalog fallback (not a pool pick).
-  heroIsCatalogFallback?: boolean
-  // 2026-06-05 (Home net-new #2) — real recommender "match %" for the
-  // current hero pick. Undefined / 0 (cold-start) → HeroSection falls back
-  // to its derived rating-based estimate.
-  heroMatch?: number
-  heroScore?: number
+  heroSlate?: SlateEntry[]
+  heroSlateIndex?: number
+  onHeroPick?: (index: number) => void
   heroSlateToken?: string
   heroPosition?: number
   activeProfileId?: number
+  // Play one of the picks at random.
   onSurprise?: () => void
+  // The rotation: held while the pointer or focus is in the hero
+  // (onHeroPauseChange), and paused by the viewer (heroRotationPaused, with
+  // its toggle, which is absent when nothing rotates).
   onHeroPauseChange?: (paused: boolean) => void
+  heroRotationPaused?: boolean
+  onToggleHeroRotation?: () => void
+  // Start a party on the hero's title; absent for a session not offered
+  // Together.
+  onHeroWatchTogether?: (m: Media) => void
+  // The calmer presentation for a profile with a content limit.
+  kids?: boolean
   // Cold-start hint info — passed through from the /api/me/hero response.
   // null = unknown (initial load); set when the response lands.
   heroPersonalization?: HeroPersonalization | null
@@ -829,528 +471,137 @@ interface HomeViewProps {
     item: ContinueWatchingItem
     onPlay: (c: ContinueWatchingItem) => void
   }
-  // 2026-05-27 — Continue Watching one-click resume affordance.
-  // When set, the home Continue Watching rail's cards each get a
-  // Resume pill on hover; click on the pill calls onPlay with the
-  // matched record, bypassing detail. Card click still opens detail
-  // (preserves the "click → detail → act" pattern for non-CW
-  // interactions like "I want to see the description"). Discriminated
-  // bundle so partial wiring is a type error. Wired ONLY on the
-  // home CW rail — other rails (Top Rated, Discover, etc.) don't
-  // sprout resume pills even if the user has progress on a title
-  // they happen to contain.
-  cwResume?: {
-    items: ContinueWatchingItem[]
-    onPlay: (c: ContinueWatchingItem) => void
-  }
-  // 2026-06-05 (Home redesign A/F) — greeting band + watch-together
-  // inputs.
-  //  • user        — logged-in account; first name is derived from
-  //    `username` (the only name field the User record carries).
-  //  • pickCount   — number of personalized/hero picks available (real),
-  //    powers the "{N} worth your time" line.
-  //  • libraryTotal — real movies+shows total IF reachable in App state
-  //    (null when the browse tabs haven't loaded their counts yet); the
-  //    "picked from X titles" clause is OMITTED when null rather than
-  //    fabricated.
-  //  • onOpenParty — opens the existing Watch Party hub (same handler the
-  //    top bar uses); wired to the "Start a watch party" CTA.
+  // Play from a card's on-poster button, on every rail. The handler resumes
+  // when the viewer has a position in the title, as the card's menu does
+  // (its first row is Resume then), so the two controls on one card agree;
+  // resumableIds says which cards that is, so their button reads "Resume".
+  onCardPlay?: (m: Media) => void
+  resumableIds?: Set<number>
+  // The page's closing line, and who is signed in.
+  //  • user        — the signed-in account (the live strip leaves out the
+  //    viewer's own party).
+  //  • pickCount   — how many titles Aurora picked (hero picks and its
+  //    rails, deduped): "{N} titles worth your time".
+  //  • libraryTotal — how many titles this profile may see, or null when
+  //    no count has loaded; the clause naming it is OMITTED when null rather
+  //    than made up.
   user?: ApiUser
   pickCount?: number
   libraryTotal?: number | null
-  onOpenParty?: () => void
-  // onJoinParty — join a specific active party by code (Watch-together card);
-  // same path as PartyHubModal's onJoin (join by code, open the party panel).
-  onJoinParty?: (code: string) => Promise<{ ok: boolean; error?: string }>
-  // onSurprise — "Surprise me": immediately play a RANDOM recommended pick
-  //   (excludes the one on screen). onNextPick — "Not tonight": advance to the
-  //   next pick already in the loaded pool (instant, no refetch). Distinct.
-  onNextPick?: () => void
-  // Phase D — conversational discovery: fired on Enter in the home "vibe" box.
-  onConversationalSearch?: (query: string) => void
+  // The live strip above the first rail ("Happening now"): a running party
+  // and an unanswered invitation.
+  //  • parties — the account's active watch parties from App's one poll, or
+  //    undefined for a session that is not offered Together; the strip and
+  //    anything else about parties is then left out.
+  //  • invites — the caller's open invitations, null before they have loaded
+  //    and on the commit that switches profile.
+  //  • inPartyCode — the party this session is in; its row opens it.
+  //  • onJoinParty — join a party by code, or open the one already joined.
+  parties?: ActiveParty[]
+  invites?: MyPartyInvite[] | null
+  inPartyCode?: string | null
+  onJoinParty?: (code: string) => void
+  onInviteRsvp?: (inviteId: number, rsvp: 'going' | 'maybe') => void
   // Stage 3 — manual "Refresh picks": force a server rebuild of the LLM
   // Discover rails. recsRefreshing disables the control while in flight.
   onRefreshRecs?: () => void
   recsRefreshing?: boolean
+  // The children's closing line: the profile's limit as a label ("PG"), and
+  // the way to change who is watching.
+  limitLabel?: string
+  onSwitchProfile?: () => void
 }
 // Home's catalog rails: Recently Added, Top Rated Movies, Top Rated Shows.
 // Built in one place for the full Home load and the live catalog refresh.
-// 2026-06-05 (Home redesign D) — every Home rail card opts into quality
-// badges (showBadges) so 4K/HDR chips show. Core rails get neither the "AI
-// PICK" chip nor a "why it's here" subtitle — only the recommender-driven
-// rails do (spliced in by recomposeHomeRails).
+// Core rails get neither the AI attribution nor a "why it's here" subtitle:
+// only the recommender-driven rails do (spliced in by recomposeHomeRails).
 function coreHomeRails(recent: Media[], movies: Media[], shows: Media[]): NonNullable<HomeViewProps['rails']> {
   return [
     // Recently Added blends movies + shows so the See All can't honestly map
     // to a single browse page — leave the affordance off rather than pick one
     // arbitrarily.
-    { title: 'Recently Added', items: recent, aspect: 'poster' as const, showBadges: true },
+    { title: 'Recently Added', items: recent, aspect: 'poster' as const, kind: 'recent' as const },
     // Top Rated rails map cleanly to /movies and /shows with sortBy=rating,
     // so the See All button takes the user to the full Top Rated catalog.
-    { title: 'Top Rated Movies', items: movies, aspect: 'poster' as const, showBadges: true,
+    { title: 'Top Rated Movies', items: movies, aspect: 'poster' as const, kind: 'top-movies' as const,
       seeAllTarget: { view: 'movies' as const, sortBy: 'rating' as const } },
-    { title: 'Top Rated Shows', items: shows, aspect: 'poster' as const, showBadges: true,
+    { title: 'Top Rated Shows', items: shows, aspect: 'poster' as const, kind: 'top-shows' as const,
       seeAllTarget: { view: 'shows' as const, sortBy: 'rating' as const } },
   ]
 }
 
-function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, heroSlateToken, heroPosition, activeProfileId, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
+function HomeView({
+  onSelect, onPlay, hero, heroLoading, rails, loading, error, onRetry, onCardContext,
+  heroKind, heroReason, heroSlate, heroSlateIndex, onHeroPick, heroSlateToken, heroPosition, activeProfileId,
+  onSurprise, onHeroPauseChange, heroRotationPaused, onToggleHeroRotation, onHeroWatchTogether, kids = false,
+  heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, onCardPlay, resumableIds, user,
+  pickCount, libraryTotal, parties, invites, inPartyCode, onJoinParty, onInviteRsvp,
+  onRefreshRecs, recsRefreshing, onSwitchProfile, limitLabel,
+}: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
   const effectiveRails = rails ?? []
-  // Phase D — local text for the conversational "describe a vibe" box.
-  const [convoText, setConvoText] = useState('')
-  // Deep-debug H3 — keep the latest cwResume bundle in a ref so the
-  // Resume pill click handler resolves the freshest ContinueWatchingItem
-  // at click-time (not render-time). Without this, a mid-hover
-  // continueItems refresh would still dispatch the stale match
-  // captured when the rail mapped.
-  const cwResumeRef = useRef(cwResume)
-  useEffect(() => { cwResumeRef.current = cwResume }, [cwResume])
-
-  // 2026-06-05 (Home redesign A/E) — derived greeting bits + top genre.
-  // Time-of-day from the client clock; first name from the username.
-  // pickCount drives "{N} worth your time"; libraryTotal (real, or null)
-  // gates the "picked from X titles" clause.
-  const greetWord = greetingTimeOfDay()
-  const dayPart = greetingDayPart()
-  const weekday = new Date().toLocaleDateString(undefined, { weekday: 'long' })
-  const firstName = greetingFirstName(user?.username)
   const nPicks = pickCount ?? 0
-  // Top genre is now derived server-side (stats.top_genre, from the user's
-  // completed watch history) and rendered inside YourWeekBand — see
-  // Home net-new #4. The former client-side "most common genre across the
-  // loaded rails" estimate was removed as dead once the real signal landed.
+  // The page's wash: the hero artwork's ambient colour (lib/ambient), kept
+  // with the picture it was sampled from and laid down only while that
+  // picture is the hero's, so one title's colour is never behind another.
+  const [ambient, setAmbient] = useState<{ src: string; color: string | null } | null>(null)
+  const handleAmbient = useCallback((color: string | null, src: string) => {
+    setAmbient(prev => (prev && prev.src === src && prev.color === color ? prev : { src, color }))
+  }, [])
+  const heroArt = hero ? (hero.backdrop || hero.poster || '') : ''
+  const wash = ambient && ambient.src === heroArt ? ambient.color : null
 
   return (
-    <div className="animate-fade-in">
-      {/* 2026-06-05 (Home redesign A) — Greeting band above the hero.
-          Time-aware greeting + a derived subline. The "{N} worth your
-          time" count is real (personalized/hero picks); the "picked from
-          X titles" clause only renders when a real library total is
-          reachable (libraryTotal != null) — omitted, never faked,
-          otherwise. The "✨ Surprise me" button reuses the hero refresh. */}
-      {/* items-center, not items-end. Bottom-aligning the button group put it
-          level with the thin subline, which measures 12px below the greeting
-          block's optical centre — against a tall, heavy h1 that reads as the
-          buttons sagging. Centring lands them within 0.1px of the block's
-          middle.
-          
-          flex-wrap is load-bearing, not tidiness. The button group is shrink-0
-          and ~300px wide, so below ~430px it squeezes the greeting column until
-          an unbreakable username overflows its box — and centring raised that
-          overflow from the dim 14px subline onto the 32px extrabold headline.
-          Measured on painted text ink (element rects never show it, because
-          flex items don't overlap): collisions at 430/414/390/360/320px with
-          nowrap, none with. That state is Home's FIRST PAINT on every visit —
-          nPicks is 0 and libraryTotal null until the fetches land — so it is
-          the common case, not an edge. Wrapping drops the buttons to their own
-          line instead. */}
-      <div className="stage-gutter flex flex-wrap items-center justify-between gap-5 pt-10 mb-1">
-        <div className="min-w-0">
-          <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight">
-            Good {greetWord},{' '}
-            <span className="bg-gradient-to-r from-purple-300 to-purple-500 bg-clip-text text-transparent">{firstName}</span>
-          </h1>
-          <div className="text-white/60 text-sm mt-1.5 flex items-center gap-2 flex-wrap">
-            <span>{weekday} {dayPart}</span>
-            {nPicks > 0 && (
-              <>
-                <span className="w-[3px] h-[3px] rounded-full bg-white/40" />
-                <span>
-                  <b className="text-white font-semibold">{nPicks}</b> titles worth your time
-                  {libraryTotal != null && libraryTotal > 0 && (
-                    <> out of the <b className="text-white font-semibold">{libraryTotal.toLocaleString()}</b> titles in your library</>
-                  )}
-                </span>
-              </>
-            )}
-            {/* TODO(redesign-net-new): wire a real library-count if a lightweight endpoint exists. */}
-            {nPicks === 0 && libraryTotal != null && libraryTotal > 0 && (
-              <>
-                <span className="w-[3px] h-[3px] rounded-full bg-white/40" />
-                <span>picked from <b className="text-white font-semibold">{libraryTotal.toLocaleString()}</b> titles in your library</span>
-              </>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {onRefreshRecs && (
-            <button
-              onClick={onRefreshRecs}
-              disabled={recsRefreshing}
-              title="Refresh picks — rebuild your AI-curated Discover rails"
-              aria-label="Refresh picks — rebuild your AI-curated Discover rails"
-              // Icon-only below sm (Stage refresh, H3): the label goes
-              // sr-only and the aria-label/title still name it; the spinning
-              // glyph still shows a refresh in flight.
-              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/15 text-white/70 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed max-sm:h-10 max-sm:w-10 max-sm:p-0"
-            >
-              <Icon name="refresh" size={15} className={recsRefreshing ? 'animate-spin' : undefined} />
-              <span className="max-sm:sr-only">{recsRefreshing ? 'Refreshing…' : 'Refresh picks'}</span>
-            </button>
-          )}
-          {onSurprise && (
-            <button
-              onClick={onSurprise}
-              title="Surprise me — play a random recommended title"
-              aria-label="Surprise me — play a random recommended title"
-              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/[0.12] hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors max-sm:h-10 max-sm:w-10 max-sm:p-0"
-            >
-              <Icon name="sparkle" size={15} /> <span className="max-sm:sr-only">Surprise me</span>
-            </button>
-          )}
-        </div>
-      </div>
+    <div className="animate-fade-in relative" style={{ '--ambient': wash ?? 'transparent' } as React.CSSProperties}>
+      {/* Behind everything: the artwork's colour, washing down from where
+          the art sits. The hero is opaque, so what shows of it is the fall
+          below the hero, behind the first rails. */}
+      <div className="tonight-wash" aria-hidden="true" />
+      {/* The page's heading. The hero's title is a title, not the page's
+          name, and with no hero there would be no heading at all. */}
+      <h1 className="sr-only">Tonight</h1>
       <HeroSection
         hero={hero}
         loading={heroLoading}
+        kind={heroKind}
         onPlay={onPlay}
         onInfo={onSelect}
         reason={heroReason}
-        isCatalogFallback={heroIsCatalogFallback}
-        match={heroMatch}
-        score={heroScore}
+        slate={heroSlate}
+        slateIndex={heroSlateIndex}
+        onPick={onHeroPick}
         slateToken={heroSlateToken}
         slatePosition={heroPosition}
         profileId={activeProfileId}
-        onNextPick={onNextPick}
         onPauseChange={onHeroPauseChange}
+        rotationPaused={heroRotationPaused}
+        onToggleRotation={onToggleHeroRotation}
+        onRefreshPicks={onRefreshRecs}
+        picksRefreshing={recsRefreshing}
+        onSurprise={onSurprise}
+        onWatchTogether={onHeroWatchTogether}
         personalization={heroPersonalization ?? null}
         resume={heroResume}
         libraryIds={libraryIds}
         onToggleLib={onToggleLib}
+        kids={kids}
+        onAmbient={handleAmbient}
       />
-      {/* Phase D — conversational discovery: a deliberate "now describe your own
-          vibe" moment between the one curated pick and the browsable rails.
-          Fires the semantic search on Enter (not per-keystroke) to bound LLM cost.
-
-          Phase 4 pulled it UP into the hero's foot (the mockup's -26px, shipped as
-          `-mt-5`) so it read as one composition with the hero rather than a separate
-          widget floating above the rails. Phase 10b UNDID that — see the spacing
-          note below.
-
-          `relative z-20` is KEPT, and not for the reason this comment gave for three
-          phases. The old claim was that it lifts the bar above the hero's scrim.
-          That is false and always was: `.stage-hero-scrim` is `position:absolute;
-          inset:0` INSIDE the hero <section>, which is `overflow-hidden`, so it is
-          clipped to the hero and cannot paint under the bar at all — and it carries
-          no z-index, so tree order alone already put the bar in front. Phase 10b
-          then made the false reason actively dangerous by adding "the bar no longer
-          overlaps the hero" beside it: a reader who checks the stated premise finds
-          it irrelevant and deletes the class.
-
-          What `z-20` actually does is make this wrapper a STACKING CONTEXT, which is
-          the only thing containing `.convo-search::before` — the breathing halo,
-          which is `z-index: -1`. `.convo-search` itself is `position: relative` with
-          `z-index: auto` and no transform/filter/opacity/isolation, so it is not a
-          stacking context and cannot contain it. Remove `z-20` and the halo
-          re-parents to the nearest ancestor that is one, and negative-z descendants
-          paint BEFORE in-flow block backgrounds: the halo goes behind the app
-          shell's opaque `bg-[#050505]` and disappears. Worse under
-          `prefers-reduced-motion`, where `.animate-fade-in { animation: none
-          !important }` stops the HomeView root being a stacking context at all, so
-          the halo lands behind the root div's `.aurora-bg` — invisible, for exactly
-          the users least likely to report a missing animation.
-
-          How far the halo actually reaches, since a draft of this comment asserted
-          16px and that number is wrong by ~35: `.convo-search::before` is
-          `inset: -3px` with `filter: blur(16px)`, and CSS blur takes the Gaussian
-          STANDARD DEVIATION, whose visible extent is ~3σ. So ~3 + 48 = ~51px in
-          every direction, not 16px upward. Which means the bar's decoration still
-          reaches hero-bottom − 43, i.e. ~7px past the CTA row's content bottom, and
-          "at `mt-2` none of it sits on the artwork" is true of the border box and
-          false of the halo. Not a regression — under `-mt-5` the halo reached
-          hero-bottom − 71, a full 35px past the buttons, so this strictly reduces
-          the intrusion — but 51 is the number a future edit has to reason from.
-
-          FULL WIDTH, gutter to gutter — third and final answer on this bar, and the
-          first two were wrong for the same reason: I kept measuring it against the
-          hero's TEXT COLUMN and never against the thing it actually sits next to.
-
-          Look at what is directly beneath it: the Continue Watching rail panel, and
-          every rail after it, run the full gutter width, and the bar's bottom edge
-          sits exactly 32px above that panel's top edge (mb-8; 51px to the panel's
-          header CONTENT, which is what an earlier version of this comment reported
-          as "~50px above the panel" — the right number for the wrong edge).
-          Measured: the bar and the first rail panel now share both edges at every
-          width from 414 to 1920 — 48..1392 at 1440 — and so does every other
-          page-level child below them. On the previous revision the bar at 48..720
-          was the only misaligned element on the page. A bar ending mid-viewport
-          against a panel ending at the gutter reads as a stair-step, and agreeing
-          with a hero column 400px higher up does not fix that: the nearest
-          neighbour wins.
-
-          It also settles what this element IS. Capped, it read as the last item in
-          the hero's text stack; full width it reads as the first PAGE-level band,
-          which is what it behaves like — it replaces the rails below with results.
-
-          The three objections I raised to full width earlier, re-examined against
-          the rendered page instead of in the abstract:
-            - "it would slice the artwork's focal point" — MOOT as of Phase 10b, and
-              now by geometry rather than by argument: at `mt-2` the bar's box does
-              not touch the hero at all, so there is no artwork under it to slice.
-              (This paragraph was written in the present tense against the `-mt-5`
-              revision — "the composited scrim alpha is 0.973 at the bar's top edge
-              against 0.761 mid-hero … only the bar's top 20px of 48 overlap the
-              hero" — and Phase 10b falsified every verb in it while leaving it
-              standing, in the same commit whose other half deletes an eighteen-line
-              block for exactly that. Recorded rather than quietly rewritten: this is
-              the third time this comment has kept a paragraph the code had moved out
-              from under. The 0.761 figure was also never reproducible from the
-              gradient stops under any reading of "mid-hero" — it was presented as a
-              pixel sample, so it was never statically checkable either.)
-            - "it strands the ↵ Search chip from the caret" — a pinned submit
-              affordance on a full-width search field is what every search bar does,
-              and this field takes short phrases, so the caret never travels.
-            - "a 62-character placeholder looks lost" — that was an argument about
-              the placeholder, and the placeholder was shortened.
-
-          For the record, since the arithmetic is still worth knowing and was
-          independently re-verified in a live build: when a max-width sat on THIS
-          element, `.stage-gutter`'s 48px padding came out of it under border-box, so
-          `max-w-3xl` (768) resolved to content 48..720 — exactly the hero text
-          column — while `max-w-2xl` (672) gave 48..624, the hero DESCRIPTION's edge.
-          That asymmetry was the Phase 8 correction. It no longer applies to this
-          element, which now has `max-width: none`; the paragraphs above used to
-          state it in the present tense alongside the past-tense version, so the same
-          fact was asserted twice, once about code that no longer exists. (That
-          correction described a deletion it did not actually perform: the
-          present-tense copy — an eighteen-line block opening "This wrapper carries
-          BOTH `.stage-gutter` … AND the max-width" — was still sitting right here,
-          asserting a max-width this element has not had since the previous commit.
-          Deleted now.)
-
-          The genuine misalignment on this row was the LOADING SHIMMER below,
-          which was `max-w-3xl` inside a `.stage-gutter` PARENT — so no padding
-          of its own, 48..816, a real 96px overhang past the bar it stands in
-          for. That is fixed there, not here.
-
-          An earlier version of this comment said "Centered under the hero".
-          There is no `mx-auto` here and never was — it is gutter-aligned.
-
-          ── Phase 10b: the vertical gap, which is what full width broke ──
-
-          Going full width made the bar look wrong against the hero's CTA row, and
-          the instinct was that the BUTTONS were now misaligned. They are not. The
-          hero's bottom row is `absolute bottom-0 left-0 right-0 …
-          px-[var(--page-gutter)] max-md:px-[18px]` (HeroSection.tsx:322) and this
-          wrapper is `.stage-gutter`. At md+ both resolve to `--page-gutter`, 48px,
-          and Play's left edge and this bar's left edge are both at 48 while "Not
-          tonight"'s right edge and this bar's right edge are both at viewport−48.
-          The button row and the bar span EXACTLY the same measure. Nothing overhangs
-          anything.
-
-          It IS one source now, as of Phase 11.4 — the hero footer row carries
-          `.stage-gutter` itself rather than restating its padding.
-
-          The paragraph this replaces is worth keeping in outline, because it is
-          why the change was made. The row used to read
-          `px-[var(--page-gutter)] max-md:px-[18px]`, and it agreed with the rails
-          below 768px only because TWO separate 18px literals happened to match:
-          the hero's `max-md:` utility and `.stage-gutter`'s own
-          `@media not all and (min-width: 768px)` block. Editing either would have
-          broken the alignment silently. (`--page-gutter` is 48px at every width and
-          has no override anywhere, so the token was never doing that work.)
-
-          Recorded because this comment has now had a paragraph invalidated by its
-          own commit FOUR times, and this is the fourth: the version above was left
-          standing by the commit that made it false, still arguing at length that
-          the agreement is "NOT because of a shared token" while that same commit's
-          message says "Now structural".
-
-          What was wrong is density plus proximity. The row above is two small
-          clusters with the width of the page between them; the bar below is a
-          continuously filled surface across that same span, so the bar is what
-          makes the void above it legible — the gap was always there, nothing solid
-          had ever sat under it. And at `-mt-5` the two were close enough to read as
-          ONE row, at which point the eye tries to reconcile a four-pill row in which
-          one pill is the width of the viewport.
-
-          The arithmetic, which is plain block layout — no border-box trap this time,
-          the parent is a bare `<div className="animate-fade-in">` with no
-          `space-y-*`, and the hero <section> carries no bottom margin to collapse
-          with:
-
-            button bottoms       = hero bottom − 36px   (the row's `pb-9`)
-            bar top              = hero bottom + M      (M = this margin-top)
-            gap                  = M + 36
-
-          — which holds only when `hero` is TRUTHY. HeroSection returns early on
-          `!heroProp` and that branch renders a vertically-centred "Welcome to
-          Aurora" placeholder with no bottom row at all: no `pb-9`, and no scrim
-          either. This bar renders unconditionally on `onConversationalSearch`,
-          independent of `hero`, so on a cold Home load and permanently whenever
-          `homeHero` stays null (empty library, failed hero fetch) the real figures
-          are 8px above and 32px below. That is still an improvement on `-mt-5`,
-          which had the bar OVERLAPPING the placeholder — and the placeholder's
-          content is centred, so there is nothing at its bottom edge to crowd — but
-          the formula above is not unconditional and was written as if it were.
-          (Stage refresh, L2: while a pick is still loading that branch is a
-          hero-shaped skeleton whose footer carries the same `pb-9`, so the
-          formula holds there too — 44px above its caption and button bars. The
-          settled no-pick state is still the centred card described above.)
-
-          The px figures are also rem-derived: `pb-9`, `mt-2` and `mb-8` are all
-          rem, `--page-gutter` is a px literal. At a 24px root the gap is 66 and the
-          margin below is 48 while the gutter stays 48. The design argument rests on
-          the RATIO, which survives because all three verticals scale together; the
-          absolute numbers do not, and this file has been burned by exactly that
-          before — see the token comment in index.css about the greeting getting
-          SMALLER on gaining room.
-
-          So `-mt-5` gave 16px and `mt-2` gives 44px, against `mb-8`'s 32px below.
-
-          That inequality is the point, but state it precisely, because the obvious
-          phrasing ("the bar is now nearer the rails than the hero") does not
-          survive: 44px above is measured to rendered CONTENT — the buttons — while
-          32px below is measured to a BOX EDGE. Like for like, content to content, it
-          is 44px above against 51px below (the rail panel's 1px border plus its 18px
-          padding-top), which reverses the claim. This same comment scolds an earlier
-          draft for exactly that substitution twelve lines up, and then made it.
-          (Stage refresh, RS: the rail panel is gone — no border, no padding — so
-          the first rail's header now sits at that 32px box edge itself: 44px above
-          against 32px below, content to content, and the plain phrasing holds. The
-          two paragraphs around this one describe the shelf as it was.)
-
-          The defensible version is nearest VISIBLE boundary, and it needs the
-          hero's bottom edge to be invisible — see the next paragraph, where it is
-          nearly but not entirely true. On that reading it is 44px to the buttons
-          against 32px to the rail panel's visible top border, and the bar groups
-          with the rails: the correct grouping, since it is the control that REPLACES
-          the rails with results, and full width already made it read as a page-level
-          band rather than the last line of the hero's text stack.
-
-          The cost is the overlap. At `-mt-5` the bar's top 20px of ~49 sat on the
-          artwork; at `mt-2` none of its BORDER BOX does. (~49, not the ~48 an
-          earlier draft said: the unlayered global `input:not([type="range"])` rule
-          at (0,1,1) beats the call site's `border-0` at (0,1,0) and restores a 1px
-          border. The CASCADE HAZARD again, in the one element this file has spent
-          four phases on. It does not change any conclusion here.)
-
-          That is deliberate rather than collateral — the overlap was the mechanism
-          that welded it to the hero. But the reason first given for it being SAFE
-          was wrong, and it is the one thing in this block that was: "Phase 4 made
-          the hero's bottom scrim land on #050505, so there is no visible edge."
-          True of the INSIDE of the hero, and it is not what the bar pulled away
-          from. The app root is `bg-[#050505] aurora-bg`, and `.aurora-bg` composites
-          three purple radials at α 0.05–0.08 OVER that base; the hero paints its own
-          opaque #050505 on top of them. So the hero's bottom edge is a step from
-          flat #050505 to #050505-plus-tint — computed at roughly 6–10 sRGB levels,
-          full viewport width, with no ramp across it because the hero's fill is
-          opaque.
-
-          That step is pre-existing. What the negative margin was doing, beyond
-          aesthetics, is straddling it: the bar's own fill attenuated it from x=48 to
-          x=V−48, leaving it bare only in the two gutters. At `mt-2` it is bare edge
-          to edge. Small — an OLED-in-a-dark-room band, not a contrast defect, and
-          computed rather than sampled — but it is a real consequence of this change
-          and the original justification asserted the opposite. Left as is rather
-          than chased here: the honest fix is in the hero/page background system, not
-          in a margin, and this element has been broken three times already by
-          fixing it from the wrong reference. Recorded as a follow-up.
-
-          Rejected, and why, so this is not relitigated a fourth time:
-            - Moving "Not tonight" into the Play / My List / More Info cluster. It
-              would close the void, but that control is deliberately quiet —
-              `bg-white/[0.04]`, a 1.19:1 border, documented in HeroSection as
-              tertiary — and seating it beside the primary CTA promotes it to Play's
-              peer, which is the opposite of what it is for.
-            - Re-capping the bar to the hero's text column. That is where this
-              started, twice, and it stair-steps against the Continue Watching panel
-              32px below. See above. */}
-      {onConversationalSearch && (
-        <div className="stage-gutter relative z-20 mt-2 mb-8">
-          <div className="convo-search flex items-center">
-            <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
-            <input
-              value={convoText}
-              onChange={e => setConvoText(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConversationalSearch(convoText) } }}
-              // "Describe a vibe", not "Describe what you're in the mood for…":
-              // two search affordances are visible at once on Home — TopNav's
-              // "Search titles…" (lexical, by name) and this one (semantic, by
-              // description) — and nothing told a user which was which. Leading
-              // with the verb that distinguishes them does. Also shorter — 52
-              // characters against the original 75 — because the example is the
-              // part that teaches what this field accepts, so it is the part that
-              // has to survive truncation.
-              // (An earlier version justified the length with "the field is 672px
-              // rather than 768px". That stopped being true when the bar went full
-              // width, and both figures were wrong anyway — the strings are 52 and
-              // 75, not 50 and 62. The reason to keep it short is the 390px case,
-              // where it truncates regardless; on desktop there is now room to
-              // spare.)
-              // /70, not /40. A reviewer measured the placeholder at 3.18–3.53:1
-              // against the bar's own fill — under the 4.5:1 floor, and it is the
-              // only thing in the field until you type. Pre-existing rather than
-              // introduced here, but this is the element three phases have now been
-              // spent on, and `audit:contrast` cannot see it: that script only walks
-              // HeroSection's surfaces, so nothing in the gate was ever going to
-              // catch it.
-              placeholder={'Describe a vibe — "a cozy mystery, nothing too dark"'}
-              aria-label="Describe a vibe to search by"
-              // `bg-transparent border-0 py-3 pl-1 pr-2 text-sm text-white` used to
-              // be here and NONE of it applied: they are (0,1,0) utilities and the
-              // unlayered global `input:not([type="range"])` is (0,1,1), declared
-              // later. The bar was drawing a 10px-radius box with its own fill and
-              // border inside its gradient border, text 13px right of intent.
-              // Those values now live on `.convo-search input` in index.css at
-              // (0,2,1), which actually wins. Do not re-add them here — two sources
-              // of truth for this box is why it went unnoticed for four phases.
-              className="flex-1 min-w-0 placeholder:text-white/70 outline-none"
-            />
-            {convoText && (
-              <button
-                onClick={() => { setConvoText(''); onConversationalSearch('') }}
-                aria-label="Clear search"
-                className="shrink-0 px-2.5 py-1 rounded-full text-xs font-semibold text-white/55 hover:text-white hover:bg-white/10 transition-colors"
-              >Clear</button>
-            )}
-            {/* Solid Search chip pinned to the right edge — a filled element
-                reads as anchored-right even through the bar's glow halo, where
-                faint floating text did not. Clickable (Enter still works too). */}
-            <button
-              onClick={() => onConversationalSearch(convoText)}
-              aria-label="Search"
-              className="shrink-0 ml-1 mr-2 flex items-center gap-1.5 rounded-lg bg-purple-500/15 hover:bg-purple-500/30 border border-purple-400/25 hover:border-purple-400/45 px-2.5 py-1.5 text-[11px] font-semibold text-purple-100/90 hover:text-white transition-colors"
-            >
-              <kbd className="grid place-items-center h-4 min-w-[1rem] rounded border border-white/15 bg-white/10 text-[10px] leading-none">↵</kbd>
-              <span className="hidden sm:inline">Search</span>
-            </button>
-          </div>
-        </div>
-      )}
-      {/* Everything below the hero + conversational search opts back into
-          the page gutter. HomeView is full-bleed (FULL_BLEED_VIEWS) so the
-          hero can reach the viewport edge; the rest lines up with the
-          hero's text column because both read --page-gutter.
-
-          The wrapper opens HERE, above every status banner — convoLoading
-          included. It was left outside on the first pass, and `max-w-2xl
-          mx-auto` hid that above 672px while going flush to both edges
-          below it. */}
-      <div className="stage-gutter">
-      {convoLoading && (
-        // No cap, matching the bar it stands in for. Any cap here is a layout jump
-        // on every query, which is exactly what this row had when the two disagreed.
-        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8">
-          <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
-          <div className="aurora-pulse-blob w-32 h-32 bg-fuchsia-500/30 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
-          <div className="aurora-pulse-blob w-28 h-28 bg-indigo-500/40 right-10 bottom-0" style={{ animationDelay: '-4s' }} />
-          <div className="relative z-10 flex items-center gap-2 text-purple-200 text-sm font-medium animate-pulse">
-            <Icon name="sparkle" size={14} />
-            Sensing the vibe...
-          </div>
-        </div>
-      )}
+      {/* Describing what you are in the mood for is search's job now: the
+          field in the top bar (and the Search page's own, on a phone) takes
+          a description as well as a title, and Enter runs it. The bar that
+          sat here asked the same question a second time. */}
+      {/* Everything below the hero opts back into the page gutter. HomeView
+          is full-bleed (FULL_BLEED_VIEWS) so the hero can reach the viewport
+          edge; the rest lines up with the hero's text column because both
+          read --page-gutter. The wrapper opens HERE, above every status
+          banner, a step below the hero's edge. */}
+      <div className="stage-gutter pt-5">
       {error && (
-        <div className="mb-6 px-5 py-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center justify-between gap-4">
-          <div>
-            <p className="font-medium">Couldn't load your library</p>
-            <p className="text-red-300/70 text-xs mt-1">{error}</p>
-          </div>
+        <div role="alert" className="mb-6 px-5 py-4 rounded-control bg-surface-raised border border-line text-sm flex items-center justify-between gap-4">
+          <p className="text-ink">{error}</p>
           {onRetry && (
             <button
               onClick={onRetry}
@@ -1360,6 +611,19 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
             </button>
           )}
         </div>
+      )}
+      {/* Happening now: above the first rail, and above its skeleton, so a
+          party that is running is on the first screen. Nothing for a session
+          that is not offered Together (parties is undefined then). */}
+      {parties && onJoinParty && onInviteRsvp && (
+        <TonightLive
+          parties={parties}
+          invites={invites ?? null}
+          currentUserId={user?.id}
+          inPartyCode={inPartyCode}
+          onJoin={onJoinParty}
+          onRsvp={onInviteRsvp}
+        />
       )}
       {loading && !rails && (
         // Rail-shaped skeletons where the rails will land, in the shapes
@@ -1373,46 +637,15 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
           <p className="sr-only" role="status">Loading your library…</p>
           <RailSkeleton aspect="landscape" count={5} />
           <RailSkeleton />
-          <RailSkeleton />
+          {/* The third rail is usually the recommender's, which has a line
+              under its title. */}
+          <RailSkeleton subtitle />
         </div>
       )}
       {effectiveRails.map((rail, i) => {
         if (rail.items.length === 0) return null
         const seeAllHandler = rail.seeAllTarget && onNavigate
           ? () => onNavigate(rail.seeAllTarget!.view, { sortBy: rail.seeAllTarget!.sortBy })
-          : undefined
-        // 2026-05-27 — Resume pill wiring. ONLY the Continue Watching
-        // rail (rail.kind === 'continue-watching') gets the per-card
-        // resume resolver. Other rails leave it undefined so
-        // partial-watch matches on Top Rated / Discover / etc. don't
-        // sprout pills (per design — those rails are discovery-focused,
-        // not action-focused).
-        //
-        // Deep-debug H3 — the click handler resolves the match from
-        // `cwResumeRef.current` at click-time (NOT render-time) so a
-        // mid-hover continueItems refresh (e.g. another device just
-        // watched 2 minutes and the server's position_ms jumped)
-        // doesn't dispatch a stale ContinueWatchingItem. isResumable
-        // also runs at click-time so a record that fell below the
-        // threshold between render and click correctly no-ops.
-        const resolveResume = rail.kind === 'continue-watching' && cwResume
-          ? (m: Media) => {
-              // Render-time check: if there's no resumable record
-              // RIGHT NOW, don't show a pill (saves rendering it
-              // only to have the click no-op).
-              if (!cwResume.items.some(c => c.media_item_id === m.id && isResumable(c))) {
-                return undefined
-              }
-              return () => {
-                // Click-time re-lookup against the latest data.
-                const latest = cwResumeRef.current
-                if (!latest) return
-                const match = latest.items.find(
-                  c => c.media_item_id === m.id && isResumable(c),
-                )
-                if (match) latest.onPlay(match)
-              }
-            }
           : undefined
         // 2026-06-05 (Home redesign C) — per-card subtitle resolver
         // from the rail's precomputed map (only the CW rail supplies
@@ -1428,264 +661,65 @@ function HomeView({ onSelect, onPlay, hero, heroLoading, rails, loading, convoLo
             // First rail's first row sits at the hero fold: fetch it eagerly.
             eagerCount={i === 0 ? 6 : 0}
             onSelect={onSelect}
+            onPlay={onCardPlay ?? onPlay}
+            resumableIds={resumableIds}
             aspect={rail.aspect}
+            size={rail.size}
             onCardContext={onCardContext}
             libraryIds={libraryIds}
             onToggleLib={onToggleLib}
             onSeeAll={seeAllHandler}
-            resolveResume={resolveResume}
             subtitle={rail.subtitle}
             aiPick={rail.aiPick}
-            showBadges={rail.showBadges}
             cardSubtitleFor={cardSubtitleFor}
           />
         )
       })}
-      {/* 2026-06-05 (Home redesign E/F) — "Your week" stat band +
-          "Watch together" card, rendered below the last rail. Both are
-          self-contained components; they only show once the page has
-          rails (so they don't flash above an empty/loading home). */}
+      {/* The page's last line: how much there is, and where the rest of it
+          lives. The counts used to open the page, in a greeting; they are
+          the same two numbers, held to the profile the app acts as. A
+          profile with a content limit is told what it is being shown
+          instead, and how to change who is watching. */}
       {effectiveRails.length > 0 && (
-        <>
-          <YourWeekBand />
-          {/* Keyed by profile: its list is filtered by the acting profile's
-              ceiling, and a switch would otherwise keep the previous
-              profile's parties up until the next 15-second poll. */}
-          <WatchTogetherCard key={`watch-together-${activeProfileId}`} onStartParty={onOpenParty} onJoinParty={onJoinParty} currentUserId={user?.id} />
-        </>
+        <div className="tonight-foot" data-tonight-foot>
+          {kids ? (
+            <>
+              <p>
+                {libraryTotal != null && libraryTotal > 0
+                  ? <>Showing the <b>{libraryTotal.toLocaleString()}</b> titles in your library{limitLabel ? <> rated {limitLabel} and under</> : null}.</>
+                  : <>Showing titles{limitLabel ? <> rated {limitLabel} and under</> : null}.</>}
+              </p>
+              {onSwitchProfile && (
+                <button type="button" className="stage-btn stage-btn-ghost" onClick={onSwitchProfile}>Switch profile</button>
+              )}
+            </>
+          ) : (
+            <>
+              <p>
+                {nPicks > 0 ? (
+                  <>
+                    <b>{nPicks}</b> titles worth your time
+                    {libraryTotal != null && libraryTotal > 0 && (
+                      <> out of the <b>{libraryTotal.toLocaleString()}</b> titles in your library</>
+                    )}
+                    .
+                  </>
+                ) : libraryTotal != null && libraryTotal > 0 ? (
+                  <><b>{libraryTotal.toLocaleString()}</b> titles in your library.</>
+                ) : null}
+              </p>
+              {onNavigate && (
+                <button type="button" className="stage-btn stage-btn-ghost" onClick={() => onNavigate('movies')}>Browse the library</button>
+              )}
+            </>
+          )}
+        </div>
       )}
       <div className="h-16" />
       </div>{/* /stage-gutter */}
     </div>
   )
 }
-
-/* ─────────────────── YOUR WEEK STAT BAND (Home redesign E) ───────────────────
- * 2026-06-05 — A slim glass band below the last rail. Real data from
- * getGamificationStats: Level, per-level XP bar (SAME math as
- * GamificationCard so the two never disagree), day-streak (current +
- * "best {longest}"), and the top genre (stats.top_genre, derived
- * server-side from the user's completed watch history). The weekly
- * watch-hours / titles-finished-this-week stats have no backend yet — they
- * render as honest "—" placeholders and are marked for wiring. Self-fetches
- * like GamificationCard so HomeView doesn't have to own the request. */
-function YourWeekBand() {
-  const [stats, setStats] = useState<GamificationStats | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    const ac = new AbortController()
-    getGamificationStats(ac.signal)
-      .then((s) => { if (!cancelled) setStats(s) })
-      .catch(() => { /* non-fatal — band just stays in its loading shell */ })
-    return () => { cancelled = true; ac.abort() }
-  }, [])
-
-  // Per-level progress — identical formula to GamificationCard (Audit H1):
-  // progress through THIS level's slice, not absolute XP%.
-  const xp = stats?.xp
-  // Weekly "finished" stats (real, from watch_progress.completed_at). null
-  // when loading or on an older server → "—" placeholder. Hours: 1 decimal
-  // under 10h, integer above, for a glanceable number.
-  const wkMin = stats?.minutes_this_week
-  const wkHrs = wkMin == null ? null : wkMin === 0 ? '0' : wkMin >= 600 ? String(Math.round(wkMin / 60)) : (wkMin / 60).toFixed(1)
-  const wkTitles = stats?.titles_this_week
-  const prevTotal = xp?.prev_level_total ?? 0
-  const nextTotal = xp?.next_level_total ?? 0
-  const slice = Math.max(1, nextTotal - prevTotal)
-  const pct = xp ? Math.min(100, Math.max(0, ((xp.xp - prevTotal) / slice) * 100)) : 0
-
-  return (
-    <>
-      <div className="flex items-center gap-3 mt-9 mb-3.5">
-        <Icon name="barChart" size={17} className="text-purple-300" />
-        <h3 className="text-[16.5px] font-semibold">Your week</h3>
-        <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
-      </div>
-      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-purple-500/[0.08] to-white/[0.02] flex flex-col lg:flex-row items-stretch">
-        <div className="absolute -top-16 -right-10 w-[280px] h-[280px] rounded-full bg-purple-500/[0.14] blur-[60px] pointer-events-none" aria-hidden="true" />
-        {/* Lead: level + XP bar (real) */}
-        <div className="relative px-6 py-5 flex flex-col justify-center gap-1.5 lg:min-w-[210px] border-b lg:border-b-0 lg:border-r border-white/[0.08]">
-          <span className="inline-flex items-center gap-2 text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold">
-            <Icon name="zap" size={13} /> Level {xp ? xp.level : '—'}
-          </span>
-          <span className="font-display text-[26px] font-bold leading-tight">{xp ? `${xp.xp.toLocaleString()} XP` : '— XP'}</span>
-          <span className="h-1.5 rounded-md bg-white/[0.08] overflow-hidden mt-1">
-            <span className="block h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-[width] duration-700" style={{ width: `${pct}%` }} />
-          </span>
-          <span className="text-[11px] text-white/50 mt-1">
-            {xp && xp.next_level_total ? `${(xp.xp_to_next_level || 0).toLocaleString()} XP to Level ${xp.level + 1}` : 'Keep watching to level up'}
-          </span>
-        </div>
-        {/* Stats grid */}
-        <div className="relative flex-1 grid grid-cols-2 lg:grid-cols-4">
-          {/* Hrs + titles finished this week — real, from watch_progress.completed_at. */}
-          <div className="px-5 py-5 flex flex-col gap-1.5">
-            <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">{wkHrs ?? '—'}<small className="text-sm text-white/60 font-medium font-sans">hrs</small></span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="clock" size={13} className="text-purple-300" /> Watched this week</span>
-          </div>
-          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
-            <span className="font-display text-[28px] font-bold leading-none">{wkTitles != null ? wkTitles : '—'}</span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="check" size={13} className="text-purple-300" /> Titles finished</span>
-          </div>
-          {/* Day streak — REAL from xp.current_streak / longest_streak */}
-          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
-            <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">{xp ? xp.current_streak : '—'}<small className="text-sm text-white/60 font-medium font-sans">days</small></span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="zap" size={13} className="text-orange-400" /> Day streak{xp ? ` · best ${xp.longest_streak}` : ''}</span>
-          </div>
-          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
-            <span className="font-display text-[21px] font-bold leading-none">{stats?.top_genre || '—'}</span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="heart" size={13} className="text-purple-300" /> Your top genre</span>
-          </div>
-        </div>
-      </div>
-    </>
-  )
-}
-
-/* ─────────────── WATCH TOGETHER CARD (Home redesign F) ───────────────
- * 2026-06-05 — A glass card at the bottom of Home. The "Start a watch
- * party" CTA is REAL — it opens the existing Watch Party hub via the
- * onStartParty handler threaded from App (same one the top bar uses).
- * Live friend-presence ("who's watching what") has no backend feed yet,
- * so we render a tasteful empty/placeholder state instead of fabricating
- * a fake friend — the real CTA stays prominent. */
-// 2026-06-06 (Home net-new #7) — "Watch together" now shows LIVE active
-// watch parties anyone on the server can join, replacing the stubbed
-// "friend presence coming soon" copy. Aurora is a single household, so
-// active parties (not a friend graph) are the honest "who's watching
-// together right now" signal. Polls /api/parties/active; non-fatal.
-function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
-  onStartParty?: () => void
-  onJoinParty?: (code: string) => Promise<{ ok: boolean; error?: string }>
-  currentUserId?: number
-}) {
-  const [parties, setParties] = useState<ActiveParty[]>([])
-  const [joining, setJoining] = useState<string | null>(null)
-  const [joinError, setJoinError] = useState<string | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    const ac = new AbortController()
-    const load = () => {
-      listActiveParties(ac.signal)
-        .then((list) => { if (!cancelled) setParties(list) })
-        .catch(() => { /* non-fatal — fall back to the start CTA */ })
-    }
-    load()
-    const id = window.setInterval(load, 15000)
-    return () => { cancelled = true; ac.abort(); window.clearInterval(id) }
-  }, [])
-  // Don't offer to "join" a party you're already hosting.
-  const joinable = parties.filter((p) => p.host_user_id !== currentUserId)
-  // Scheduled-not-started parties are in /api/parties/active by design
-  // (that's how the Calendar finds them) but they are NOT "live now" —
-  // label them by their start time and keep them out of the live badge.
-  const isScheduledLobby = (p: ActiveParty) => !!p.scheduled_start_at && !p.started_at
-  const liveCount = joinable.filter(p => !isScheduledLobby(p)).length
-
-  const handleJoin = async (code: string) => {
-    if (!onJoinParty || joining !== null) return
-    setJoining(code)
-    setJoinError(null)
-    try {
-      const r = await onJoinParty(code)
-      if (!r.ok) setJoinError(r.error || 'Could not join that party.')
-    } catch {
-      setJoinError('Could not join that party.')
-    } finally {
-      setJoining(null)
-    }
-  }
-
-  return (
-    <>
-      <div className="flex items-center gap-3 mt-9 mb-3.5">
-        <Icon name="users" size={17} className="text-purple-300" />
-        <h3 className="text-[16.5px] font-semibold">Watch together</h3>
-        {liveCount > 0 && (
-          <span className="text-[11px] font-semibold text-indigo-300 bg-indigo-500/15 border border-indigo-400/25 rounded-full px-2 py-0.5">
-            {liveCount} live now
-          </span>
-        )}
-        <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
-      </div>
-      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-indigo-500/10 to-white/[0.02] px-6 py-5">
-        <div className="absolute -bottom-16 left-1/3 w-[300px] h-[240px] rounded-full bg-indigo-500/[0.16] blur-[64px] pointer-events-none" aria-hidden="true" />
-
-        {joinable.length > 0 ? (
-          <div className="relative flex flex-col gap-2.5">
-            {joinable.slice(0, 3).map((p) => (
-              <div key={p.code} className="flex items-center gap-3.5 flex-wrap">
-                <div className="relative flex items-center justify-center w-[46px] h-[46px] rounded-xl bg-indigo-500/15 border border-indigo-400/30 flex-none overflow-hidden">
-                  <Icon name="users" size={20} className="text-indigo-300" />
-                  {p.media_poster ? (
-                    <img
-                      src={posterURL(p.media_poster, 'w154')}
-                      alt=""
-                      loading="lazy"
-                      className="absolute inset-0 w-full h-full object-cover"
-                      onError={(e) => { e.currentTarget.style.display = 'none' }}
-                    />
-                  ) : null}
-                </div>
-                <div className="flex-1 min-w-[180px]">
-                  <div className="text-[15px] font-semibold truncate">{p.party_name?.trim() || 'Watch party'}</div>
-                  <div className="text-[12.5px] text-white/55 truncate">
-                    {isScheduledLobby(p)
-                      ? <>Starts <span className="text-white/75">{formatPartyTime(p.scheduled_start_at!, new Date())}</span>{p.media_title ? <> — <span className="text-white/75">{p.media_title}</span></> : null}</>
-                      : <>
-                          {p.media_title
-                            ? <>{p.is_playing ? 'Watching' : 'Paused on'} <span className="text-white/75">{p.media_title}</span></>
-                            : 'In the lobby'}
-                          {' · '}{p.participant_count}{p.max_participants > 0 ? `/${p.max_participants}` : ''} watching
-                        </>}
-                  </div>
-                </div>
-                <button
-                  onClick={() => handleJoin(p.code)}
-                  disabled={!onJoinParty || joining !== null}
-                  className="px-4 py-2 rounded-xl bg-indigo-500/25 hover:bg-indigo-500/35 disabled:opacity-50 disabled:cursor-default text-indigo-50 border border-indigo-400/40 font-semibold text-[13.5px] transition-colors flex-none"
-                >
-                  {joining === p.code ? 'Joining…' : isScheduledLobby(p) ? 'Open lobby' : 'Join'}
-                </button>
-              </div>
-            ))}
-            {joinError && <div className="text-[12px] text-rose-300/90 mt-0.5">{joinError}</div>}
-            {onStartParty && (
-              <button onClick={onStartParty} className="self-start text-[12.5px] text-indigo-200/80 hover:text-white mt-1 transition-colors">
-                or start your own watch party →
-              </button>
-            )}
-          </div>
-        ) : (
-          <div className="relative flex items-center gap-5 flex-wrap">
-            <div className="relative flex items-center justify-center w-[60px] h-[60px] rounded-2xl bg-indigo-500/15 border border-indigo-400/30 flex-none">
-              <Icon name="users" size={26} className="text-indigo-300" />
-            </div>
-            <div className="relative flex-1 min-w-[200px]">
-              <div className="text-[10px] tracking-[0.14em] uppercase text-indigo-300 font-semibold flex items-center gap-2">
-                <Icon name="users" size={13} /> Watch parties
-              </div>
-              <div className="text-[17px] font-semibold mt-1">Start a synced session with friends</div>
-              <div className="text-[12.5px] text-white/50 mt-0.5">No one's hosting right now — start one and everyone stays in sync, same scene, same time.</div>
-            </div>
-            <div className="relative flex items-center gap-3.5 flex-none flex-wrap">
-              {onStartParty && (
-                <button
-                  onClick={onStartParty}
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-100 border border-indigo-400/40 font-semibold transition-colors"
-                >
-                  <Icon name="users" size={16} /> Start a watch party
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-    </>
-  )
-}
-
-
 
 /* ─────────────────────── SERVER PANEL ─────────────────────── */
 // ServerPanel fetches /api/admin/dashboard and polls every 5s while
@@ -1776,7 +810,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       // so the nav's own triggers stay clickable — BUG-005), and declaring modal
       // would tell AT the rest of the page is inert when it is not.
       tabIndex={-1}
-      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] p-5 z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-surface-raised-2 border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] p-5 z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       {/* No "Server Status" heading — the nav trigger already shows that
@@ -1809,7 +843,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
               <div className="min-w-0">
                 <p className="text-white/50 text-xs flex items-center gap-1">
                   {stat.label}
-                  {stat.hint && <span className="text-white/35 text-[10px]">ⓘ</span>}
+                  {stat.hint && <span className="text-white/35 text-xs">ⓘ</span>}
                 </p>
                 <p className="text-white text-base font-bold truncate">{stat.value}</p>
               </div>
@@ -1936,7 +970,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
       role="dialog"
       aria-label="Notifications"
       tabIndex={-1}
-      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
+      className={`fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-surface-raised-2 border border-white/[0.06] rounded-xl shadow-[shadow:var(--shadow-pop)] z-[45] animate-pop-in origin-top md:origin-top-right overflow-y-auto overscroll-contain${exit.closing ? ' is-closing' : ''}`}
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
@@ -1961,12 +995,12 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
             ? partyInvites.find(i => i.party_code === partyCode)
             : undefined
           const inviteGone = n.type === 'party_invite' && partyCode && partyInvites && !invite
-          const dot = n.type === 'request_failed' ? 'bg-red-400' : isPartyType ? 'bg-purple-400' : 'bg-emerald-400'
+          const dot = n.type === 'request_failed' ? 'bg-red-400' : isPartyType ? 'bg-action' : 'bg-emerald-400'
           const isUnread = unreadSnapshot.has(n.id)
           return (
             <div
               key={n.id}
-              className={`p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3 ${isUnread ? 'bg-purple-500/[0.05]' : ''}`}
+              className={`p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3 ${isUnread ? 'bg-white/5' : ''}`}
             >
               <span
                 className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${dot}`}
@@ -1994,7 +1028,10 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                   <>
                     {(invite.scheduled_start_at || invite.note) && (
                       <p className="text-white/50 text-xs mt-1 truncate">
-                        {invite.scheduled_start_at ? formatPartyTime(invite.scheduled_start_at, new Date()) : ''}
+                        {/* A party that has started keeps its planned
+                            time as it is; one that has not, and whose time
+                            has passed, does not read as still to come. */}
+                        {invite.scheduled_start_at ? (invite.started_at ? formatPartyTime(invite.scheduled_start_at, new Date()) : plannedStartLabel(invite.scheduled_start_at, new Date())) : ''}
                         {invite.scheduled_start_at && invite.note ? ' · ' : ''}
                         {invite.note ? `“${invite.note}”` : ''}
                       </p>
@@ -2023,7 +1060,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                         <button
                           type="button"
                           onClick={() => onJoinParty(partyCode)}
-                          className="px-2.5 py-1 rounded-md text-xs font-medium bg-purple-600/25 border border-purple-500/50 text-purple-100 hover:bg-purple-600/40 transition-colors"
+                          className="px-2.5 py-1 rounded-md text-xs font-medium bg-action-soft border border-line-strong text-ink hover:bg-white/20 transition-colors"
                         >
                           {invite.started_at || !invite.scheduled_start_at ? 'Join' : 'Open lobby'}
                         </button>
@@ -2038,14 +1075,14 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                   <button
                     type="button"
                     onClick={() => onJoinParty(partyCode)}
-                    className="mt-2 px-2.5 py-1 rounded-md text-xs font-medium bg-purple-600/25 border border-purple-500/50 text-purple-100 hover:bg-purple-600/40 transition-colors"
+                    className="mt-2 px-2.5 py-1 rounded-md text-xs font-medium bg-action-soft border border-line-strong text-ink hover:bg-white/20 transition-colors"
                   >
                     Join
                   </button>
                 )}
                 <p className="text-white/50 text-xs mt-1">
                   {fmtRel(n.created_at)}
-                  {isUnread && <span className="ml-1.5 text-purple-300 font-medium">· New</span>}
+                  {isUnread && <span className="ml-1.5 text-ink font-medium">· New</span>}
                 </p>
               </div>
             </div>
@@ -2079,39 +1116,36 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
 }
 
 // Quiet placeholder while a browse list is in flight.
-function BrowseLoadingState({ title }: { title: string }) {
+function BrowseLoadingState({ compact = false }: { compact?: boolean }) {
   return (
-    // Stage refresh (L2) — the browse page's own layout rather than a page
-    // header: the compact hero band with the real <h1> in it (the compact
-    // hero's title classes, the page name being known before the list), a
-    // toolbar row at .stage-toolbar's 14px padding, then the grid at the
-    // gutter. With a backdrop-bearing title, which is the usual case,
-    // BrowseView lands on exactly this frame.
-    // The gutter on every row: movies/shows are in FULL_BLEED_VIEWS, so this
-    // does not inherit .stage-page's padding. It renders on every sort and
-    // genre change (the parent resets the list to null), so without the
-    // gutter the skeleton flashed edge-to-edge and then snapped in by 48px.
+    // The grid's own frame, as shapes, so BrowseView lands on exactly this.
+    // The page's header (its name, count and controls) is LibraryHeader's
+    // and stays up above it. The gutter is here because movies/shows are in
+    // FULL_BLEED_VIEWS and do not inherit .stage-page's padding: this renders
+    // on every sort and genre change (the parent resets the list to null),
+    // and without it the skeleton flashed edge to edge and snapped in.
     <div className="animate-fade-in relative">
-      <HeroSkeleton
-        compact
-        title={<h1 className="text-white font-extrabold font-display mb-1.5 text-3xl md:type-browse line-clamp-1">{title}</h1>}
-        aside={<p className="flex-none text-[color:var(--text-secondary)] text-xs" role="status">Loading your library…</p>}
-      />
-      <div className="stage-gutter mb-6 flex items-center gap-3 py-3.5 border-b border-white/[0.05]" aria-hidden="true">
-        <SkeletonBlock className="h-9 w-16 rounded-full" />
-        <SkeletonBlock className="h-9 w-20 rounded-full" />
-        <SkeletonBlock className="h-9 w-24 rounded-full max-sm:hidden" />
-        <SkeletonBlock className="h-9 w-20 rounded-full max-md:hidden" />
-        <SkeletonBlock className="ml-auto h-9 w-36 rounded-xl" />
-      </div>
-      <div className="stage-gutter">
-        <GridSkeleton />
+      <div className="stage-gutter pt-6">
+        <p className="sr-only" role="status">Loading your library…</p>
+        <GridSkeleton compact={compact} />
       </div>
     </div>
   )
 }
 
+/** How long Tonight's hero waits for Continue Watching before it goes ahead
+ *  without a title to resume. */
+const HERO_LEAD_WAIT_MS = 4000
+
 /* ─────────────────────── MAIN APP ─────────────────────── */
+
+/** Marks a page a restricted session is not shown (lib/navScope
+ *  hiddenFromRestricted). It adds no box of its own (`contents`); it exists
+ *  so a test can hold EVERY commit to "no such page is on screen", whatever
+ *  the page itself renders. */
+function HiddenPage({ name, children }: { name: string; children: React.ReactNode }) {
+  return <div data-hidden-page={name} className="contents">{children}</div>
+}
 
 // QA BUG-001 — URL → view mapping for direct loads / browser
 // back-forward / bookmarks. The BrowserRouter basename is "/v2"
@@ -2137,6 +1171,19 @@ const VIEW_BY_PATH: Record<string, string> = {
   '/search': 'search',
   '/members': 'members',
   '/device': 'device',
+  // Upcoming is the calendar's name as a scope of Library; both URLs render it.
+  '/upcoming': 'calendar',
+  '/together': 'together',
+  '/profile': 'profile',
+  '/me': 'me',
+}
+
+// What the phone's top bar calls each page.
+const PAGE_TITLES: Record<string, string> = {
+  home: 'Tonight', movies: 'Movies', shows: 'TV Shows', collections: 'Collections',
+  library: 'My Library', calendar: 'Upcoming', together: 'Together', members: 'Members',
+  member: 'Member', requests: 'My requests', settings: 'Settings', admin: 'Admin',
+  search: 'Search', profile: 'Your profile', me: 'Me', detail: '', device: 'Pair a device',
 }
 
 // titleIdFromPath extracts the media id from a /title/:id pathname, or
@@ -2144,6 +1191,15 @@ const VIEW_BY_PATH: Record<string, string> = {
 // malformed deep link falls through to the home view instead of a
 // dangling detail page.
 const TITLE_PATH_RE = /^\/title\/(\d+)$/
+// Whether the browser has already moved to another history entry that the
+// router has not caught up with (its Back, pressed a moment ago): the
+// entry's own key, which BrowserRouter keeps in history.state, differs from
+// the location's. Unknown (no key there) reads as no.
+function stepBackUnderWay(locationKey: string): boolean {
+  const key = (window.history.state as { key?: unknown } | null)?.key
+  return typeof key === 'string' && key !== locationKey
+}
+
 function titleIdFromPath(pathname: string): number | null {
   const m = TITLE_PATH_RE.exec(pathname)
   return m ? Number(m[1]) : null
@@ -2195,6 +1251,28 @@ function followedWatchSubtitle(w: FollowedWatch): string {
   }
   return ago ? `${w.watched_by} · ${ago}` : w.watched_by
 }
+
+// A collection's item as the UI's Media, with its real poster, year, rating
+// and genre: a title saved to My Library from a collection is stored with
+// them (a stub would show as a posterless, year-0 card until the next
+// refresh), and the card menu acts on the same record.
+function collectionItemToMedia(m: ServerMediaItem): Media {
+  return {
+    id: m.id,
+    title: m.title,
+    year: m.year ?? 0,
+    rating: m.rating ?? 0,
+    duration: '',
+    genre: (m.genres && m.genres[0]) || '',
+    type: m.type,
+    poster: posterURL(m.poster_path),
+    backdrop: backdropURL(m.backdrop_path),
+    description: m.overview ?? '',
+  }
+}
+
+// No parties: the list given to anything that must not show one.
+const NO_PARTIES: ActiveParty[] = []
 
 function pathToView(pathname: string): string {
   // Exact match first.
@@ -2261,7 +1339,12 @@ export default function App() {
   // user is tri-valued (null | false | ApiUser); narrow to id only
   // when actually logged in so the hook's cache key isn't keyed on
   // undefined-but-truthy values.
-  const party = useParty(user && typeof user === 'object' ? user.id : undefined)
+  // The hook also files that record under the profile the session acts as
+  // (two profiles of one account are two people), so that state is declared
+  // here, ahead of it. What it means and when it changes is said below,
+  // where the rest of the profile state is.
+  const [activeProfileId, setActiveProfileId] = useState<number | null>(null)
+  const party = useParty(user && typeof user === 'object' ? user.id : undefined, activeProfileId)
   // Freshest party state for callbacks that close over an early render (e.g.
   // handlePlayContinue is a stable useCallback). Reading party.state directly
   // inside such a callback would capture a stale snapshot.
@@ -2320,6 +1403,11 @@ export default function App() {
     setPlayerTarget(null)
   }, [user])
   const [partyPanelOpen, setPartyPanelOpen] = useState(false)
+  // Whether something is over the page that a title's open must not animate
+  // under: a player (minimized too: the open closes it) or a party's panel.
+  // A ref, so handleSelect keeps its identity (every card holds it).
+  const travelBlockedRef = useRef(false)
+  useLayoutEffect(() => { travelBlockedRef.current = playerTarget !== null || playerLoading || partyPanelOpen }, [playerTarget, playerLoading, partyPanelOpen])
   // 2026-05-30 — Cinematic Overlay (Feature 2). Which face the on-screen
   // party surface shows: 'rail' (the full floating glass panel) or
   // 'minimal' (lower-third chat ticker + corner voice pill + mini dock).
@@ -2345,7 +1433,6 @@ export default function App() {
       setPartyInviteOpen(false)
     }
   }, [party.state.code])
-  const [partyJoinPrompt, setPartyJoinPrompt] = useState(false)
   // Phase 5 — add-to-watchlist dialog. Opened from DetailView. The
   // dialog fetches the active profile's watchlists on open + lets
   // the user pick one or create a new list inline.
@@ -2367,8 +1454,8 @@ export default function App() {
   // so a new login (which binds the account default) can re-select it; it
   // used to seed activeProfileId, which fetched for the remembered profile
   // before the binding was read, and kept it for the tab's life when the
-  // profile list failed to load.
-  const [activeProfileId, setActiveProfileId] = useState<number | null>(null)
+  // profile list failed to load. (`activeProfileId` itself is declared
+  // above, beside the party hook that takes it.)
   // Personalized content (the hero, the personalized Home rails, Continue
   // Watching, taste onboarding) loads only once the session's profile is
   // known, or the account has no profile to know. A request sent before then
@@ -2400,6 +1487,16 @@ export default function App() {
   // personalized content does.
   const adminUI = showsAdminUI(user ? user.role : undefined, profiles, profilesLoaded, activeProfileId)
   const actingRestricted = activeProfileId !== null && isRestrictedProfile(profiles.find(p => p.id === activeProfileId))
+  // What the navigation offers this session (lib/navScope). Like adminUI it
+  // follows the profile the server has bound, never a remembered one: until
+  // the binding is read it is 'unknown', which offers nothing a restricted
+  // profile lacks (no Together, no requests) and restyles nothing.
+  const navScope = navScopeFor(profiles, profilesLoaded, activeProfileId)
+  // For effects that must not re-run when it changes. Set in a layout
+  // effect, so a passive effect of the same commit already reads this
+  // render's value.
+  const navScopeRef = useRef(navScope)
+  useLayoutEffect(() => { navScopeRef.current = navScope }, [navScope])
   const rememberedProfileIdRef = useRef(readRememberedProfileId())
   useEffect(() => {
     if (!activeProfileId) return
@@ -2408,83 +1505,54 @@ export default function App() {
   }, [activeProfileId])
 
   // Phase 5.2 parity — right-click context menu state.
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: MediaContextItem[]; title?: string } | null>(null)
-  const openCardContextMenu = useCallback((e: React.MouseEvent, m: Media) => {
-    e.preventDefault()
-    const items: MediaContextItem[] = [
-      { label: 'Mark as Watched', onClick: () => {
-        void markWatched(m.id, { profile_id: activeProfileId ?? undefined }).then((res) => {
-          const id = nextToastId()
-          setToasts(prev => [...prev, { id, message: `Marked "${m.title}" as watched`, type: 'success' }])
-          // Surface achievement unlocks from the server's gamification
-          // engine. One toast per unlock so they sequence cleanly.
-          if (res?.achievements_unlocked && res.achievements_unlocked.length > 0) {
-            for (const def of res.achievements_unlocked) {
-              const tid = nextToastId()
-              setToasts(prev => [...prev, { id: tid, message: `${def.icon} Achievement unlocked: ${def.title} (+${def.xp_reward} XP)`, type: 'success' }])
-            }
-          }
-          // Refresh continue rail so the now-watched item drops off.
-          setRetryNonce(n => n + 1)
-        }).catch(err => {
-          window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
-        })
-      }},
-      { label: 'Clear Progress', tone: 'danger', onClick: () => {
-        void clearProgress(m.id, activeProfileId ?? undefined).then(() => {
-          const id = nextToastId()
-          setToasts(prev => [...prev, { id, message: `Cleared progress for "${m.title}"`, type: 'info' }])
-          setRetryNonce(n => n + 1)
-        }).catch(err => {
-          window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
-        })
-      }},
-      // Phase D — steerable thumbs. 👍 feeds the taste vector; 👎 excludes the
-      // title from every rec surface. Both invalidate server-side; on 👎 we also
-      // optimistically drop the card from the home rails (no costly LLM rebuild).
-      { label: '👍 More like this', onClick: () => {
-        const removed = removedFromHomeRef.current
-        void submitMediaFeedback(m.id, 'up', activeProfileId ?? undefined).then(() => {
-          // A 👍 after a 👎 lets the title back onto Home at the next refresh.
-          removed.delete(m.id)
-          setToasts(prev => [...prev, { id: nextToastId(), message: `More like "${m.title}" — got it`, type: 'success' }])
-        }).catch(err => window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown')))
-      }},
-      { label: '👎 Not interested', tone: 'danger', onClick: () => {
-        const removed = removedFromHomeRef.current
-        void submitMediaFeedback(m.id, 'down', activeProfileId ?? undefined).then(() => {
-          setToasts(prev => [...prev, { id: nextToastId(), message: `We'll show you less like "${m.title}"`, type: 'info' }])
-          removed.add(m.id)
-          setHomeRails(rails => rails ? rails.map(rl => ({ ...rl, items: rl.items.filter(it => it.id !== m.id) })) : rails)
-          // Also drop it from a pinned conversational rail, if one is showing.
-          setConvoResults(prev => prev.filter(it => it.id !== m.id))
-        }).catch(err => window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown')))
-      }},
-    ]
-    if (profiles.length > 0) {
-      items.push({ label: 'Add to Watchlist…', onClick: () => setAddToListMedia(m) })
-    }
-    if (adminUI) {
-      items.push({ label: 'Refresh Metadata', onClick: () => { void handleRefreshMetadata(m) } })
-    }
-    // anchorFor, not raw clientX/clientY. A keyboard-opened context menu
-    // (Shift+F10 or the Menu key, both of which fire a real `contextmenu` event
-    // on the focused card) reports 0/0, so this used to pin the menu to the
-    // viewport's top-left corner — open, but detached from the card it acts on.
-    // `title` feeds the menu's accessible name — every item label is a bare verb
-    // ("Mark as Watched"), and the menu opens from a grid of dozens of cards.
-    setContextMenu({ ...anchorFor(e), items, title: m.title })
-  // user is a discriminated union; the casts above narrow it. setToasts etc. are stable.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profiles, user, activeProfileId, adminUI])
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: MediaContextItem[]; title?: string; reason?: string; opener?: HTMLElement | null } | null>(null)
 
   const [addToListMedia, setAddToListMedia] = useState<Media | null>(null)
+  // What had the focus as the add-to-list sheet opened: the control it is
+  // handed back to when the sheet is closed from the keyboard or by one of
+  // its own buttons. Read after the commit that opens the sheet, by which
+  // time a card's menu has closed and returned the focus to its More button
+  // (unmount effects run before this one).
+  const addToListOpenerRef = useRef<{ el: HTMLElement | null; mediaId: number } | null>(null)
+  useEffect(() => {
+    addToListOpenerRef.current = addToListMedia
+      ? { el: document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null, mediaId: addToListMedia.id }
+      : null
+  }, [addToListMedia])
+  // Closes the sheet and puts the focus back where it came from: the
+  // opener, or, when that is no longer on the page, the title's own card.
+  // (The sheet's controls go with it, and the focus would fall to the page
+  // body.) Not for a press on the scrim: a pointer has just said where the
+  // viewer is.
+  const closeAddToList = useCallback(() => {
+    const from = addToListOpenerRef.current
+    setAddToListMedia(null)
+    setAddToListFailed(null)
+    if (!from) return
+    const back = from.el?.isConnected
+      ? from.el
+      : document.querySelector<HTMLElement>(`[data-media-id="${from.mediaId}"] :is(.card-open, .mlr-main, .search-best-open)`)
+    back?.focus({ preventScroll: true })
+  }, [])
   // Phase 6 — Collections modal open state. Triggered by the
   // "+ New Collection" button in CollectionsView OR by future
   // global-action shortcuts (Ctrl+Shift+N).
   const [collectionsModalOpen, setCollectionsModalOpen] = useState(false)
   const [addToListLists, setAddToListLists] = useState<Watchlist[] | null>(null)
   const [addToListBusy, setAddToListBusy] = useState(false)
+  // A list the sheet could not add the title to, said in the sheet (for the
+  // title it was said about: another opening of the sheet starts clean).
+  const [addToListFailed, setAddToListFailed] = useState<{ mediaId: number; says: string } | null>(null)
+  // A question asked before something that cannot be taken back (the app's
+  // own dialog, components/settings/ConfirmDialog; the browser's native box
+  // was used before). `run` is what the confirm button does, once.
+  const [confirmAsk, setConfirmAsk] = useState<{ title: string; body: string; confirmLabel: string; destructive?: boolean; run: () => void } | null>(null)
+  // The question as it is now, for its confirm button: a second press on a
+  // dialog that is closing finds it gone and runs nothing.
+  const confirmAskRef = useRef(confirmAsk)
+  useLayoutEffect(() => { confirmAskRef.current = confirmAsk }, [confirmAsk])
+  // Titles whose removal from the library is out.
+  const deletingMediaRef = useRef(new Set<number>())
   useEffect(() => {
     if (!addToListMedia || !activeProfileId) { setAddToListLists(null); return }
     let cancelled = false
@@ -2492,47 +1560,103 @@ export default function App() {
     return () => { cancelled = true }
   }, [addToListMedia, activeProfileId])
   const [searchQuery, setSearchQuery] = useState('')
-  const [searchOpen, setSearchOpen] = useState(false)
+  // A described search: the words the viewer asked to have searched by what
+  // they describe (Enter in a search field, or the search page's button),
+  // rather than matched against titles. The search page runs the
+  // model-backed search for exactly those words; typing anything else goes
+  // back to title matching, which costs no model time. It carries who asked
+  // (`owner`) and is handed to the page only while that is still who the app
+  // acts as, so a switch never runs one profile's description for another,
+  // and `n` counts asks so the same words can be asked again.
+  const [searchDescribe, setSearchDescribe] = useState<{ query: string; n: number; owner: string } | null>(null)
   // Ref to the search input so Cmd+K / Ctrl+K can move focus to it.
   const searchInputRef = useRef<HTMLInputElement | null>(null)
-  // Shared "leave the nav search" routine — the X/clear button, an
-  // outside click, and Escape (below) all need to do the exact same
-  // thing: drop the query, fall back to Home if that's what the query
-  // was driving, and give the input back its resting (unfocused) look.
-  const closeSearch = useCallback(() => {
-    setSearchQuery('')
-    setSearchOpen(false)
-    setView(v => (v === 'search' ? 'home' : v))
-    searchInputRef.current?.blur()
+  const searchOwner = `${user ? user.id : 'none'}:${activeProfileId ?? 'none'}`
+  // Typing is a new query: whatever was described before is not asked again
+  // until the viewer asks.
+  const changeSearchQuery = useCallback((q: string) => {
+    setSearchQuery(q)
+    setSearchDescribe(null)
   }, [])
-  // Cmd+K opens a full-screen Spotlight-style palette (the top-bar
-  // input stays for click-to-search flows).
-  const [paletteOpen, setPaletteOpen] = useState(false)
+  // Every ask has its own number, for the life of the page: the search page
+  // keeps an ask's answer under it (lib/describedSearch), and a number used
+  // twice would show an old answer for a new ask.
+  const describeAsksRef = useRef(0)
+  // The profile's recent searches (lib/recentSearches), read for whoever
+  // the page is for now and held with that owner's stamp, so one profile's
+  // list is never drawn for another on the commit a switch lands in.
+  // Kept only for a known owner: a profile, or an account known to have
+  // none. While the app knows no profile on an account that has profiles
+  // (startup, an unreadable binding), the owner would be `<user>:none`, one
+  // bucket every profile of the account would read and write in that state:
+  // nothing is read from it or remembered then.
+  const recentKnown = !!user && (activeProfileId != null || (profilesLoaded && profiles.length === 0))
+  const recentOwner = recentKnown ? searchOwner : null
+  const readRecent = (owner: string | null) => ({ owner: searchOwner, list: owner ? readRecentSearches(owner) : NO_RECENT, known: owner !== null })
+  const [recentSearches, setRecentSearches] = useState<{ owner: string; list: string[]; known: boolean }>(() => readRecent(recentOwner))
+  if (recentSearches.owner !== searchOwner || recentSearches.known !== recentKnown) setRecentSearches(readRecent(recentOwner))
+  const noteSearch = useCallback((words: string) => {
+    if (!recentOwner) return
+    setRecentSearches({ owner: recentOwner, list: rememberSearch(recentOwner, words), known: true })
+  }, [recentOwner])
+  const clearRecentSearches = useCallback(() => {
+    if (!recentOwner) return
+    forgetRecentSearches(recentOwner)
+    setRecentSearches({ owner: recentOwner, list: [], known: true })
+  }, [recentOwner])
   // 2026-07-25 (Aurora Stage Phase 2, debug-review fix) — publish the
   // measured height of the sticky chrome stack as --chrome-h so every
-  // overlay below it (both drawers, the mobile menu sheet + its scrim,
-  // DetailRail's sticky offset) anchors to reality instead of to the nav's
-  // nominal 64px. The stack grows by ~37px per actively-scanning library
-  // because ScanProgressBar renders in flow above the nav, and an admin
-  // mid-scan was the case where all five hardcoded offsets broke.
-  // Aurora Stage Phase 7b (D5/D6) — which surface the player is presenting.
-  // 'theater' is the only one that changes anything out here: the app behind the
-  // theater box is VISIBLE for the first time, so it gets dimmed and made inert.
-  // Fullscreen and minimized cover or hide the viewport, so nothing behind them
-  // needs doing.
+  // thing placed under it (the drawers, the sticky browse and admin
+  // toolbars, the identity menu, the page's scroll padding) anchors to
+  // reality instead of to the nav's nominal 64px. The stack grows by one
+  // row (40px, 44 on a touch screen) per library being scanned, because
+  // ScanProgressBar renders in flow under the nav, and an admin mid-scan
+  // was the case where all five hardcoded offsets broke.
+  // Which surface the player is presenting. 'theater' is the player in the
+  // window: the picture edge to edge, or, in the boxed layout on a wide
+  // window, set in beside the party panel. It is the only one that changes
+  // anything out here: the app behind it is made inert (not dimmed).
+  // Fullscreen covers the viewport and minimized gives the page back, so
+  // nothing behind them needs doing.
   const [playerSurface, setPlayerSurface] = useState<'theater' | 'fullscreen' | 'minimized' | null>(null)
   // Set by the switcher's "Who's watching?" item; the gate self-gates otherwise.
   const [profilesGateForced, setProfilesGateForced] = useState(false)
   // Reported UP by the gate, which owns the policy. App needs it only to keep
-  // Cmd+K from opening the palette (z-200) on top of the gate (z-85).
+  // Cmd+K from putting the focus in the search field behind the gate.
   const [profilesGateOpen, setProfilesGateOpen] = useState(false)
+  // The onboarding flow covers the whole page: while it is up the page
+  // behind it (<main>, the top bar included) is out of reach of the keys.
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
   const theaterActive = playerSurface === 'theater'
+  // Whether a page a restricted session is not shown may render on THIS
+  // commit (lib/navScope.mayRenderHidden): never for a restricted session,
+  // not while startup has yet to say who the session is, and not while the
+  // picker is up asking. The redirect runs in an effect, after the commit,
+  // so each such page is guarded where it mounts as well.
+  const hiddenOk = mayRenderHidden(navScope, { settled: profilesSettled, askingForProfile: profilesGateForced && activeProfileId === null })
+  // The account's active watch parties, polled once for the whole app and
+  // read by the nav's presence pill and the Together hub. For any session
+  // that may be shown Together (hiddenOk): that is a session known to be
+  // offered it, and also one whose profile could not be learned at all, which
+  // is let onto the page and used to find it saying "Looking for parties…"
+  // for ever, with no request out. The pill is only for the first kind (see
+  // livePresence). Keyed by user and acting profile: the hook returns nothing
+  // on the render that switches profile.
+  const activeParties = useActiveParties({
+    enabled: !!user && hiddenOk,
+    ownerKey: `${user ? user.id : 'none'}:${activeProfileId ?? 'none'}`,
+    // Not while the player is open (minimized counts as closed: the page is
+    // back on screen then).
+    paused: playerSurface === 'theater' || playerSurface === 'fullscreen',
+  })
 
   // Stamp the surface on <html> so CSS can react to it. This is what gates the
-  // watch-party surfaces' theater rules (IMPLEMENTATION_PLAN §D5) — they are
-  // rendered outside <main>, so they stay live and visible during playback:
-  // the rail and reactions anchor into the box, and the minimized-party chip
-  // keys its full-bleed `top` off it (index.css `.stage-party-*`). An
+  // watch-party surfaces' theater rules — they are rendered outside <main>,
+  // so they stay live and visible during playback: the panel and the
+  // reactions place themselves against the player's shell (over the picture
+  // when it runs edge to edge, beside it when boxed), and the party's mini
+  // dock and chat ticker take their lanes above the timeline (index.css
+  // `.stage-party-*`). An
   // attribute rather than a class because three different overlays key off it
   // and `html[data-player-surface="theater"]` reads as the state it is.
   useEffect(() => {
@@ -2617,6 +1741,13 @@ export default function App() {
   // the load that follows it, so on a switch it saves the outgoing list
   // under its own key and never under the incoming one.
   const libraryOwnerRef = useRef<string | null>(null)
+  // The same key for the My Library writes' owner checks, mirrored in a
+  // layout effect like the session's profile and account
+  // (actingProfileRef, libraryUserRef), so all three move in one phase. The
+  // ref above trails to the passive load below, which it has to: the
+  // snapshot save keys on it.
+  const libraryWriteOwnerRef = useRef<string | null>(libraryCacheKey)
+  useLayoutEffect(() => { libraryWriteOwnerRef.current = libraryCacheKey }, [libraryCacheKey])
   useEffect(() => {
     const key = libraryOwnerRef.current
     if (!key) return
@@ -2633,6 +1764,8 @@ export default function App() {
       } catch { cached = [] }
     }
     setLibrary(cached)
+    // A snapshot again: nobody has answered for this list yet.
+    setLibraryServerFor(null)
   }, [libraryCacheKey])
   // The browser-wide snapshot this replaced.
   useEffect(() => {
@@ -2643,11 +1776,51 @@ export default function App() {
   // must not sit on a skeleton). LibraryView uses it to hold a grid
   // skeleton instead of the empty state on a device whose cache is empty.
   const [libraryLoaded, setLibraryLoaded] = useState(false)
-  // In-flight optimistic library toggles, by media id → 'add' | 'remove'.
-  // The reconcile below re-applies these on top of the server snapshot so a
-  // save/unsave that completes DURING the fetch isn't clobbered by the
-  // (older) snapshot. Cleared when each toggle's request settles.
-  const pendingLibOpsRef = useRef<Map<number, 'add' | 'remove'>>(new Map())
+  // Whose list the server has answered with: the key of the profile whose
+  // list in `library` is the server's own, filtered by that profile's limit.
+  // Until then (and when the request fails) `library` is this browser's
+  // snapshot, which can hold titles saved before a limit was set. Cleared
+  // whenever `library` is loaded from a snapshot again (a change of key,
+  // below) and on sign-out: it used to outlive both, so a profile come back
+  // to, or the same user signing in again, was taken as answered for while
+  // `library` held the snapshot.
+  const [libraryServerFor, setLibraryServerFor] = useState<string | null>(null)
+  // In-flight optimistic library toggles, by profile and media id
+  // (`${profileId}:${mediaId}`) → the latest write's mark ('add' |
+  // 'remove'). The reconcile below re-applies these on top of the server
+  // snapshot so a save/unsave that completes DURING the fetch isn't
+  // clobbered by the (older) snapshot. Each write has a mark object of its
+  // own and clears only that one when it settles: by value, a removal
+  // answered while a later removal of the same title waited cleared the
+  // later one's mark. By profile: keyed by title alone, a Parent's removal
+  // still out after a switch took the same title off the Kid's list.
+  const pendingLibOpsRef = useRef<Map<string, { op: 'add' | 'remove' }>>(new Map())
+  // The signed-in account, read when a queued library write's turn comes.
+  const libraryUserRef = useRef<number | null>(user ? user.id : null)
+  useLayoutEffect(() => { libraryUserRef.current = user ? user.id : null }, [user])
+  // The server's list of a profile's library on top of what is on screen:
+  // cached cards kept, that profile's in-flight writes re-applied.
+  const mergeServerLibrary = useCallback((prev: Media[], items: LibraryItem[], profileId: number) => {
+    const cachedById = new Map(prev.map(m => [m.id, m]))
+    const pending = new Map<number, { op: 'add' | 'remove' }>()
+    for (const [key, mark] of pendingLibOpsRef.current) {
+      const [pid, id] = key.split(':').map(Number)
+      if (pid === profileId) pending.set(id, mark)
+    }
+    // Server set, minus any item an in-flight unsave is removing.
+    const merged = items
+      .filter(it => pending.get(it.media_item_id)?.op !== 'remove')
+      .map(it => cachedById.get(it.media_item_id) ?? libraryItemToMedia(it))
+    // Re-add any in-flight save the snapshot predates.
+    const have = new Set(merged.map(m => m.id))
+    for (const [id, mark] of pending) {
+      if (mark.op === 'add' && !have.has(id)) {
+        const cached = cachedById.get(id)
+        if (cached) merged.push(cached)
+      }
+    }
+    return merged
+  }, [])
   // Reconcile the local cache against the server's authoritative library for
   // the active profile (login, profile switch, refresh). Rich cached
   // snapshots win per id so posters/ratings survive; ids the server has that
@@ -2661,23 +1834,8 @@ export default function App() {
       .then(items => {
         if (cancelled) return
         setLibraryLoaded(true)
-        setLibrary(prev => {
-          const cachedById = new Map(prev.map(m => [m.id, m]))
-          const pending = pendingLibOpsRef.current
-          // Server set, minus any item an in-flight unsave is removing.
-          const merged = items
-            .filter(it => pending.get(it.media_item_id) !== 'remove')
-            .map(it => cachedById.get(it.media_item_id) ?? libraryItemToMedia(it))
-          // Re-add any in-flight save the snapshot predates.
-          const have = new Set(merged.map(m => m.id))
-          for (const [id, op] of pending) {
-            if (op === 'add' && !have.has(id)) {
-              const cached = cachedById.get(id)
-              if (cached) merged.push(cached)
-            }
-          }
-          return merged
-        })
+        setLibraryServerFor(`aurora_my_library:${user.id}:${activeProfileId}`)
+        setLibrary(prev => mergeServerLibrary(prev, items, activeProfileId))
       })
       .catch(() => {
         // offline / transient — keep the localStorage cache, and stop
@@ -2685,7 +1843,7 @@ export default function App() {
         if (!cancelled) setLibraryLoaded(true)
       })
     return () => { cancelled = true; ac.abort() }
-  }, [user, activeProfileId])
+  }, [user, activeProfileId, mergeServerLibrary])
   // Memoized ID set so MediaRail / BrowseView / LibraryView can do
   // O(1) membership checks without re-creating the Set on every
   // render. Rebuilt only when the library array reference changes.
@@ -2696,44 +1854,22 @@ export default function App() {
   // under fast double-clicks and duplicate React keys corrupt the
   // toast list.
   const toastIdCounter = useRef(0)
+  // The profile each toast was said to, by its id (every toast takes one
+  // here). A switch drops the toasts said to the previous profile and keeps
+  // those said to the new one: a toast the switch itself causes (the bug
+  // report's "closed because this tab is now on another profile") is raised
+  // by an effect of the commit that names the new profile, which runs
+  // before the switch's reset does. The profile is mirrored in a layout
+  // effect, so it is the new one by then.
+  const actingProfileRef = useRef<number | null>(activeProfileId)
+  useLayoutEffect(() => { actingProfileRef.current = activeProfileId }, [activeProfileId])
+  const toastOwnersRef = useRef(new Map<string, number | null>())
   const nextToastId = useCallback(() => {
     toastIdCounter.current += 1
-    return `t${toastIdCounter.current}`
+    const id = `t${toastIdCounter.current}`
+    toastOwnersRef.current.set(id, actingProfileRef.current)
+    return id
   }, [])
-
-  // Invites feature — the caller's open party invites (bell RSVP rows +
-  // Calendar chips). null = never loaded. Refreshed when the bell opens
-  // and when a live party notification arrives; RSVP flips optimistically.
-  // Declared here, before useRealtime, whose onNotification references
-  // refreshMyPartyInvites.
-  const [myPartyInvites, setMyPartyInvites] = useState<MyPartyInvite[] | null>(null)
-  const refreshMyPartyInvites = useCallback(() => {
-    listMyPartyInvites()
-      .then(setMyPartyInvites)
-      .catch(() => { /* non-fatal — bell rows degrade to plain lines */ })
-  }, [])
-  useEffect(() => {
-    if (notifOpen) refreshMyPartyInvites()
-  }, [notifOpen, refreshMyPartyInvites])
-
-  const handleInviteRsvp = useCallback((inviteId: number, rsvp: 'going' | 'maybe' | 'declined') => {
-    // Optimistic flip; refetch on BOTH outcomes so a feed refresh that was
-    // already in flight when the user clicked can't leave a stale pressed
-    // state (2026-08 review) — the follow-up fetch converges on the
-    // server's answer.
-    setMyPartyInvites(prev =>
-      prev ? prev.map(i => (i.invite_id === inviteId ? { ...i, rsvp } : i)) : prev)
-    rsvpPartyInvite(inviteId, rsvp)
-      .then(() => refreshMyPartyInvites())
-      .catch(err => {
-        refreshMyPartyInvites()
-        setToasts(prev => [...prev, {
-          id: nextToastId(),
-          message: err instanceof Error ? err.message : 'Failed to save RSVP',
-          type: 'error',
-        }])
-      })
-  }, [refreshMyPartyInvites, nextToastId])
 
   // Join a party from a bell row / calendar chip — in-app, not a new tab.
   const handleJoinInviteParty = useCallback(async (code: string) => {
@@ -2742,19 +1878,27 @@ export default function App() {
       setPartyPanelOpen(true)
       return
     }
-    if (party.state.code && !window.confirm(`Leave your current party and join ${code}?`)) return
-    if (party.state.code) party.leave()
-    const r = await party.join(code)
-    if (r.ok) {
-      setNotifOpen(false)
-      setPartyPanelOpen(true)
-    } else {
-      setToasts(prev => [...prev, {
-        id: nextToastId(),
-        message: r.error || 'Failed to join the party',
-        type: 'error',
-      }])
+    const join = async () => {
+      if (party.state.code) party.leave()
+      const r = await party.join(code)
+      if (r.ok) {
+        setNotifOpen(false)
+        setPartyPanelOpen(true)
+      } else {
+        setToasts(prev => [...prev, {
+          id: nextToastId(),
+          message: joinRefusalWords(code, r.reason),
+          type: r.reason === 'offline_room' ? 'info' : 'error',
+        }])
+      }
     }
+    if (!party.state.code) { void join(); return }
+    setConfirmAsk({
+      title: `Leave your party and join ${code}?`,
+      body: 'You leave the party you are in now, and its room is told you left.',
+      confirmLabel: 'Leave and join',
+      run: () => { void join() },
+    })
   }, [party, nextToastId])
 
   // M10 Phase 2 — Browse views. Lists fetch lazily on first visit
@@ -2771,8 +1915,8 @@ export default function App() {
   // Sort lives here (not in BrowseView) because changing sort
   // triggers a re-fetch from page 1, and the parent owns the cache.
   type MediaSort = 'rating' | 'title' | 'year' | 'recent'
-  const [moviesSort, setMoviesSort] = useState<MediaSort>('title')
-  const [showsSort, setShowsSort] = useState<MediaSort>('title')
+  const [moviesSort, setMoviesSort] = useState<MediaSort>(DEFAULT_BROWSE_SORT)
+  const [showsSort, setShowsSort] = useState<MediaSort>(DEFAULT_BROWSE_SORT)
   // Genre filter — QA BUG-003 fix. Previously this lived inside
   // BrowseView, but changing Sort sets moviesList=null which
   // unmounts BrowseView and resets its local state. Lifting to
@@ -2780,12 +1924,27 @@ export default function App() {
   // changes (and across the loading-skeleton intermediate state).
   const [moviesGenre, setMoviesGenre] = useState('')
   const [showsGenre, setShowsGenre] = useState('')
-  // Canonical genre catalogs from /api/media/genres — populated once
-  // per browse view, used to render the dropdown so it doesn't shift
-  // as the user paginates. Null while in flight; BrowseView falls
-  // back to deriving from items so first paint isn't blocked.
+  // The library's genres, from /api/media/genres: asked for once per grid,
+  // so the list does not shift as pages load. Null while in flight (no
+  // genre control is drawn yet). When that request FAILS the control is
+  // drawn from the genres of the titles the grid holds (lib/browseLayout
+  // fallbackGenres), as the old toolbar did: fewer genres than the library
+  // has, which is better than no way to filter at all.
   const [moviesGenres, setMoviesGenres] = useState<string[] | null>(null)
   const [showsGenres, setShowsGenres] = useState<string[] | null>(null)
+  const [genresFailed, setGenresFailed] = useState<{ movie: boolean; show: boolean }>({ movie: false, show: false })
+  // How the Library's grids are laid out: the viewer's choice, or null for
+  // "by library size" (lib/browseLayout). One choice for both grids.
+  const [browseLayout, setBrowseLayout] = useState<BrowseLayout | null>(readBrowseLayout)
+  // The element in the Library header's row that a scope's own controls are
+  // drawn into (My Library's kind, Upcoming's List or Month).
+  const [libraryToolsEl, setLibraryToolsEl] = useState<HTMLElement | null>(null)
+  const changeBrowseLayout = useCallback((layout: BrowseLayout) => {
+    setBrowseLayout(layout)
+    writeBrowseLayout(layout)
+  }, [])
+  const moviesLayout = useGridLayout(browseLayout, moviesTotal, moviesGenre)
+  const showsLayout = useGridLayout(browseLayout, showsTotal, showsGenre)
   const [moviesLoadingMore, setMoviesLoadingMore] = useState(false)
   const [showsLoadingMore, setShowsLoadingMore] = useState(false)
   // Track next-page-to-fetch in state rather than deriving from
@@ -2818,6 +1977,10 @@ export default function App() {
   const [detailFiles, setDetailFiles] = useState<MediaFile[]>([])
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
+  // A detail read whose 404 was dropped across a switch attempt, and the
+  // count that reads the open title again once that attempt has ended.
+  const titleReadDroppedRef = useRef(false)
+  const [detailReadNonce, setDetailReadNonce] = useState(0)
   // M10 Phase 4.5 — multi-season support.
   const [detailSeasons, setDetailSeasons] = useState<{ season_number: number; episode_count?: number }[]>([])
   const [detailSelectedSeason, setDetailSelectedSeason] = useState<number | null>(null)
@@ -2825,14 +1988,52 @@ export default function App() {
   // mapped to UIMedia) because handlePlay needs position_ms to
   // seed resume.
   const [continueItems, setContinueItems] = useState<ContinueWatchingItem[]>([])
+  // Whose Continue Watching has been answered (or has failed): the user and
+  // profile it was asked for. Tonight's hero waits for it, because the title
+  // to resume leads the hero: shown before the answer, the hero put up one
+  // of Aurora's picks and then swapped it for that title a moment later.
+  const [continueFor, setContinueFor] = useState<string | null>(null)
+  // That wait has a limit (HERO_LEAD_WAIT_MS): for whom it ran out. A
+  // request that never answers (a stalled proxy, a slow query on that one
+  // route) must not leave the hero a skeleton while the picks and rails are
+  // up. The ref is the same fact, for the request's own callback.
+  const [leadWaitOverFor, setLeadWaitOverFor] = useState<string | null>(null)
+  const leadWaitOverForRef = useRef<string | null>(null)
+  // The viewer has done something in the hero (put the pointer or focus in
+  // it, chosen a pick, paused the rotation), and for whom. A title to resume
+  // that turns up after the wait ran out does not take the hero from under
+  // them: it is the first card of Continue Watching.
+  const heroTouchedForRef = useRef<string | null>(null)
+  // Whose hero it is now (the user and profile), for handlers.
+  const heroOwnerRef = useRef<string | null>(null)
+  // Both facts are one visit's, forgotten wherever Continue Watching's own
+  // answer is (a sign-out, a profile switch). Kept, a return to the same
+  // user and profile found the wait already over: the hero put up a pick
+  // with Continue Watching still out, and the title to resume then took the
+  // hero over, also from under a viewer already in it. And a mark left from
+  // the earlier visit kept that title out of an untouched hero.
+  const forgetHeroLeadWait = useCallback(() => {
+    leadWaitOverForRef.current = null
+    heroTouchedForRef.current = null
+    setLeadWaitOverFor(null)
+  }, [])
   // Ref mirror for effects that need the CURRENT list without re-running
   // when the CW poll refreshes it (e.g. the detail fetch's season seed).
+  //
+  // Mirrored in a LAYOUT effect, in the same commit that draws from the list.
+  // A card's Play reads the record through this ref at click time
+  // (playOrResume) while its label ("Resume …") is drawn from the state. In
+  // a passive effect the ref lagged the commit, so a press that landed in
+  // between found a button saying Resume and no record: the title played
+  // from the start, and playing from the start overwrites the saved
+  // position. Too short a gap for a hand, but a test pressing the button
+  // the moment it appeared hit it under load.
   const continueItemsRef = useRef(continueItems)
-  useEffect(() => { continueItemsRef.current = continueItems }, [continueItems])
+  useLayoutEffect(() => { continueItemsRef.current = continueItems }, [continueItems])
   // 2026-05-27 — Bug-report config. Holds the full server response so
-  // the BugReportButton + modal can both gate on `enabled` AND surface
-  // admin-only token-health diagnostics (added 2026-05-27 PAT health
-  // check). The BugReportButton renders only when `enabled` is true.
+  // the "Report a bug" entries and the dialog can both gate on `enabled`
+  // AND surface admin-only token-health diagnostics (added 2026-05-27 PAT
+  // health check). The entries are offered only when `enabled` is true.
   const [bugReportConfig, setBugReportConfig] = useState<BugReportConfig | null>(null)
   // M10 Phase 4.5 — Requests view real data.
   const [requestsList, setRequestsList] = useState<MediaRequest[] | null>(null)
@@ -2884,11 +2085,11 @@ export default function App() {
   // `null` rails = not yet fetched. Empty arrays inside rails are
   // filtered out by HomeView so a fresh install with no media
   // doesn't render ghost rails.
+  // The catalog's stand-in hero (its newest title): what the hero is when
+  // Tonight's slate (below) has no entry to show. Never one of the picks: it
+  // used to hold the pick last put up as well, and when the pool then emptied
+  // that pick stayed up under the stand-in's "Recently added".
   const [homeHero, setHomeHero] = useState<Media | null>(null)
-  // True when homeHero was set by the catalog fallback (recent/top-rated)
-  // rather than the personalized pool. Drives the "Recently Added" label
-  // in HeroSection instead of the misleading "Featured" pill.
-  const [homeHeroIsFallback, setHomeHeroIsFallback] = useState(false)
   // Phase 5.3 — personalized hero pool. Server returns 4-8 picks
   // with reason blurbs; client rotates every 9s with crossfade.
   // Falls back to listRecent[0] when /api/me/hero 503s (no LLM).
@@ -2905,6 +2106,25 @@ export default function App() {
   // the chosen pick short.
   const [rotEpoch, setRotEpoch] = useState(0)
   const [heroPaused, setHeroPaused] = useState(false)
+  // Tonight's slate (lib/tonightSlate): the title to resume leads, Aurora's
+  // picks follow. `heroOnLead` says the hero is showing that lead; once the
+  // viewer (or the rotation) moves off it, heroIndex says which pick. It
+  // starts true and goes back to true for each new session and profile, so
+  // each opens on its own unfinished title.
+  const [heroOnLead, setHeroOnLead] = useState(true)
+  // The viewer's own pause of the rotation, kept across visits: someone who
+  // stops it does not want it running again tomorrow. (heroPaused, above, is
+  // the momentary hold while the pointer or focus is in the hero.)
+  const [heroHold, setHeroHold] = useState(() => readPrefsSnapshot().tonight_rotation === 'paused')
+  const toggleHeroHold = useCallback(() => {
+    heroTouchedForRef.current = heroOwnerRef.current
+    const paused = !heroHold
+    setHeroHold(paused)
+    writePrefKey('tonight_rotation', paused ? 'paused' : 'running')
+  }, [heroHold])
+  // "Recently" is judged against when this tab opened: a title does not stop
+  // leading because the page was left open past its window.
+  const [heroNow] = useState(() => Date.now())
   // Personalization status from /api/me/hero. When `coldStart` is true,
   // we're below the watch-history threshold and Hero is serving the
   // popular-unwatched fallback with no LLM blurbs — drives a UI hint
@@ -2932,32 +2152,7 @@ export default function App() {
   // fallback hero only when there is none.
   const homeHeroRef = useRef<Media | null>(null)
   useEffect(() => { homeHeroRef.current = homeHero }, [homeHero])
-  // Phase D — conversational discovery: the active vibe query + its results,
-  // pinned as the top home rail. Fires the existing semantic search on submit
-  // (Enter), not per-keystroke, to bound LLM cost.
-  const [convoQuery, setConvoQuery] = useState('')
-  const [convoResults, setConvoResults] = useState<Media[]>([])
-  // Counts runs; only the latest one's answer lands, and a profile switch or
-  // sign-out bumps it so an answer fetched under the old session is dropped.
-  const convoGenRef = useRef(0)
-  const runConversational = useCallback((q: string) => {
-    const query = q.trim()
-    const gen = ++convoGenRef.current
-    if (!query) { setConvoQuery(''); setConvoResults([]); return }
-    setConvoQuery(query)
-    setConvoLoading(true)
-    void searchMedia(query, 12, undefined, 'semantic').then(res => {
-      if (gen !== convoGenRef.current) return
-      setConvoResults(res.items as Media[])
-      setConvoLoading(false)
-    }).catch(() => {
-      if (gen !== convoGenRef.current) return
-      setConvoLoading(false)
-      /* keep prior results; the input retains the query */
-    })
-  }, [])
   const [homeLoading, setHomeLoading] = useState(false)
-  const [convoLoading, setConvoLoading] = useState(false)
   const [homeError, setHomeError] = useState<string | null>(null)
   // 2026-06-05 (Home net-new #1) — real total library size for the greeting's
   // "picked from X titles" clause. Fetched count-only (see its effect) via a
@@ -2971,13 +2166,24 @@ export default function App() {
   const [homeLibraryCount, setHomeLibraryCount] = useState<{ key: string; total: number } | null>(null)
 
   const navigate = useNavigate()
+  // Someone signed in: a TV's code carried through a provider's round trip
+  // goes back into the address, and a viewer who had followed "Connect a TV
+  // with a code" is taken to that page (lib/devicePairing). Both are read
+  // once and forgotten.
   useEffect(() => {
     if (!user) return
     const code = consumeDevicePairing()
+    const wanted = consumeDeviceIntent()
     if (code) navigate(`/device?code=${encodeURIComponent(code)}`, { replace: true })
+    else if (wanted) navigate('/device', { replace: true })
   }, [user, navigate])
   const location = useLocation()
+  // The address as it is now, for an answer that lands after the press.
+  const locationRef = useRef(location)
+  useLayoutEffect(() => { locationRef.current = location }, [location])
   const previousPathnameRef = useRef(location.pathname)
+  // The address the effect below last acted on (null before its first run).
+  const syncedPathnameRef = useRef<string | null>(null)
 
   // QA BUG-001 — sync URL → view on mount and on every pathname
   // change (browser back/forward, bookmarks, direct loads). Without
@@ -2986,9 +2192,23 @@ export default function App() {
   // when in-app handleNavigate triggers a pathname change, this
   // effect just confirms the same view we already set.
   useEffect(() => {
+    // Only a new address is acted on. The effect also runs when closePlayer
+    // changes, which it does during startup; a run then, between a press
+    // that had set the view ahead of its address (the first key typed into
+    // the bar sets 'search' and then navigates) and that address's commit,
+    // read the old address as a Back out of the search page: the view went
+    // back and the words just typed were cleared.
+    if (syncedPathnameRef.current === location.pathname) return
+    syncedPathnameRef.current = location.pathname
     const previousPathname = previousPathnameRef.current
     previousPathnameRef.current = location.pathname
-    if (shouldClosePlayerOnPathChange(
+    const target = pathToView(location.pathname)
+    // The one change of address that is not a navigation away from what is
+    // playing: the search page taking its address as its viewer types
+    // (showSearchPage).
+    const typedIntoSearch = enteringSearchRef.current && target === 'search'
+    enteringSearchRef.current = false
+    if (!typedIntoSearch && shouldClosePlayerOnPathChange(
       previousPathname,
       location.pathname,
       playerRemoteActiveRef.current,
@@ -2998,9 +2218,16 @@ export default function App() {
       // a player target yet.
       closePlayer(true)
     }
-    const target = pathToView(location.pathname)
     if (target !== view) {
       setView(target)
+      // Back (or Forward) out of the search page to anything but a title:
+      // the words in the bar were for the results, and go with them. A
+      // title keeps them, so Back from it is the results again. (In-app
+      // navigation has set `view` already and does its own clearing.)
+      if (view === 'search' && target !== 'detail') {
+        setSearchQuery('')
+        setSearchDescribe(null)
+      }
     }
     // Leaving a /title/:id URL (browser Back, sidebar nav, history
     // traversal) is the moment the detail selection stops being current.
@@ -3071,13 +2298,29 @@ export default function App() {
       navigate('/')
     }
   }, [user, actingRestricted, adminUI, location.pathname, navigate])
+  // A session KNOWN to act as a restricted profile sees Tonight, Movies and
+  // Shows: opening Together, requests, a member page, the profile page,
+  // Collections, My Library or Upcoming by URL lands on Tonight, and so does
+  // switching into such a profile while on one. Presentation only (the
+  // server enforces the limit), and only once the profile is known:
+  // 'unknown' redirects nothing, or a parent's deep link would bounce home
+  // during startup. The pages themselves are also kept from rendering
+  // (hiddenOk, below): this effect runs after the commit.
+  useEffect(() => {
+    if (user && navScope === 'restricted' && hiddenFromRestricted(pathToView(location.pathname))) {
+      navigate('/', { replace: true })
+    }
+  }, [user, navScope, location.pathname, navigate])
 
-  const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
+  // Returns the toast's id, for a caller that may have to take it back.
+  const addToast = useCallback((message: string, type: Toast['type'] = 'info', action?: Toast['action']) => {
     const id = nextToastId()
-    setToasts(prev => [...prev, { id, message, type }])
+    setToasts(prev => [...prev, { id, message, type, action }])
+    return id
   }, [nextToastId])
 
   const removeToast = useCallback((id: string) => {
+    toastOwnersRef.current.delete(id)
     setToasts(prev => prev.filter(t => t.id !== id))
   }, [])
 
@@ -3102,6 +2345,77 @@ export default function App() {
   // since it was asked: the server may have answered it for a profile other
   // than the one still named.
   const { isSwitching: isProfileSwitching, switchGeneration: profileSwitchGeneration } = profileSwitch
+
+  // A switch through the UI, counted when it ends, however it ends (done,
+  // refused, its PIN prompt cancelled): the promise switchProfile returns
+  // settles then. What was held back for the switch (an invitations request)
+  // is asked for when the count changes, which is the only signal there is
+  // when the switch ends on the profile already shown.
+  const [switchesEnded, setSwitchesEnded] = useState(0)
+  const switchProfileWatched = useCallback(async (id: number) => {
+    try {
+      return await switchProfile(id)
+    } finally {
+      setSwitchesEnded(n => n + 1)
+      // The open title's 404 was dropped while this attempt was out (the
+      // answer might have been for the profile it was binding). Read it
+      // again: when the attempt changed nothing (a PIN prompt cancelled, an
+      // activation refused) nothing else would, and a 404 must still leave
+      // the page; when it did change the profile, the switch's own reset
+      // has already sent the title through its re-read, and this one reads
+      // whatever is open, which is idempotent.
+      if (titleReadDroppedRef.current) {
+        titleReadDroppedRef.current = false
+        setDetailReadNonce(n => n + 1)
+      }
+    }
+  }, [switchProfile])
+  const switchWatch = useMemo(
+    () => ({ isSwitching: isProfileSwitching, generation: profileSwitchGeneration, ended: switchesEnded }),
+    [isProfileSwitching, profileSwitchGeneration, switchesEnded],
+  )
+
+  // Invites feature — the caller's open party invites (bell RSVP rows +
+  // Calendar chips). null = never loaded. Refreshed when the bell opens
+  // and when a live party notification arrives; RSVP flips optimistically.
+  // Declared before useRealtime, whose onNotification references
+  // refreshMyPartyInvites, and after the profile switch, which it watches.
+  // The list belongs to the user and acting profile it was asked for
+  // (usePartyInvites): it is null for anyone else, so a sign-out, an expired
+  // session or a profile switch never shows one session's invitations to the
+  // next, and a late answer for the previous one is dropped.
+  const {
+    invites: myPartyInvites, refresh: refreshMyPartyInvites, patch: patchMyPartyInvites,
+  } = usePartyInvites(user ? `${user.id}:${activeProfileId ?? 'none'}` : null, switchWatch)
+  useEffect(() => {
+    if (notifOpen) refreshMyPartyInvites()
+  }, [notifOpen, refreshMyPartyInvites])
+  // Tonight's live strip shows the invitations nobody has answered, so they
+  // are also read when Home shows (they used to be read only when the bell
+  // opened): for a session offered Together, once its profile is known.
+  const invitesWanted = !!user && view === 'home' && navScope === 'full'
+  useEffect(() => {
+    if (invitesWanted) refreshMyPartyInvites()
+  }, [invitesWanted, refreshMyPartyInvites])
+
+  const handleInviteRsvp = useCallback((inviteId: number, rsvp: 'going' | 'maybe' | 'declined') => {
+    // Optimistic flip; refetch on BOTH outcomes so a feed refresh that was
+    // already in flight when the user clicked can't leave a stale pressed
+    // state (2026-08 review) — the follow-up fetch converges on the
+    // server's answer.
+    patchMyPartyInvites(list => list.map(i => (i.invite_id === inviteId ? { ...i, rsvp } : i)))
+    rsvpPartyInvite(inviteId, rsvp)
+      .then(() => refreshMyPartyInvites())
+      .catch(err => {
+        refreshMyPartyInvites()
+        setToasts(prev => [...prev, {
+          id: nextToastId(),
+          message: failureWords(err, 'save your answer') ?? 'Could not save your answer just now.',
+          type: 'error',
+        }])
+      })
+  }, [refreshMyPartyInvites, patchMyPartyInvites, nextToastId])
+
 
   const reloadProfiles = useCallback(() => listProfiles(), [])
   useSessionProfileOnVisible({
@@ -3129,9 +2443,10 @@ export default function App() {
       try {
         const detail = await getMedia(id)
         if (!cancelled) setSelectedMedia(mapMedia(detail))
-      } catch {
+      } catch (err) {
         if (cancelled) return
-        addToast('Title not found', 'error')
+        const says = failureWords(err, 'open this title', { status: { 404: 'This title is not available.' } })
+        if (says) addToast(says, 'error')
         navigate('/', { replace: true })
       }
     })()
@@ -3289,7 +2604,47 @@ export default function App() {
     syncAppBadge(realtimeUserId == null ? 0 : unreadCount)
   }, [unreadCount, realtimeUserId])
 
-  const handleNavigate = useCallback((v: string) => {
+  // The Library destination opens the scope last looked at in this tab
+  // (Movies the first time). Only a scope the session is offered is used.
+  const lastLibraryScopeRef = useRef('movies')
+  useEffect(() => {
+    if (isLibraryView(view)) lastLibraryScopeRef.current = view
+  }, [view])
+  // The search page's own field (phones) takes focus only when the Search
+  // tab was just pressed. Not on every mount: coming Back to the page from
+  // a title would reopen the keyboard over the results.
+  const searchFieldFocusRef = useRef(false)
+  const [searchFocusNonce, setSearchFocusNonce] = useState(0)
+  const takeSearchFieldFocus = useCallback(() => {
+    const wanted = searchFieldFocusRef.current
+    searchFieldFocusRef.current = false
+    return wanted
+  }, [])
+  // A press that never reached the field (the page did not mount: the bar's
+  // own field took the query, or the session left) must not be answered by
+  // a later mount, such as coming Back from a title.
+  useEffect(() => {
+    if (view !== 'search') searchFieldFocusRef.current = false
+  }, [view])
+  // `keepSearch`: the search page itself is sending the viewer on (to a
+  // collection it listed, to My requests), so the words stay, and Back
+  // returns to the results they were for. Any other navigation drops them.
+  const handleNavigate = useCallback((dest: string, { keepSearch = false }: { keepSearch?: boolean } = {}) => {
+    // A title's open still waiting for the browser's next frame is not made
+    // over the place the viewer has gone to since (lib/posterTravel).
+    dropWaitingOpen()
+    if (dest === 'search') {
+      searchFieldFocusRef.current = true
+      setSearchFocusNonce(n => n + 1)
+    }
+    let v = dest
+    // The Library DESTINATION, whose id is no view's: 'library' itself is
+    // the My Library scope and navigates there like any other view.
+    if (dest === LIBRARY_DESTINATION) {
+      const offered = libraryScopesFor(navScope).map(sc => sc.id as string)
+      // Already somewhere in Library: the destination is "reset this page".
+      v = isLibraryView(view) ? view : offered.includes(lastLibraryScopeRef.current) ? lastLibraryScopeRef.current : 'movies'
+    }
     // QA 2026-05-25 — clicking the *current* view's nav item should
     // act as "reset to list" for views with internal drill-down
     // state. Bump a per-view nonce so child components can listen
@@ -3321,11 +2676,10 @@ export default function App() {
     }
     setView(v)
     setSelectedMedia(null)
-    setSearchOpen(false)
     // Clear the search input on navigate. It's a controlled input on
     // `searchQuery`, so this prevents the text from sticking after
     // leaving the search view.
-    setSearchQuery('')
+    if (!keepSearch) setSearchQuery('')
     // Close the player on nav so the URL and rendered state stay in
     // sync (matters for programmatic history.replaceState calls).
     // While a cast/AirPlay receiver is active,
@@ -3336,25 +2690,170 @@ export default function App() {
     if (!playerRemoteActiveRef.current) closePlayer(true)
     rememberScroll(location.key)
     navigate(`/${v}`)
-  }, [view, navigate, closePlayer, location.key])
+  }, [view, navigate, closePlayer, location.key, navScope])
+  // The search page is a place: shown, it has its address (/search). It used
+  // to be drawn over whatever address the viewer was typing at, so Back from
+  // a result skipped the results and left the words in the bar over another
+  // page, and a reload showed that other page. Now Back from a result is the
+  // results, Back from the results is where the viewer was, and the words
+  // stay in the bar exactly while the results they are for are one Back
+  // away. The words themselves are never in the address (a description of a
+  // mood is not something to leave in a browser's history), so a reload of
+  // /search is the page with nothing typed.
+  //
+  // Entered by typing, by Enter, and by a request's "Find it": one history
+  // entry however many keys follow (`view` is already 'search' for those).
+  const enteringSearchRef = useRef(false)
+  const showSearchPage = useCallback(() => {
+    if (view === 'search') return
+    setView('search')
+    // A player minimized over the page keeps playing while its viewer types,
+    // as it always has (any other change of address closes it).
+    enteringSearchRef.current = true
+    rememberScroll(location.key)
+    navigate('/search')
+    window.scrollTo({ top: 0, behavior: 'auto' })
+  }, [view, navigate, location.key])
+  const describeSearch = useCallback((q: string) => {
+    const query = q.trim()
+    if (!query) return
+    noteSearch(query)
+    const n = ++describeAsksRef.current
+    setSearchQuery(q)
+    setSearchDescribe({ query, n, owner: searchOwner })
+    showSearchPage()
+  }, [searchOwner, noteSearch, showSearchPage])
+  // The scan bar's "Open Libraries": the admin page, on its Libraries
+  // section. Counted, so pressing it again while the page is on another
+  // section opens Libraries again; leaving the admin page forgets it, so the
+  // page opens on its overview the next time it is reached any other way.
+  const [adminAsk, setAdminAsk] = useState(0)
+  const openAdminLibraries = useCallback(() => {
+    setAdminAsk(n => n + 1)
+    if (view !== 'admin') handleNavigate('admin')
+  }, [view, handleNavigate])
+  useEffect(() => { if (view !== 'admin') setAdminAsk(0) }, [view])
+  // The field's clear button, and the first Escape: the words go, the page
+  // stays (it lists the recent searches), and the cursor is in the field.
+  const clearSearch = useCallback(() => {
+    const field = searchField()
+    changeSearchQuery('')
+    field?.focus({ preventScroll: field === searchInputRef.current })
+  }, [changeSearchQuery])
+  // A request was made (on the search page, or the requests page's own
+  // composer): the list this tab holds learns of it, and a toast says so.
+  const handleRequestSubmitted = useCallback((r: MediaRequest) => {
+    // Not loaded yet (or dropped on a switch): leave it to the fetch, which
+    // will include this one, rather than show it alone and cancel the fetch.
+    // Not twice: a list fetched while this answer was out already has it.
+    setRequestsList(prev => prev ? (prev.some(x => x.id === r.id) ? prev : [r, ...prev]) : prev)
+    const id = nextToastId()
+    setToasts(prev => [...prev, { id, message: `Requested "${r.title}"`, type: 'success' }])
+  }, [nextToastId])
+  // What the search page needs to take requests where a search ends. A
+  // request's answer can arrive after the tab has moved on (a sign-out and
+  // another sign-in, a profile switch): it is stamped with whose press it
+  // was, and told to the app only while the tab still acts as them. It used
+  // to be added to whatever requests list the tab then held, and announced.
+  const searchUserId = user ? user.id : 0
+  const searchOwnerRef = useRef(searchOwner)
+  useLayoutEffect(() => { searchOwnerRef.current = searchOwner }, [searchOwner])
+  const searchRequesting = useMemo(() => ({
+    userId: searchUserId,
+    onRequested: (r: MediaRequest) => { if (searchOwnerRef.current === searchOwner) handleRequestSubmitted(r) },
+    onOpenRequests: () => handleNavigate('requests', { keepSearch: true }),
+  }), [searchUserId, searchOwner, handleRequestSubmitted, handleNavigate])
+  // The requests page's own late answers, stamped the same way: a request
+  // asked for again, a delete, a row found to have moved on.
+  const requestsPage = useMemo(() => {
+    const still = () => searchOwnerRef.current === searchOwner
+    return {
+      submitted: (r: MediaRequest) => { if (still()) handleRequestSubmitted(r) },
+      deleted: (id: number, replaced?: boolean) => {
+        if (!still()) return
+        setRequestsList(prev => prev ? prev.filter(r => r.id !== id) : prev)
+        // A failed request that was asked for again goes quietly: the new
+        // request has just been announced.
+        if (replaced) return
+        const tId = nextToastId()
+        setToasts(prev => [...prev, { id: tId, message: 'Request deleted', type: 'info' }])
+      },
+      moved: (id: number, status: MediaRequest['status']) => {
+        if (still()) setRequestsList(prev => prev ? prev.map(r => (r.id === id ? { ...r, status } : r)) : prev)
+      },
+    }
+  }, [searchOwner, handleRequestSubmitted, nextToastId])
+  // A request that is in the library now is found by its title (a request
+  // holds no id of the title it became): the words, and the search page,
+  // at its address, so Back returns to the request.
+  // Not through handleNavigate, which ends by clearing the words.
+  const findInLibrary = useCallback((title: string) => {
+    changeSearchQuery(title)
+    showSearchPage()
+  }, [changeSearchQuery, showSearchPage])
+  // A collection picked from the search page's results: the Collections
+  // scope is opened on it. Owner-stamped, like the ask above, so it is not
+  // carried to another profile's Collections.
+  const [collectionAsk, setCollectionAsk] = useState<{ id: number; n: number; owner: string } | null>(null)
+  const collectionAsksRef = useRef(0)
+  const openCollectionFromSearch = useCallback((id: number) => {
+    setCollectionAsk({ id, n: ++collectionAsksRef.current, owner: searchOwner })
+    handleNavigate('collections', { keepSearch: true })
+  }, [handleNavigate, searchOwner])
+  const forgetCollectionAsk = useCallback(() => setCollectionAsk(null), [])
 
   const handleSelect = useCallback((m: Media) => {
-    setSelectedMedia(m)
-    setView('detail')
-    // Real URL per title: refresh keeps the page, browser Back returns to
-    // the grid this was opened from, and the address bar is shareable.
-    // selectedMedia is already set above so the deep-link hydration
-    // effect no-ops for in-app opens. Record where the grid was first, so
-    // Back lands on the card that was clicked (see scrollMemory).
-    rememberScroll(location.key)
-    navigate(`/title/${m.id}`)
-    // Issue #261 — clicking into a movie/show must open the detail page
-    // at the top; the window otherwise keeps whatever scroll offset the
-    // user had on the previous page (e.g. scrolled-down home).
-    // Instant (not smooth) because the page content is being replaced —
-    // a smooth scroll would animate over swapped-in content and look off.
-    window.scrollTo({ top: 0, behavior: 'auto' })
+    // The open itself: what this function has always done, in the order it
+    // did it.
+    const open = () => {
+      setSelectedMedia(m)
+      setView('detail')
+      // Real URL per title: refresh keeps the page, browser Back returns to
+      // the grid this was opened from, and the address bar is shareable.
+      // selectedMedia is already set above so the deep-link hydration
+      // effect no-ops for in-app opens. Record where the grid was first, so
+      // Back lands on the card that was clicked (see scrollMemory).
+      rememberScroll(location.key)
+      navigate(`/title/${m.id}`)
+      // Issue #261 — clicking into a movie/show must open the detail page
+      // at the top; the window otherwise keeps whatever scroll offset the
+      // user had on the previous page (e.g. scrolled-down home).
+      // Instant (not smooth) because the page content is being replaced —
+      // a smooth scroll would animate over swapped-in content and look off.
+      window.scrollTo({ top: 0, behavior: 'auto' })
+    }
+    // Made by lib/posterTravel, which runs it exactly once: at once, as it
+    // always was, unless a plain press on this title's card is behind it and
+    // the browser can draw that card's poster travelling to the title
+    // page's. Then it runs one frame later, inside the browser's
+    // transition. Never while a player or a party's panel is over the page,
+    // and only when the title page can draw its poster at once (its code is
+    // here and the title has one).
+    travelToTitle(m.id, open, { blocked: travelBlockedRef.current, arrives: detailModule !== null && !!m.poster })
   }, [navigate, location.key])
+  // Which card a press landed on, for the travel above.
+  useEffect(() => watchCardPresses(), [])
+  // The title page's code is fetched when the pointer or the focus first
+  // reaches a card, ahead of the press that needs it: the page a card opens
+  // is then drawn at once, not as a skeleton first, and its poster is there
+  // for the pressed one to travel to. From something the viewer did, until
+  // the code has arrived (a failed fetch is tried again at the next card
+  // reached); nothing is fetched on a timer or in a tab nobody is looking at.
+  useEffect(() => {
+    if (!user) return
+    const warm = (e: Event) => {
+      if (detailModule) { stop(); return }
+      if (!(e.target as Element | null)?.closest?.('[data-media-id]')) return
+      prefetchView('detail')
+    }
+    const stop = () => {
+      document.removeEventListener('pointerover', warm, true)
+      document.removeEventListener('focusin', warm, true)
+    }
+    document.addEventListener('pointerover', warm, true)
+    document.addEventListener('focusin', warm, true)
+    return stop
+  }, [user])
 
   // Play resolution. The UI Media type doesn't carry server file
   // IDs, so we resolve them here:
@@ -3362,6 +2861,7 @@ export default function App() {
   //   - Shows: play the first episode of season 1 (TODO: port the
   //     V1 next-episode smart-resume).
   const handlePlay = useCallback(async (m: Media) => {
+    dropWaitingOpen()
     // Don't start a new playback while a cast/AirPlay session is active: it
     // would tear down the cast's stream and leave the widget driving a
     // different title than the TV. The cast persists across navigation by
@@ -3400,36 +2900,40 @@ export default function App() {
         // applied to episodes for the same reason.
         const seasonsRaw = await getSeasons(m.id, ac.signal)
         if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
-        if (seasonsRaw.length === 0) throw new Error('No seasons available')
-        const seasons = [...seasonsRaw].sort((a, b) => a.season_number - b.season_number)
-        const firstSeason = seasons[0]
-        const episodesRaw = await getEpisodes(m.id, firstSeason.season_number, ac.signal)
+        if (seasonsRaw.length === 0) throw NO_FILE_TO_PLAY
+        // Where the show starts (lib/partyEpisode): the earliest episode
+        // with a file, the regular seasons in order and Specials last.
+        // Season 0 has the lowest number and is not where a show starts; it
+        // is still played when the show has nothing else. A season or an
+        // episode with no file is passed over rather than failing the play:
+        // a show whose first season's files were pruned still has something
+        // to start on.
+        const first = await firstEpisodeToPlay(m.id, ac.signal, seasonsRaw)
         if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
-        if (episodesRaw.length === 0) throw new Error('No episodes available')
-        const episodes = [...episodesRaw].sort((a, b) => a.episode_number - b.episode_number)
-        const ep = episodes[0]
-        // ep.files is already typed `EpisodeFile[] | undefined` in
-        // api.ts — the previous redundant `as` cast suggested a type
-        // mismatch that doesn't exist. Same cleanup applied to all
-        // four remaining sites in this file.
+        if (!first) throw NO_FILE_TO_PLAY
+        const ep = first.episode
         const file = pickFile(ep.files, preferQuality)
-        if (!file) throw new Error('Episode has no files')
+        if (!file) throw NO_FILE_TO_PLAY
+        // Not the first episode: say so, or the viewer is dropped into the
+        // middle of a show with no word of why.
+        const later = startsLaterNotice(m.title, first)
+        if (later) setToasts(prev => [...prev, { id: nextToastId(), message: later, type: 'info' }])
         setPlayerTarget({
           mediaItemId: m.id,
           fileId: file.id,
           fileType: 'episode',
           episodeId: ep.id,
-          seasonNumber: firstSeason.season_number,
+          seasonNumber: first.seasonNumber,
           episodeNumber: ep.episode_number,
           title: m.title,
-          subtitle: `S${firstSeason.season_number}E${ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
+          subtitle: `S${first.seasonNumber}E${ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
         })
       } else {
         // Movie → quality-preferred file.
         const files = await getMediaFiles(m.id, ac.signal)
         if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
         const file = pickFile(files, preferQuality)
-        if (!file) throw new Error('No file available to play')
+        if (!file) throw NO_FILE_TO_PLAY
         setPlayerTarget({
           mediaItemId: m.id,
           fileId: file.id,
@@ -3441,7 +2945,8 @@ export default function App() {
     } catch (err) {
       if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted) ||
           (err && (err as Error).name === 'AbortError')) return
-      const msg = err instanceof Error ? err.message : 'Failed to start playback'
+      const msg = err === NO_FILE_TO_PLAY ? 'There is no file to play for this title.' : failureWords(err, 'play this title')
+      if (!msg) return
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
     } finally {
@@ -3465,6 +2970,11 @@ export default function App() {
   // and a button can be re-hovered): collapses to one resolution+warm per
   // distinct target. Reset when the detail page is left (see cleanup effect).
   const lastIntentKeyRef = useRef<string | null>(null)
+  // The lookups a warm makes before it can start (a show's seasons and
+  // episodes, a film's files). Abandoned when the intent changes and when
+  // the page is left: for a show whose first seasons have no files that is
+  // a read per season, and they used to run on after the viewer had gone.
+  const intentLookupRef = useRef<AbortController | null>(null)
   const handlePrimaryIntent = useCallback(async (m: Media, resumeItem?: ContinueWatchingItem) => {
     if (!prewarmEnabled()) return
     // Don't pre-warm while casting — handlePlay refuses to start new local
@@ -3480,6 +2990,10 @@ export default function App() {
     const intentKey = `${m.type}:${m.id}:${resumeItem?.episode_id ?? ''}:${startSec}`
     if (lastIntentKeyRef.current === intentKey) return
     lastIntentKeyRef.current = intentKey
+    intentLookupRef.current?.abort()
+    const lookup = new AbortController()
+    intentLookupRef.current = lookup
+    const { signal } = lookup
 
     try {
       const preferQuality = currentPreferredQuality()
@@ -3487,26 +3001,21 @@ export default function App() {
       if (m.type === 'show') {
         if (resumeItem?.episode_id && resumeItem.season_number !== undefined) {
           // Resume → the CW record names the exact episode + position.
-          const eps = await getEpisodes(m.id, resumeItem.season_number)
+          const eps = await getEpisodes(m.id, resumeItem.season_number, signal)
           const ep = eps.find(e => e.id === resumeItem.episode_id)
           const file = pickFile(ep?.files, preferQuality)
-          if (file) void prewarm({ fileId: file.id, fileType: 'episode', startSec })
+          if (file && !signal.aborted) void prewarm({ fileId: file.id, fileType: 'episode', startSec })
         } else {
-          // Fresh → first episode of the first season (mirrors handlePlay's
-          // explicit season/episode sort).
-          const seasonsRaw = await getSeasons(m.id)
-          if (seasonsRaw.length === 0) return
-          const seasons = [...seasonsRaw].sort((a, b) => a.season_number - b.season_number)
-          const episodesRaw = await getEpisodes(m.id, seasons[0].season_number)
-          if (episodesRaw.length === 0) return
-          const episodes = [...episodesRaw].sort((a, b) => a.episode_number - b.episode_number)
-          const file = pickFile(episodes[0].files, preferQuality)
-          if (file) void prewarm({ fileId: file.id, fileType: 'episode', startSec: 0 })
+          // Fresh → the episode handlePlay will start (the same lookup, so
+          // the stream that is warmed is the one that is played).
+          const first = await firstEpisodeToPlay(m.id, signal)
+          const file = pickFile(first?.episode.files, preferQuality)
+          if (file && !signal.aborted) void prewarm({ fileId: file.id, fileType: 'episode', startSec: 0 })
         }
       } else {
-        const files = await getMediaFiles(m.id)
+        const files = await getMediaFiles(m.id, signal)
         const file = pickFile(files, preferQuality)
-        if (file) void prewarm({ fileId: file.id, fileType: 'media', startSec })
+        if (file && !signal.aborted) void prewarm({ fileId: file.id, fileType: 'media', startSec })
       }
     } catch {
       // Best-effort — a failed resolution / pre-warm must never disrupt the page.
@@ -3519,11 +3028,96 @@ export default function App() {
   // Also reset the intent dedup so re-opening the page can warm afresh.
   useEffect(() => {
     return () => {
+      intentLookupRef.current?.abort()
+      intentLookupRef.current = null
       cancelPrewarm()
       lastIntentKeyRef.current = null
     }
   }, [view, selectedMedia?.id])
 
+  // A title's library writes go to the server one at a time, in the order
+  // they were made. An Undo pressed while its removal was still out sent a
+  // POST that nothing ordered after the DELETE, and a save and a removal
+  // made in quick succession by hand could pass each other the same way.
+  // Both routes are idempotent, so every write is sent, whatever became of
+  // the one before it, and the last one sent is the last one made. A write
+  // whose turn comes after a profile switch is still sent: it names its
+  // profile in the address, which an unrestricted session may name (a
+  // restricted one is refused, and the owner checks below keep that off the
+  // new profile's screen).
+  const libraryWritesRef = useRef<Map<string, { tail: Promise<unknown>; made: number; failed: boolean }>>(new Map())
+  // One change to a profile's My Library: made on screen at once, then sent.
+  // `refused(last)`: the server did not take it; `last` says whether it was
+  // still the latest change asked for that title.
+  const changeLibrary = useCallback((m: Media, op: 'add' | 'remove', profileId: number, refused: (last: boolean) => void) => {
+    // All membership mutations dedupe inside the functional updater so a
+    // rapid double-click can't insert the same id twice (duplicate React
+    // keys) or drop it.
+    const addLocal = (prev: Media[]) => (prev.some(i => i.id === m.id) ? prev : [...prev, m])
+    const removeLocal = (prev: Media[]) => prev.filter(i => i.id !== m.id)
+    setLibrary(op === 'add' ? addLocal : removeLocal)
+    const key = `${profileId}:${m.id}`
+    const mark = { op }
+    pendingLibOpsRef.current.set(key, mark)
+    const settle = () => { if (pendingLibOpsRef.current.get(key) === mark) pendingLibOpsRef.current.delete(key) }
+    // The list this change was made on. A switch before the answer swaps in
+    // another profile's, which nothing here may edit.
+    const owner = libraryWriteOwnerRef.current
+    // The account it was made for: a write whose turn comes after a sign-out
+    // (or once another account has signed in) is not sent. Its 401 would end
+    // whatever session the tab has by then.
+    const madeFor = libraryUserRef.current
+    const queue = libraryWritesRef.current.get(key) ?? { tail: Promise.resolve(), made: 0, failed: false }
+    libraryWritesRef.current.set(key, queue)
+    const n = ++queue.made
+    const send = () => (libraryUserRef.current !== madeFor
+      ? Promise.reject(new Error('signed out since'))
+      : op === 'add' ? addToLibrary(profileId, m.id) : removeFromLibrary(profileId, m.id))
+    const sent = queue.tail.then(send, send)
+    queue.tail = sent
+    const last = () => queue.made === n
+    sent.then(settle, () => {
+      settle()
+      queue.failed = true
+      // Another list is on screen (a switch, or a sign-out, since): it is
+      // not this change's to edit, and what became of the change is not
+      // said to whoever is acting now, by a title's name.
+      if (libraryWriteOwnerRef.current !== owner) return
+      // The latest change is taken back on screen; an earlier one is left
+      // to the read below, since what came after it is on screen too.
+      if (last()) setLibrary(op === 'add' ? removeLocal : addLocal)
+      refused(last())
+    }).finally(() => {
+      if (!last()) return
+      libraryWritesRef.current.delete(key)
+      // A queue in which anything failed ends with the server's own list:
+      // working out the title's state from the answers in order is what
+      // left the screen saying saved for a title the server did not have.
+      if (!queue.failed || libraryWriteOwnerRef.current !== owner) return
+      getLibrary(profileId).then(items => {
+        if (libraryWriteOwnerRef.current === owner) setLibrary(prev => mergeServerLibrary(prev, items, profileId))
+      }, () => {})
+    })
+  }, [mergeServerLibrary])
+  // The toast's Undo puts a removed title back, and does only that. It was
+  // the toggle called again, which flips whatever the list says by then: a
+  // removal that had failed was sent a second time, and a title its viewer
+  // had saved again by hand was removed, silently. Here a title that is in
+  // the list is left alone; one that is not goes back, for the profile it
+  // was removed for and only while that profile's list is still the one on
+  // screen (`owner`; lib/libraryUndo), with its write behind the removal's
+  // (changeLibrary's queue).
+  const restoreToLib = useCallback((m: Media, profileId: number, owner: string | null) => {
+    if (!undoMayRestore(libraryWriteOwnerRef.current, owner, library, m.id)) return
+    changeLibrary(m, 'add', profileId, (last) => {
+      if (last) addToast(`Couldn't put "${m.title}" back — try again`, 'error')
+    })
+  }, [library, changeLibrary, addToast])
+  // Undo is pressed later, when `library` has moved on: it calls the
+  // function of that render, not the one that made the toast.
+  const restoreToLibRef = useRef(restoreToLib)
+  // A layout effect, for the reason buildCardMenuRef's is one.
+  useLayoutEffect(() => { restoreToLibRef.current = restoreToLib }, [restoreToLib])
   const handleToggleLib = useCallback((m: Media) => {
     // Optimistic: flip local state now, persist to the server, roll back on
     // failure. Needs a signed-in profile — the library is per-profile.
@@ -3531,35 +3125,31 @@ export default function App() {
       addToast('Pick a profile to save titles', 'info')
       return
     }
+    // The render-closure read only decides intent (changeLibrary dedupes).
     const wasSaved = library.some(i => i.id === m.id)
-    // All membership mutations dedupe inside the functional updater so a
-    // rapid double-click can't insert the same id twice (duplicate React
-    // keys) or drop it — the render-closure read above only decides intent.
-    const addLocal = (prev: Media[]) => (prev.some(i => i.id === m.id) ? prev : [...prev, m])
-    const removeLocal = (prev: Media[]) => prev.filter(i => i.id !== m.id)
-    setLibrary(wasSaved ? removeLocal : addLocal)
-    addToast(
-      wasSaved ? `Removed "${m.title}" from library` : `Added "${m.title}" to library`,
+    const profileId = activeProfileId
+    const owner = libraryWriteOwnerRef.current
+    // A removal can be taken back from its toast (once: a toast takes its
+    // action once), for whoever removed the wrong one.
+    let undone = false
+    const said = addToast(
+      wasSaved ? `Removed ${m.title} from My Library.` : `Saved ${m.title} to My Library.`,
       wasSaved ? 'info' : 'success',
+      wasSaved ? { label: 'Undo', run: () => { undone = true; restoreToLibRef.current(m, profileId, owner) } } : undefined,
     )
-    // Record the in-flight op so a concurrent reconcile preserves it.
-    pendingLibOpsRef.current.set(m.id, wasSaved ? 'remove' : 'add')
-    const settle = () => pendingLibOpsRef.current.delete(m.id)
-    // The list this change was made on. A switch before the answer swaps in
-    // another profile's, which a rollback must not edit.
-    const owner = libraryOwnerRef.current
-    const req = wasSaved
-      ? removeFromLibrary(activeProfileId, m.id)
-      : addToLibrary(activeProfileId, m.id)
-    req.then(settle).catch(() => {
-      settle()
-      // Roll back the optimistic change and tell the user it didn't stick.
-      if (libraryOwnerRef.current === owner) setLibrary(wasSaved ? addLocal : removeLocal)
-      addToast(`Couldn't ${wasSaved ? 'remove' : 'save'} "${m.title}" — try again`, 'error')
+    changeLibrary(m, wasSaved ? 'remove' : 'add', profileId, (last) => {
+      // It was not done: the toast that said it was goes, and with it the
+      // Undo of a removal that did not happen.
+      removeToast(said)
+      // Said only of the last thing its viewer asked for that title: after
+      // an Undo or a later change by hand, a "couldn't remove, try again"
+      // would ask them to undo what they asked for since.
+      if (last && !undone) addToast(`Couldn't ${wasSaved ? 'remove' : 'save'} "${m.title}" — try again`, 'error')
     })
-  }, [library, activeProfileId, addToast])
+  }, [library, activeProfileId, addToast, removeToast, changeLibrary])
 
   const handleBack = useCallback(() => {
+    dropWaitingOpen()
     // In-app opens pushed /title/:id onto the history stack, so real
     // history-back returns to the exact view (and scroll restoration)
     // the user came from — and the browser's own Back button now does
@@ -3567,36 +3157,113 @@ export default function App() {
     // shared link) has no in-app entry behind it; going back(-1) would
     // leave the SPA, so route home instead. selectedMedia is cleared by
     // the URL-sync effect once the path stops being /title/:id.
-    if (location.key !== 'default') {
+    // (lib/historyBack says when an entry of the app is behind this one.
+    // Where the step lands is then an address of the app like any other:
+    // the URL-sync effect and the redirects for pages a session is not
+    // shown apply to it exactly as they do to the browser's own Back.)
+    if (hasInAppEntryBehind(location.key, window.history.state)) {
       navigate(-1)
     } else {
       navigate('/', { replace: true })
     }
   }, [location.key, navigate])
 
+  // The title page's way out when its title cannot be read (the detail read
+  // below): Back, with the reason said where it lands. A ref, so that read
+  // does not run again whenever the address changes.
+  const leaveMissingTitleRef = useRef((_id: number) => {})
+  useLayoutEffect(() => {
+    leaveMissingTitleRef.current = (id: number) => {
+      // Only from that title's page, and not when a step back is under way
+      // already (the browser's Back, pressed while the read was out): two
+      // steps would leave the page the viewer went back to.
+      if (titleIdFromPath(location.pathname) !== id || stepBackUnderWay(location.key)) return
+      addToast('This title is not available.', 'error')
+      handleBack()
+    }
+  }, [addToast, handleBack, location.pathname, location.key])
+
   // Handle keyboard shortcuts
   useEffect(() => {
+    // Whether something is over the page, so that a key meant for the page
+    // must leave it alone: a card's menu, the add-to-list sheet, the profile
+    // picker, a PIN prompt, or any modal dialog (one that says it is, or one
+    // that has made the page inert or hidden it from assistive tech, as the
+    // Radix dialogs do). One answer for the search page's Escape and for
+    // Ctrl or Cmd K. The player is not in it: Escape closes a player, and
+    // while one casts the page under it is still the viewer's to use; the
+    // shortcut has its own rule for a player below.
+    const pageCovered = () =>
+      !!(contextMenu || addToListMedia || profilesGateOpen || pinTarget)
+      || document.querySelector('[aria-modal="true"]') !== null
+      || !!searchField()?.closest('[inert], [aria-hidden="true"]')
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        // Palette has its own Escape handler — let it close the
-        // palette without ALSO triggering the page-level back/etc.
-        // navigation here.
-        if (paletteOpen) return
         // The PIN prompt's Escape cancels it (Radix); it must not also navigate
         // the page behind it.
         if (pinTarget) return
         // While a cast/AirPlay receiver is active, Escape
         // must NOT unmount it (that kills the cast) — fall through to the
         // normal app navigation below instead.
-        if ((playerTarget || playerLoading) && !playerRemoteActiveRef.current) closePlayer(true)
-        else if (searchOpen) closeSearch()
-        else if (view === 'detail') handleBack()
+        // The add-to-list sheet had no Escape of its own, so the key went
+        // to the page behind it: on the search page it cleared the words,
+        // or went Back, with the sheet still up. Escape closes the sheet,
+        // and before any player: the sheet is painted above the player
+        // (z-[70]; the player in the window is z-[60], a sibling, and a
+        // minimized one is out of the paint order), so it is what is on top
+        // also when a player has opened under it (a party's, by itself).
+        // A dialog above the player owns its Escape (lib/escapeLayers).
+        // Native full screen is the browser's own Escape.
+        if (addToListMedia) closeAddToList()
+        else if ((playerTarget || playerLoading) && !playerRemoteActiveRef.current) closePlayer(true)
+        else if (view === 'search') {
+          // Not behind anything else that is over the page either.
+          if (pageCovered()) return
+          // On the search page Escape clears the field, then leaves: the
+          // first press takes the words (the focus goes to the field; it may
+          // have been on a result, which is about to go), and with none left
+          // the next goes back to where the viewer was.
+          if (searchQuery) clearSearch()
+          else {
+            (document.activeElement as HTMLElement | null)?.blur?.()
+            handleBack()
+          }
+        }
+        // Anywhere else, Escape in the bar's field only leaves the field.
+        // What is typed there stays: on a title opened from a search, those
+        // are the words Back returns to.
+        else if (searchInputRef.current && document.activeElement === searchInputRef.current) searchInputRef.current.blur()
+        // A title page goes Back, but not from behind something over it: the
+        // onboarding flow, a card's menu, a recap or any other dialog. Their
+        // Escape is theirs (or, for the flow, nothing), and went on to send
+        // the page they cover Back. The trailer, the player's menus and the
+        // party's leave question take the key before this handler sees it
+        // (lib/escapeLayers). A player still up here is casting (any other
+        // was closed above). In the window or full screen its surface is a
+        // modal dialog that makes the page inert, which pageCovered reads
+        // as covered; under it Escape stays the page's, as before, unless
+        // something else is over the page too (nothing in the page can be
+        // opened then: it is inert). Minimised, the cast covers nothing, and
+        // the page is asked like any other: a Radix dialog (a recap) sets no
+        // aria-modal and is seen only by the page being hidden.
+        else if (view === 'detail') {
+          const castOver = !!playerTarget && (playerSurface === 'theater' || playerSurface === 'fullscreen')
+          const covered = castOver
+            ? !!(contextMenu || profilesGateOpen || onboardingOpen)
+              || document.querySelector(`[aria-modal="true"]:not([${ESCAPE_LAYERS_ATTR}])`) !== null
+            : pageCovered()
+          if (!covered) handleBack()
+        }
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        // Cmd+K opens the SearchPalette overlay. Guard against:
-        //   - unauthenticated (no user)
-        //   - typing in another editable element
-        //   - any modal already open
+        // Ctrl or Cmd K puts the focus in the search field (it used to
+        // open a palette with a field of its own). It does nothing:
+        //   - signed out;
+        //   - from another text field (it is that field's key);
+        //   - while something is over the page: the player, a card's
+        //     menu, the add-to-list sheet, the profile picker or a PIN
+        //     prompt. Typing in the bar behind any of those would move
+        //     the page under it.
         if (!user) return
         const target = e.target as HTMLElement | null
         const inEditable = !!target && (
@@ -3604,16 +3271,24 @@ export default function App() {
           target.tagName === 'TEXTAREA' ||
           target.isContentEditable
         )
-        // Allow Cmd+K from inside our own top-bar search input
-        // (acts as "upgrade to palette" affordance).
         if (inEditable && target !== searchInputRef.current) return
-        if (playerTarget || partyJoinPrompt || contextMenu || addToListMedia) return
-        // The profile gate belongs in this list too. SearchPalette is z-200 and
-        // the gate is z-85, so Cmd+K opened the palette over it, and picking a
-        // result navigated the app behind a gate that stayed up.
-        if (profilesGateOpen || pinTarget) return
+        // Not while a player is up, minimized included (playerTarget).
+        if (playerTarget) return
+        // Nor under anything else that is over the page (pageCovered). The
+        // palette opened over a dialog, with a field of its own; this field
+        // is in the page behind it, and a dialog that holds the focus would
+        // hand the key on to the fallback below, which moves the page.
+        if (pageCovered()) return
+        const field = searchField()
         e.preventDefault()
-        setPaletteOpen(true)
+        // The bar is always on screen (it is sticky), and a plain focus()
+        // on something sticky scrolls the page to where the bar sits in the
+        // document: the top. The page stays where its viewer has it.
+        if (field) { field.focus({ preventScroll: field === searchInputRef.current }); field.select() }
+        // Below md the bar has no field (focusing one that is not drawn
+        // does nothing): the Search tab's page has its own, and takes the
+        // focus when it is opened this way.
+        if (!field || document.activeElement !== field) handleNavigate('search')
       }
     }
     window.addEventListener('keydown', handler)
@@ -3621,7 +3296,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, playerLoading, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen, pinTarget, closePlayer, closeSearch])
+  }, [playerTarget, playerLoading, playerSurface, searchQuery, view, handleBack, contextMenu, addToListMedia, closeAddToList, user, profilesGateOpen, pinTarget, onboardingOpen, closePlayer, clearSearch, handleNavigate])
 
   // Session expiry. /api/auth/me is validated once at mount (below), so a
   // long-lived tab whose session expired mid-session never re-checked: it kept
@@ -3937,21 +3612,13 @@ export default function App() {
     const m = pathAfterBase.match(/^\/(p|r)\/([A-Za-z0-9]{6})$/)
     if (!m) return
     const code = m[2].toUpperCase()
-    const linkKind = m[1] // 'p' or 'r' — preflight clarifies anyway
+    // A party link (/p/) and a room link (/r/) join the same way; the join's
+    // own lookup says which it was.
     // Strip the code from the URL so a refresh doesn't re-trigger
     // the join (which would error "already in party" if still
     // active, or no-op if not).
     window.history.replaceState({}, '', import.meta.env.BASE_URL)
-    void (async () => {
-      // If already in a party, confirm before clobbering — otherwise
-      // an accidental magic-link click silently disconnects the user
-      // and notifies everyone else with participant-left.
-      if (party.state.code && party.state.code !== code) {
-        const ok = window.confirm(
-          `You're in party ${party.state.code}. Leave it and join ${code}?`
-        )
-        if (!ok) return
-      }
+    const join = async () => {
       const result = await party.join(code)
       if (result.ok) {
         setPartyPanelOpen(true)
@@ -3959,16 +3626,29 @@ export default function App() {
         // Persistent rooms surface a friendly "offline" toast (vs
         // a generic error) so the user understands what they clicked.
         const id = nextToastId()
-        const isOfflineRoom = linkKind === 'r' || (result.error || '').toLowerCase().includes('persistent room')
+        // By the hook's reason, never its words.
+        // A room link and a party link alike: the reason decides (a room's
+        // lost connection or 404 is not its being offline).
         setToasts(prev => [...prev, {
           id,
-          message: isOfflineRoom
-            ? `Room ${code} is offline — no live session right now. Ask the host to start a watch party.`
-            : (result.error || `Couldn't join party ${code}.`),
-          type: isOfflineRoom ? 'info' : 'error',
+          message: joinRefusalWords(code, result.reason),
+          type: result.reason === 'offline_room' ? 'info' : 'error',
         }])
       }
-    })()
+    }
+    // If already in a party, ask before clobbering — otherwise an
+    // accidental magic-link click silently disconnects the user and
+    // notifies everyone else with participant-left.
+    if (party.state.code && party.state.code !== code) {
+      setConfirmAsk({
+        title: `Leave party ${party.state.code} and join ${code}?`,
+        body: 'You leave the party you are in now, and its room is told you left.',
+        confirmLabel: 'Leave and join',
+        run: () => { void join() },
+      })
+      return
+    }
+    void join()
   // We intentionally run once when user becomes available, not on
   // every party state change.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4002,13 +3682,29 @@ export default function App() {
   // login. Hoisted above the storage useEffect so both the explicit
   // logout and the cross-tab path can share it.
   const resetUserState = useCallback(() => {
+    // A question left open, and the add-to-list sheet's last failure, are
+    // whoever asked's: never the next session's.
+    setConfirmAsk(null)
+    setAddToListFailed(null)
+    // What was typed in the search field goes with whoever typed it. It
+    // stayed in the bar across a sign-out: the next person to sign in on
+    // the tab found the last one's words there, a search ran for them under
+    // the new account, and opening a result filed them in the new
+    // account's recent searches. (A session that expires does not come
+    // through here: the signed-out effect below clears them for both.)
+    setSearchQuery('')
+    setSearchDescribe(null)
+    forgetDescribedAnswer()
+    // "Connect a TV with a code" is the intent of whoever followed it.
+    forgetDeviceIntent()
+    setLibraryServerFor(null)
     setHomeRails(undefined)
     setHomeHero(null)
-    setHomeHeroIsFallback(false)
     // Clear hero pool too — without this, user A's personalized
     // blurb is briefly visible to user B after a cross-tab logout.
     setHeroPool([])
     setHeroIndex(0)
+    setHeroOnLead(true)
     setHeroPaused(false)
     setHeroSlateToken(undefined)
     heroPoolRef.current = []
@@ -4035,18 +3731,23 @@ export default function App() {
     showsRefreshAcRef.current?.abort()
     showsRefreshAcRef.current = null
     setContinueItems([])
-    convoGenRef.current++
-    setConvoQuery('')
-    setConvoResults([])
-    setConvoLoading(false)
+    setContinueFor(null)
+    forgetHeroLeadWait()
+    // The ref too, now: it is what a card's Play reads at click time, and it
+    // would otherwise hold the previous profile's records until the next
+    // commit's effects.
+    continueItemsRef.current = []
     setMoviesList(null)
     setShowsList(null)
     setMoviesTotal(null)
     setShowsTotal(null)
     // Pagination state reset on logout. Sort preference is per-user
     // so default it back; loading flags are per-session.
-    setMoviesSort('rating')
-    setShowsSort('rating')
+    // What a grid opens with, not a sort of its own: after signing out and
+    // in again the grid opened on "Top rated" with Filters saying something
+    // was applied.
+    setMoviesSort(DEFAULT_BROWSE_SORT)
+    setShowsSort(DEFAULT_BROWSE_SORT)
     setMoviesLoadingMore(false)
     setShowsLoadingMore(false)
     setMoviesNextPage(1)
@@ -4080,7 +3781,7 @@ export default function App() {
     // were admin) before our auth checks fired. Server-side guards
     // prevent data leakage, but the UX reads as a permissions bug.
     navigate('/')
-  }, [navigate, closePlayer])
+  }, [navigate, closePlayer, forgetHeroLeadWait])
 
   // Cross-tab logout. A logout in another tab clears aurora_token
   // and fires a `storage` event here; we tear down the watch party
@@ -4269,7 +3970,6 @@ export default function App() {
             title: 'From People You Follow',
             items: followingRailRef.current.map(mapFollowedToMedia),
             aspect: 'poster' as const,
-            showBadges: true,
             subtitle: 'Recently watched by members you follow',
             cardSubtitles: followingRailRef.current.reduce<Record<number, string>>(
               (acc, w) => { acc[w.id] = followedWatchSubtitle(w); return acc }, {}),
@@ -4278,15 +3978,15 @@ export default function App() {
       ...discoverRailsRef.current
         .filter(r => r.items.length > 0)
         .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
-          aiPick: true, showBadges: true, subtitle: r.description || 'Hand-picked by Aurora for your taste' })),
+          aiPick: true, subtitle: r.description || undefined })),
       ...anchorRailsRef.current
         .filter(r => r.items.length > 0)
         .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
-          aiPick: true, showBadges: true, subtitle: 'More like the titles you finished' })),
+          aiPick: true, subtitle: 'more like the titles you finished' })),
       ...engagementRailsRef.current
         .filter(r => r.items.length > 0)
         .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
-          aiPick: true, showBadges: true, subtitle: r.description || 'Built from what Aurora viewers actually finish' })),
+          aiPick: true, subtitle: r.description || 'what viewers here actually finish' })),
     ]
     if (personalized.length === 0) { setHomeRails(core); return }
     // Splice personalized rails between Recently Added (index 0) and the Top
@@ -4298,6 +3998,8 @@ export default function App() {
   // discover_ready WS push and the manual "Refresh picks" action. `refresh`
   // forces a server-side rebuild (?refresh=1).
   const refetchDiscover = useCallback(async (profileId: number | null, refresh = false) => {
+    // Never for a profile with a content limit, which is shown none of them.
+    if (navScopeRef.current === 'restricted') return
     try {
       const { rails, building } = await getDiscoverRails(profileId ?? undefined, undefined, refresh)
       if (rails.length > 0) {
@@ -4396,15 +4098,13 @@ export default function App() {
         ])
         if (cancelled) return
 
-        // Only set the rails-derived hero when the personalized pool
-        // hasn't supplied one. Read via ref to avoid closure
-        // staleness reporting the pool as empty after the hero fetch
-        // already populated it.
+        // The catalog's stand-in hero, recorded whether or not the pool
+        // has picks (it shows only when the slate has no entry).
         // Not from a background load whose rails a later-started fetch has
         // already beaten (it would put an older title back as the hero).
-        if (heroPoolRef.current.length === 0 && (cold || railsSeq > homeRailsLandedSeqRef.current)) {
+        if (cold || railsSeq > homeRailsLandedSeqRef.current) {
           const hero = (recent[0] || movies[0] || null) as Media | null
-          if (hero) { setHomeHero(hero); setHomeHeroIsFallback(true) }
+          if (hero) setHomeHero(hero)
         }
 
         // Build the core rail set (no personalized yet). Order is the
@@ -4467,6 +4167,12 @@ export default function App() {
           setDiscoverBuilding(false)
         }
         if (!personalProfileReady) return
+        // A profile with a content limit is shown none of the recommender's
+        // rails (its Tonight is what it started, its list and two shelves),
+        // so they are not asked for: the Discover rails are a model build on
+        // the server, for nothing. Read from a ref: the rails are not loaded
+        // again because a limit changed.
+        if (navScopeRef.current === 'restricted') return
 
         // Fast rails (pure vector + first-party engagement signals, no LLM).
         // Fire-and-forget: splice in as soon as they resolve, AbortController
@@ -4509,7 +4215,7 @@ export default function App() {
         // Only surface an error when there is nothing on screen. A background
         // refresh that blips would otherwise paint "Couldn't load your library"
         // above a perfectly good Home.
-        if (cold) setHomeError(err instanceof Error ? err.message : 'Unknown error')
+        if (cold) setHomeError(failureWords(err, 'load Tonight'))
         else console.warn('[Aurora] background home refresh failed', err)
       } finally {
         // Note: setHomeLoading(false) for the success path now runs
@@ -4659,9 +4365,9 @@ export default function App() {
         homeRailsLandedSeqRef.current = railsSeq
         coreRailsRef.current = coreHomeRails(recent as Media[], movies as Media[], shows as Media[])
         recomposeHomeRails()
-        if (heroPoolRef.current.length === 0 && !homeHeroRef.current) {
+        if (!homeHeroRef.current) {
           const hero = (recent[0] || movies[0] || null) as Media | null
-          if (hero) { setHomeHero(hero); setHomeHeroIsFallback(true) }
+          if (hero) setHomeHero(hero)
         }
       })
       .catch(() => {
@@ -4770,8 +4476,9 @@ export default function App() {
     let cancelled = false
     const ac = new AbortController()
     listGenres('movie', ac.signal)
-      .then(gs => { if (!cancelled) setMoviesGenres(gs) })
-      .catch(() => { /* dropdown falls back to deriving from items */ })
+      .then(gs => { if (!cancelled) { setMoviesGenres(gs); setGenresFailed(f => (f.movie ? { ...f, movie: false } : f)) } })
+      // The control is then drawn from the loaded titles' own genres.
+      .catch(() => { if (!cancelled) setGenresFailed(f => (f.movie ? f : { ...f, movie: true })) })
     return () => { cancelled = true; ac.abort() }
   }, [user, view, moviesGenres])
 
@@ -4804,8 +4511,8 @@ export default function App() {
     let cancelled = false
     const ac = new AbortController()
     listGenres('show', ac.signal)
-      .then(gs => { if (!cancelled) setShowsGenres(gs) })
-      .catch(() => { /* fallback path */ })
+      .then(gs => { if (!cancelled) { setShowsGenres(gs); setGenresFailed(f => (f.show ? { ...f, show: false } : f)) } })
+      .catch(() => { if (!cancelled) setGenresFailed(f => (f.show ? f : { ...f, show: true })) })
     return () => { cancelled = true; ac.abort() }
   }, [user, view, showsGenres])
 
@@ -4933,6 +4640,13 @@ export default function App() {
   const handleLoadMoreMovies = useCallback(async () => {
     if (!moviesList || moviesTotal == null || moviesLoadingMore) return
     if (moviesList.length >= moviesTotal) return
+    // Not while a profile switch or its PIN prompt is out, and an answer is
+    // dropped if one has started since it was asked: the server may have
+    // answered it for a profile other than the one this tab still names. The
+    // live refresh has had this guard; Load More had a narrow window for a
+    // press, and a jump to a letter (which asks by itself) made it wide.
+    if (isProfileSwitching()) return
+    const switchGen = profileSwitchGeneration()
     // A live refresh landing after this would replace the list without the
     // page appended here; it runs again once this page has landed.
     moviesRefreshAcRef.current?.abort()
@@ -4956,6 +4670,7 @@ export default function App() {
       // swapped (sort change replaced the ref), discard the result
       // even though the request itself wasn't aborted in time.
       if (moviesLoadMoreAcRef.current !== ac) return
+      if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) return
       setMoviesList(prev => [...(prev ?? []), ...(items as Media[])])
       // Audit HIGH-1 — advance the cursor from server's page field,
       // not derived from list length. Survives variable page sizes.
@@ -4975,11 +4690,14 @@ export default function App() {
         moviesLoadMoreAcRef.current = null
       }
     }
-  }, [moviesList, moviesTotal, moviesLoadingMore, moviesSort, moviesGenre, moviesNextPage, nextToastId])
+  }, [moviesList, moviesTotal, moviesLoadingMore, moviesSort, moviesGenre, moviesNextPage, nextToastId, isProfileSwitching, profileSwitchGeneration])
 
   const handleLoadMoreShows = useCallback(async () => {
     if (!showsList || showsTotal == null || showsLoadingMore) return
     if (showsList.length >= showsTotal) return
+    // As for the Movies grid, above.
+    if (isProfileSwitching()) return
+    const switchGen = profileSwitchGeneration()
     showsRefreshAcRef.current?.abort()
     showsRefreshAcRef.current = null
     showsLoadMoreAcRef.current?.abort()
@@ -4995,6 +4713,7 @@ export default function App() {
         genre: genreAtFetch || undefined, signal: ac.signal,
       })
       if (showsLoadMoreAcRef.current !== ac) return
+      if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) return
       setShowsList(prev => [...(prev ?? []), ...(items as Media[])])
       setShowsNextPage(page + 1)
     } catch (err) {
@@ -5007,7 +4726,7 @@ export default function App() {
         showsLoadMoreAcRef.current = null
       }
     }
-  }, [showsList, showsTotal, showsLoadingMore, showsSort, showsGenre, showsNextPage, nextToastId])
+  }, [showsList, showsTotal, showsLoadingMore, showsSort, showsGenre, showsNextPage, nextToastId, isProfileSwitching, profileSwitchGeneration])
 
   // Sort-change handlers. Setting null on the items list triggers
   // the fetch effect above to re-run with the new sort, fetching
@@ -5016,6 +4735,47 @@ export default function App() {
   // refetch window. Audit HIGH-2 — also abort any in-flight Load
   // More + reset the nextPage cursor so a fresh sort always starts
   // at page 1.
+
+  // A grid sorted by title has an A to Z strip (LetterStrip). A letter that
+  // is further on than the loaded pages is reached by asking for the next
+  // ones, through the handlers above: the requests "Load more" makes. Each
+  // grid's jump reads its list only while its page is on screen and settled,
+  // so leaving the page, another sort or genre, or a profile switch drops a
+  // jump that is still loading.
+  const revealInGrid = useCallback((m: Media) => {
+    const card = document.querySelector<HTMLElement>(`[data-browse-layout] [data-media-id="${m.id}"]`)
+    if (!card) return
+    // To the top, under the chrome and the strip (the page's scroll padding).
+    card.scrollIntoView?.({ block: 'start' })
+    // And the keyboard's place with it: Tab goes on from this title.
+    const control = card.matches('[tabindex]') ? card : card.querySelector<HTMLElement>('button')
+    control?.focus({ preventScroll: true })
+  }, [])
+  const loadMoreMovies = useCallback(() => { void handleLoadMoreMovies() }, [handleLoadMoreMovies])
+  const loadMoreShows = useCallback(() => { void handleLoadMoreShows() }, [handleLoadMoreShows])
+  // Each grid's genres for its controls: the server's list, or, when that
+  // could not be read, the genres of the titles the grid holds.
+  const moviesGenreList = useMemo(
+    () => moviesGenres ?? (genresFailed.movie ? fallbackGenres(moviesList, moviesGenre) : null),
+    [moviesGenres, genresFailed.movie, moviesList, moviesGenre],
+  )
+  const showsGenreList = useMemo(
+    () => showsGenres ?? (genresFailed.show ? fallbackGenres(showsList, showsGenre) : null),
+    [showsGenres, genresFailed.show, showsList, showsGenre],
+  )
+  // Whether each grid has the strip: sorted by title, settled, and short
+  // enough (see where the strip is drawn).
+  const moviesStrip = moviesSort === 'title' && !profileSwitchPending && fitsInPages(moviesTotal, BROWSE_PER_PAGE, CATALOG_REFRESH_MAX_PAGES)
+  const showsStrip = showsSort === 'title' && !profileSwitchPending && fitsInPages(showsTotal, BROWSE_PER_PAGE, CATALOG_REFRESH_MAX_PAGES)
+  const moviesJump = useLetterJump({
+    items: view === 'movies' && !profileSwitchPending ? moviesList : null, total: moviesTotal,
+    enabled: moviesStrip, loadingMore: moviesLoadingMore, loadMore: loadMoreMovies, reveal: revealInGrid,
+  })
+  const showsJump = useLetterJump({
+    items: view === 'shows' && !profileSwitchPending ? showsList : null, total: showsTotal,
+    enabled: showsStrip, loadingMore: showsLoadingMore, loadMore: loadMoreShows, reveal: revealInGrid,
+  })
+
   const handleMoviesSortChange = useCallback((s: MediaSort) => {
     if (s === moviesSort) return
     moviesLoadMoreAcRef.current?.abort()
@@ -5090,6 +4850,7 @@ export default function App() {
     // leak into the new render frame.
     setDetailSeasons([])
     setDetailSelectedSeason(null)
+    const switchGen = profileSwitchGeneration()
     ;(async () => {
       try {
         // The seasons list depends only on the id, and `selectedMedia.type`
@@ -5124,14 +4885,56 @@ export default function App() {
             const cw = continueItemsRef.current.find(
               c => c.media_item_id === selectedMedia.id && c.season_number != null,
             )
-            const initialSeason =
-              cw?.season_number != null && seasons.some(s => s.season_number === cw.season_number)
-                ? cw.season_number
-                : seasons[0].season_number
-            setDetailSelectedSeason(initialSeason)
-            const epsRaw = await getEpisodes(selectedMedia.id, initialSeason, ac.signal)
-            if (cancelled) return
-            const eps = [...epsRaw].sort((a, b) => a.episode_number - b.episode_number)
+            // With nothing in progress: the season the show STARTS in
+            // (lib/partyEpisode), which is the first with something to play,
+            // looking through the regular seasons in order and the Specials
+            // last. Not the lowest number, which is Specials when a show has
+            // them; and not a first season whose files are gone, which left
+            // the page listing episodes none of which could be played while
+            // its Play started a Special and its party had no episode at
+            // all. The page then lists the season its Play starts and its
+            // party opens on, as a card's do. The picker still lists the
+            // seasons in number order.
+            //
+            // The same walk firstEpisodeToPlay makes, keeping what it reads:
+            // one request when the first regular season can be played, as
+            // before, and one more per season passed over. When nothing can
+            // be played anywhere the page opens on the first regular season.
+            const sortEps = (raw: ApiEpisode[]) => [...raw].sort((a, b) => a.episode_number - b.episode_number)
+            let initialSeason: number
+            let eps: ApiEpisode[]
+            if (cw?.season_number != null && seasons.some(s => s.season_number === cw.season_number)) {
+              initialSeason = cw.season_number
+              setDetailSelectedSeason(initialSeason)
+              eps = sortEps(await getEpisodes(selectedMedia.id, initialSeason, ac.signal))
+              if (cancelled) return
+            } else {
+              const order = regularSeasonsFirst(seasons)
+              initialSeason = order[0].season_number
+              // Shown at once: the chips should not wait on a second read.
+              setDetailSelectedSeason(initialSeason)
+              eps = sortEps(await getEpisodes(selectedMedia.id, initialSeason, ac.signal))
+              if (cancelled) return
+              if (!eps.some(e => e.files && e.files.length > 0)) {
+                for (const later of order.slice(1)) {
+                  let found: ApiEpisode[]
+                  try {
+                    found = sortEps(await getEpisodes(selectedMedia.id, later.season_number, ac.signal))
+                  } catch (err) {
+                    if (cancelled || (err && (err as Error).name === 'AbortError')) return
+                    // A later season that cannot be read: stay on the first.
+                    break
+                  }
+                  if (cancelled) return
+                  if (found.some(e => e.files && e.files.length > 0)) {
+                    initialSeason = later.season_number
+                    eps = found
+                    setDetailSelectedSeason(initialSeason)
+                    break
+                  }
+                }
+              }
+            }
             setDetailEpisodes(eps)
             // Stamp the ref so the season-switch effect knows
             // what's currently loaded.
@@ -5148,13 +4951,35 @@ export default function App() {
         }
       } catch (err) {
         if (cancelled || (err && (err as Error).name === 'AbortError')) return
-        setDetailError(err instanceof Error ? err.message : 'Failed to load details')
+        // A 404: the title is gone, or above the profile's limit (the server
+        // answers both alike, and so does this). The page is left, the step
+        // Back takes, and that is said where the viewer lands: kept up, it
+        // offered Play, saving and a party for a title none of them could
+        // reach, beside a stale card's description.
+        if (err instanceof APIError && err.status === 404) {
+          // Across a profile switch the answer may be the previous
+          // profile's: the switch's own re-read of the open title decides.
+          if (isProfileSwitching() || profileSwitchGeneration() !== switchGen) {
+            // An attempt still out reads the title again when it ends
+            // (switchProfileWatched). One that has already ended cannot:
+            // read it again now.
+            if (isProfileSwitching()) titleReadDroppedRef.current = true
+            else setDetailReadNonce(n => n + 1)
+            return
+          }
+          leaveMissingTitleRef.current(selectedMedia.id)
+          return
+        }
+        // Anything else keeps the page, with the reason in the app's words.
+        setDetailError(failureWords(err, 'load this title\'s details'))
       } finally {
         if (!cancelled) setDetailLoading(false)
       }
     })()
     return () => { cancelled = true; ac.abort() }
-  }, [user, view, selectedMedia])
+    // The switch's two readers are stable (they read refs).
+    // detailReadNonce: a read again after a dropped 404 (switchProfileWatched).
+  }, [user, view, selectedMedia, isProfileSwitching, profileSwitchGeneration, detailReadNonce])
 
   // 2026-05-27 — Continue Watching resume handler. Restored after the
   // PR #95 cleanup pass deleted it (see git blame on PR #95 for the
@@ -5551,16 +5376,32 @@ export default function App() {
     }
   }, [party.state.code, party.state.hostUserId, party.state.mediaItemId, partyChangeMedia, user, addToast, resolveNextEpisode, activeProfileId])
 
-  // Deep-debug M2 — memoized bundle for HomeView's CW rail. Stable
-  // identity unless continueItems OR handlePlayContinue changes (both
-  // already memoized upstream). Without this, the inline object
-  // literal at the HomeView render would create a fresh reference
-  // every App render, defeating any future React.memo on the
-  // HomeView/MediaRail/MediaCardCinema tree.
-  const homeCwResumeBundle = useMemo(
-    () => ({ items: continueItems, onPlay: handlePlayContinue }),
-    [continueItems, handlePlayContinue],
+  // A card's on-poster Play, on every rail and grid: resume when the viewer
+  // has a position in the title, else play it. The card's menu says "Resume"
+  // in that case, and a Play that started from zero beside it then overwrote
+  // the saved position. The record is looked up at click time (through the
+  // ref), so a Continue Watching refresh between render and click does not
+  // dispatch a stale one, and the handler keeps its identity across those
+  // refreshes, which the memoised cards rely on.
+  const playOrResume = useCallback((m: Media) => {
+    const record = continueItemsRef.current.find(c => c.media_item_id === m.id && isResumable(c))
+    if (record) void handlePlayContinue(record)
+    else void handlePlay(m)
+  }, [handlePlay, handlePlayContinue])
+  // The titles that Play resumes, for the button's label.
+  const resumableIds = useMemo(
+    () => new Set(continueItems.filter(isResumable).map(c => c.media_item_id)),
+    [continueItems],
   )
+  // A Library list's "Where you are" column: for each title with a position
+  // worth resuming, the record a card's Resume would use (the first found).
+  const listProgressById = useMemo(() => {
+    const byId = new Map<number, { label: string; fraction: number }>()
+    for (const c of continueItems) {
+      if (isResumable(c) && !byId.has(c.media_item_id)) byId.set(c.media_item_id, whereYouAre(c))
+    }
+    return byId
+  }, [continueItems])
 
   // Play a specific file from the version picker — bypasses
   // pickFile's quality preference since the user picked explicitly.
@@ -5600,8 +5441,8 @@ export default function App() {
       } catch { /* non-fatal */ }
     } catch (err) {
       const id = nextToastId()
-      const msg = err instanceof Error ? err.message : 'Failed to refresh'
-      setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
+      const msg = failureWords(err, 'refresh this title\'s details')
+      if (msg) setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
     }
   }, [nextToastId])
 
@@ -5621,7 +5462,34 @@ export default function App() {
       updated_at: '',
     } as ServerMediaItem)
   }, [])
-  const handleIdentifyClose = useCallback(() => setIdentifyTarget(null), [])
+  const handleIdentifyClose = useCallback((matchInFlight?: boolean) => {
+    const id = identifyTarget?.id
+    setIdentifyTarget(null)
+    if (!matchInFlight || !id) return
+    // Closed while a match was still being sent: the server may have saved
+    // it or not, and may still be at it. Nothing is claimed either way.
+    // The title is read now, and again after a wait, since a read that
+    // comes before the server has finished shows the old details.
+    // The two reads are numbered: the first can take longer than the wait
+    // before the second, and must not land over it with the older details.
+    let landed = 0
+    const read = (n: number) => void getMedia(id)
+      .then(detail => {
+        if (n < landed) return
+        landed = n
+        // Only onto the title it was read for: the person may have moved on.
+        setDetailItem(shown => (shown && shown.id === id ? detail : shown))
+      })
+      .catch(() => { /* the page keeps what it has */ })
+    read(1)
+    window.setTimeout(() => read(2), 4000)
+    const tid = nextToastId()
+    setToasts(prev => [...prev, {
+      id: tid,
+      message: 'The dialog was closed while the match was still being sent, so it may or may not have been saved. This page is read again now and once more in a few seconds.',
+      type: 'info',
+    }])
+  }, [identifyTarget, nextToastId])
   const handleIdentifyMatched = useCallback(async () => {
     const id = identifyTarget?.id
     setIdentifyTarget(null)
@@ -5667,23 +5535,38 @@ export default function App() {
   // ghost left behind after the title was deleted on the server. Confirms
   // first (destructive + irreversible), then navigates back off the now-gone
   // detail page and purges the local caches.
-  const handleDeleteMedia = useCallback(async (m: Media) => {
-    const ok = window.confirm(
-      `Remove "${m.title}" from Aurora?\n\n` +
-      `This deletes the library entry and all of its episodes, watch history, ` +
-      `and metadata. Files on your server's disk are NOT deleted. ` +
-      `If the files are still there, the next scan will re-add the title.`,
-    )
-    if (!ok) return
-    try {
-      await deleteMedia(m.id)
-      purgeMediaFromCaches(m.id)
-      handleBack()
-      addToast(`Removed "${m.title}" from the library`, 'success')
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to remove from library'
-      addToast(msg, 'error')
+  const handleDeleteMedia = useCallback((m: Media) => {
+    // One removal of a title at a time: asked again while one is out, it is
+    // not asked (the question would send a second request for the same).
+    if (deletingMediaRef.current.has(m.id)) return
+    const remove = async () => {
+      deletingMediaRef.current.add(m.id)
+      try {
+        await deleteMedia(m.id)
+        purgeMediaFromCaches(m.id)
+        // Off the title's page, unless the viewer has left it already (the
+        // browser's Back while the question was up, or since).
+        if (titleIdFromPath(locationRef.current.pathname) === m.id && !stepBackUnderWay(locationRef.current.key)) handleBack()
+        addToast(`Removed "${m.title}" from the library`, 'success')
+      } catch (err) {
+        // A 404: it was gone already (removed meanwhile, or by a scan).
+        const msg = failureWords(err, `remove "${m.title}" from the library`, { status: { 404: `"${m.title}" is no longer in the library.` } })
+        if (msg) addToast(msg, 'error')
+      } finally {
+        deletingMediaRef.current.delete(m.id)
+      }
     }
+    // What the server's delete does: the title's row goes, and with it
+    // everything Aurora keeps about it (its files' records, seasons,
+    // episodes, artwork and cast, and every profile's progress, ratings,
+    // lists and recap questions for it). Files on disk are not touched.
+    setConfirmAsk({
+      title: `Remove "${m.title}" from Aurora?`,
+      body: 'This removes the title from the library for everyone on this server, with everything Aurora keeps about it, every profile\'s watch progress and ratings included. The files on the server\'s disk are not deleted: if they are still in a library folder, the next scan adds the title back, without that history.',
+      confirmLabel: 'Remove',
+      destructive: true,
+      run: () => { void remove() },
+    })
   }, [purgeMediaFromCaches, handleBack, addToast])
 
   // Start a watch party with this media. Creates a quick-party
@@ -5715,6 +5598,165 @@ export default function App() {
     setPartyComposer({ media: m, episodeId })
   }, [party.state.code, nextToastId])
 
+  // "Watch together" from a card's menu. A show's party needs an episode
+  // (see lib/partyEpisode): the viewer's resume episode, else the show's
+  // first playable one, which is read here because a card has no episode
+  // list. The same choice the title page's Party action makes. Dropped when
+  // the profile changed while the episodes were being read.
+  // The party handler as it is now, not as it was when a menu opened: the
+  // episodes can take a moment, and "already in a party" is judged then.
+  const handleStartPartyRef = useRef(handleStartParty)
+  useEffect(() => { handleStartPartyRef.current = handleStartParty }, [handleStartParty])
+  // One lookup at a time. It is abandoned when the viewer moves on (another
+  // page, another profile, another lookup), so the composer never opens over
+  // a page they have left or for a profile the session no longer is.
+  const partyLookupRef = useRef<AbortController | null>(null)
+  useEffect(() => () => { partyLookupRef.current?.abort(); partyLookupRef.current = null }, [location.pathname, activeProfileId])
+  const startPartyFromCard = useCallback(async (m: Media, resume: ContinueWatchingItem | undefined) => {
+    partyLookupRef.current?.abort()
+    const lookup = new AbortController()
+    partyLookupRef.current = lookup
+    // A show with nothing to resume needs its episodes read first; say so,
+    // since nothing else on screen changes until the composer opens.
+    const reads = m.type === 'show' && !(resume?.type === 'show' && resume.episode_id)
+    if (reads) setToasts(prev => [...prev, { id: nextToastId(), message: `Getting "${m.title}" ready to watch together…`, type: 'info' }])
+    try {
+      const episodeId = await resolvePartyEpisodeId(m, resume, lookup.signal)
+      if (lookup.signal.aborted) return
+      handleStartPartyRef.current(m, episodeId)
+    } catch {
+      if (lookup.signal.aborted) return
+      setToasts(prev => [...prev, { id: nextToastId(), message: `Could not read the episodes of "${m.title}". Open its page to start a party.`, type: 'error' }])
+    } finally {
+      if (partyLookupRef.current === lookup) partyLookupRef.current = null
+    }
+  }, [nextToastId])
+
+  // What the search page does with a result. Each remembers the search (a
+  // search is remembered when something is done with it) and is the same
+  // function from one render to the next, so the page's cards are not
+  // drawn again each time App renders: the words are read when it is called.
+  const searchQueryRef = useRef(searchQuery)
+  useLayoutEffect(() => { searchQueryRef.current = searchQuery }, [searchQuery])
+  const selectFromSearch = useCallback((m: Media) => { noteSearch(searchQueryRef.current); handleSelect(m) }, [noteSearch, handleSelect])
+  const playFromSearch = useCallback((m: Media) => { noteSearch(searchQueryRef.current); playOrResume(m) }, [noteSearch, playOrResume])
+  const partyFromSearch = useCallback((m: Media) => {
+    noteSearch(searchQueryRef.current)
+    void startPartyFromCard(m, continueItemsRef.current.find(c => c.media_item_id === m.id && isResumable(c)))
+  }, [noteSearch, startPartyFromCard])
+  const collectionFromSearch = useCallback((id: number) => { noteSearch(searchQueryRef.current); openCollectionFromSearch(id) }, [noteSearch, openCollectionFromSearch])
+
+  // The card menu: what a right click, a card's More button, the context-menu
+  // key and a long press all open (ContextMenu). Everything a card can do is
+  // here, so nothing is reachable only by one of those gestures.
+  //
+  // Built by a plain function that reads this render's values, and reached
+  // through a ref, so the callback the cards hold (openCardContextMenu,
+  // below) never changes identity: it used to depend on continueItems,
+  // libraryIds and half a dozen handlers, so every Continue Watching refresh
+  // or party change re-rendered every memoised card on Home and the grids.
+  //
+  // `own` is the card's own Continue Watching record, when the card stands
+  // for one (My Library's Continue Watching grid has a card per episode of a
+  // show): the menu's Resume must be that record, as the card's Play is, not
+  // the first one found for the title.
+  const buildCardMenu = (e: React.MouseEvent, m: Media, own?: ContinueWatchingItem) => {
+    e.preventDefault()
+    // Said as a toast, in the app's words, for the action it was about.
+    const failedTo = (doing: string) => (err: unknown) => {
+      const says = failureWords(err, doing)
+      if (says) addToast(says, 'error')
+    }
+    const resume = own && own.media_item_id === m.id && isResumable(own)
+      ? own
+      : continueItems.find(c => c.media_item_id === m.id && isResumable(c))
+    const saved = libraryIds.has(m.id)
+    const items: MediaContextItem[] = []
+    if (resume) {
+      const left = formatRemaining(resume.position_ms, resume.duration_ms)
+      items.push({ label: left ? `Resume · ${left}` : 'Resume', primary: true, onClick: () => { void handlePlayContinue(resume) } })
+      // A movie restarts from zero. A show's "start" is not this episode's,
+      // so the title page, which lists the episodes, is where to choose.
+      if (m.type === 'movie') items.push({ label: 'Play from the start', onClick: () => { void handlePlay(m) } })
+    } else {
+      items.push({ label: 'Play', primary: true, onClick: () => { void handlePlay(m) } })
+    }
+    // Watching together is not offered to a restricted profile.
+    if (navScope === 'full') items.push({ label: 'Watch together', onClick: () => { void startPartyFromCard(m, resume) } })
+    items.push(
+      { label: saved ? 'Remove from My Library' : 'Add to My Library', group: true, onClick: () => handleToggleLib(m) },
+    )
+    if (profiles.length > 0) {
+      items.push({ label: 'Add to a list…', onClick: () => setAddToListMedia(m) })
+    }
+    items.push(
+      { label: 'Mark as watched', onClick: () => {
+        void markWatched(m.id, { profile_id: activeProfileId ?? undefined }).then((res) => {
+          const id = nextToastId()
+          setToasts(prev => [...prev, { id, message: `Marked "${m.title}" as watched`, type: 'success' }])
+          // Phase 5.7 — XP / achievement toast (stacked, not replacing).
+          if (res?.achievements_unlocked && res.achievements_unlocked.length > 0) {
+            for (const def of res.achievements_unlocked) {
+              const tid = nextToastId()
+              setToasts(prev => [...prev, { id: tid, message: `${def.icon} Achievement unlocked: ${def.title} (+${def.xp_reward} XP)`, type: 'success' }])
+            }
+          }
+          setRetryNonce(n => n + 1)
+        }).catch(failedTo('mark it as watched'))
+      }},
+      { label: 'Clear my progress', tone: 'danger', onClick: () => {
+        void clearProgress(m.id, activeProfileId ?? undefined).then(() => {
+          const id = nextToastId()
+          setToasts(prev => [...prev, { id, message: `Cleared progress for "${m.title}"`, type: 'info' }])
+          setRetryNonce(n => n + 1)
+        }).catch(failedTo('clear the progress'))
+      }},
+      // Feedback to the recommender (the thumbs).
+      { label: 'More like this', group: true, ai: true, onClick: () => {
+        // The removal set of the owner the menu was opened under (see
+        // removedFromHomeRef): a switch before the answer replaces it.
+        const removed = removedFromHomeRef.current
+        void submitMediaFeedback(m.id, 'up', activeProfileId ?? undefined).then(() => {
+          // A thumbs-up undoes an earlier thumbs-down (one row per title).
+          removed.delete(m.id)
+          setToasts(prev => [...prev, { id: nextToastId(), message: `More like "${m.title}" — got it`, type: 'success' }])
+        }).catch(failedTo('save that'))
+      }},
+      { label: 'Not interested', ai: true, onClick: () => {
+        const removed = removedFromHomeRef.current
+        void submitMediaFeedback(m.id, 'down', activeProfileId ?? undefined).then(() => {
+          setToasts(prev => [...prev, { id: nextToastId(), message: `We'll show you less like "${m.title}"`, type: 'info' }])
+          // Drop it from Home at once (it would vanish on the next rec
+          // refresh anyway) and keep it out of later rail recomposes.
+          removed.add(m.id)
+          setHomeRails(rails => rails ? rails.map(rl => ({ ...rl, items: rl.items.filter(it => it.id !== m.id) })) : rails)
+        }).catch(failedTo('save that'))
+      }},
+    )
+    if (adminUI) {
+      items.push({ label: 'Refresh metadata', group: true, note: 'Admin', onClick: () => { void handleRefreshMetadata(m) } })
+    }
+    // The control that opened it, when one did (a card's More button): focus
+    // returns there, and it says the menu is open. A right click's or a long
+    // press's target is the card, which is not a control.
+    const opener = e.currentTarget instanceof HTMLElement ? e.currentTarget : null
+    setContextMenu({ ...anchorFor(e), items, title: m.title, reason: m.reason, opener })
+  }
+  const buildCardMenuRef = useRef(buildCardMenu)
+  // Mirrored in a layout effect: in a passive one, a press in the frame a
+  // card was first drawn in built the menu of the render before, whose list
+  // did not have the title yet (My Library's card offered "Add to My
+  // Library").
+  useLayoutEffect(() => { buildCardMenuRef.current = buildCardMenu })
+  const openCardContextMenu = useCallback((e: React.MouseEvent, m: Media, own?: ContinueWatchingItem) => buildCardMenuRef.current(e, m, own), [])
+  // A profile switch closes the menu: it holds the previous profile's Resume
+  // record and closures over its id (Add, the thumbs, Mark as watched), so a
+  // pick made after a switch, one made in another tab included, would act
+  // for the profile the session no longer is. Its render is also withheld
+  // on the commit that names the new profile (see where it is drawn).
+  useEffect(() => { setContextMenu(null) }, [activeProfileId])
+
+
   // The composer's launch sequence: create (live or scheduled) → send
   // invites → join as host → open the panel. Returns {ok,error} so the
   // modal can stay open with an inline error on failure. Toast copy
@@ -5740,6 +5782,8 @@ export default function App() {
 
       let sentCount = 0
       let skippedMsg = ''
+      // The invitations as a whole failed: said in the app's words.
+      let inviteFailure: string | null = null
       if (launch.usernames.length > 0) {
         // Invite failures don't abort the launch — the party exists and
         // the host is about to land in it; report and carry on.
@@ -5752,7 +5796,7 @@ export default function App() {
               .join(', ')
           }
         } catch (err) {
-          skippedMsg = err instanceof Error ? err.message : 'invites failed to send'
+          inviteFailure = failureWords(err, 'send the invitations')
         }
       }
 
@@ -5775,6 +5819,7 @@ export default function App() {
             type: 'info',
           }])
         }
+        if (inviteFailure) setToasts(prev => [...prev, { id: nextToastId(), message: inviteFailure, type: 'error' }])
         return { ok: true, code: resp.code }
       }
       // Server created the party but we couldn't join it. Surface
@@ -5785,25 +5830,23 @@ export default function App() {
       console.error('[Aurora WatchParty] join failed after create', { code: resp.code, joinResult })
       return {
         ok: false,
-        error: `Party ${resp.code} created but join failed: ${joinResult.error || 'no error message returned (check console)'}`,
+        error: `The party was made (code ${resp.code}), but joining it did not work. Open it from Together.`,
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to start party'
       // eslint-disable-next-line no-console
       console.error('[Aurora WatchParty] launchComposerParty threw', { createdCode, err })
-      // One-active-party-per-host guard (2026-08 review): the raw server
-      // message dead-ends the host with no pointer to the party they
-      // already have — which, for a scheduled booking they're not
-      // connected to, is invisible from this modal. Name the recovery.
-      if (!createdCode && /already have an active party/i.test(msg)) {
-        return {
-          ok: false,
-          error: 'You already have a party (it may be a scheduled one). Open it from the home "Watch together" card, your Calendar, or the bell — end it there first to book a new one.',
-        }
+      if (createdCode) {
+        return { ok: false, error: `The party was made (code ${createdCode}), but joining it did not work. Open it from Together.` }
       }
+      // The server answers every refused creation 409, the one-party-per-host
+      // rule's included, with no reason to tell them apart; that rule is
+      // the one a host can act on, so the sentence names it without saying
+      // it is the cause. Before, the server's own words were matched.
       return {
         ok: false,
-        error: createdCode ? `Party ${createdCode} created but couldn't join: ${msg}` : msg,
+        error: failureWords(err, 'start the party', {
+          status: { 409: 'Could not start the party. If you already have one, a scheduled one included, end it from Together first; otherwise try again.' },
+        }) ?? undefined,
       }
     }
   }, [party, nextToastId])
@@ -5929,17 +5972,15 @@ export default function App() {
       setHeroPersonalization(resp.personalization)
       setHeroSlateToken(resp.slateToken)
       setHeroIndex(0)
-      if (resp.picks.length > 0) { setHomeHero(resp.picks[0].media); setHomeHeroIsFallback(false) }
-      // Empty pool: leave homeHero/flag as-is. On first load the hero
-      // hasn't been set yet, so the home-rails catalog fallback (which
-      // checks heroPoolRef.current.length === 0) will set it with
-      // isFallback=true. On a runtime refresh that returns empty, the
-      // displayed hero is still the previous pool pick — not catalog
-      // filler — so the existing label remains correct.
+      // An empty pool leaves the slate with no pick: the hero is then the
+      // title to resume, else the catalog's stand-in (homeHero), which the
+      // home-rails load records whether or not there are picks.
     } catch {
       if (load !== heroLoadRef.current) return
-      // Non-fatal — keep whatever hero we had (listRecent fallback
-      // from home-rails effect).
+      // A refresh that failed keeps the picks there are.
+      if (refresh) return
+      // Non-fatal: the hero is the title to resume, else the catalog's
+      // stand-in from the home-rails load.
       heroPoolRef.current = []
       setHeroPool([])
       setHeroPersonalization(null)
@@ -5964,9 +6005,44 @@ export default function App() {
     setHeroPersonalization(null)
     setHeroSlateToken(undefined)
     setHeroIndex(0)
+    setHeroOnLead(true)
     setHomeHero(null)
-    setHomeHeroIsFallback(false)
   }, [activeProfileId])
+  // Nobody is signed in: the hero, Continue Watching and the hero's wait for
+  // it are nobody's. Sign out clears them in resetUserState, and on an
+  // account with profiles the profile going to null does (the effect above
+  // and the switch's reset). A session that EXPIRES while the app knows no
+  // profile for the account comes through neither: expiry is a bare
+  // setUser(false), and the profile is null before and after. Whoever
+  // signed in next on the tab was then handed all of it: the hero led at
+  // once with the title the last Continue Watching answer named (or, for
+  // another account, once its own slow answer outran the wait), over picks
+  // the rotation had kept turning while nobody was signed in.
+  useEffect(() => {
+    if (user !== false) return
+    // The search field's words too (see resetUserState): nobody is signed
+    // in, so they are nobody's. The address is left where it was, as on any
+    // page a session expires on: on /search the next sign-in finds the page
+    // with nothing typed. (A described ask needs no clearing here: it is
+    // stamped with who made it and handed to the page only for them.)
+    setSearchQuery('')
+    // A question left open (Remove from library, Leave and join) was asked
+    // of the session that has gone: the next one is not shown it.
+    setConfirmAsk(null)
+    setAddToListFailed(null)
+    heroLoadRef.current++
+    heroPoolRef.current = []
+    setHeroPool(pool => (pool.length ? [] : pool))
+    setHeroPersonalization(null)
+    setHeroSlateToken(undefined)
+    setHeroIndex(0)
+    setHeroOnLead(true)
+    setHomeHero(null)
+    setContinueItems(items => (items.length ? [] : items))
+    setContinueFor(null)
+    continueItemsRef.current = []
+    forgetHeroLeadWait()
+  }, [user, forgetHeroLeadWait])
   // A switch also drops everything else App keeps that the server filtered
   // by the previous profile: the browse grids, Continue Watching and the
   // conversational rail (each refetches for the new profile; a failed fetch
@@ -5985,6 +6061,11 @@ export default function App() {
     // tab's, or a pick from the picker opened for an unreadable binding)
     // resets.
     if (!profilesSettledBeforeRef.current) return
+    // A question asked under the previous profile is not answered as the
+    // new one; nor is the add-to-list sheet's failure said to it.
+    setConfirmAsk(null)
+    setAddToListFailed(null)
+    forgetDescribedAnswer()
     moviesLoadMoreAcRef.current?.abort()
     moviesLoadMoreAcRef.current = null
     showsLoadMoreAcRef.current?.abort()
@@ -5998,12 +6079,37 @@ export default function App() {
     setMoviesLoadingMore(false)
     setShowsLoadingMore(false)
     setContinueItems([])
-    convoGenRef.current++
-    setConvoQuery('')
-    setConvoResults([])
-    setConvoLoading(false)
+    setContinueFor(null)
+    forgetHeroLeadWait()
+    // The ref too, now: it is what a card's Play reads at click time, and it
+    // would otherwise hold the previous profile's records until the next
+    // commit's effects.
+    continueItemsRef.current = []
     if (viewRef.current === 'detail') setSelectedMedia(null)
-  }, [])
+    // What was being said to the previous profile (see the toasts' effect),
+    // and nothing said to the new one since (toastOwnersRef).
+    setToasts(t => {
+      const kept = t.filter(x => toastOwnersRef.current.get(x.id) === actingProfileRef.current)
+      for (const x of t) if (!kept.includes(x)) toastOwnersRef.current.delete(x.id)
+      return kept.length === t.length ? t : kept
+    })
+  }, [forgetHeroLeadWait])
+  // A toast is said to whoever is acting when it is raised, and goes when
+  // they do: when nobody is signed in, when the account changes, and on a
+  // profile switch (above). Toasts were kept through all three, and a
+  // toast's timer starts again when the stack is drawn again, so the next
+  // person to sign in on the tab was shown "Removed <title> from My
+  // Library. Undo" for seven seconds, and after a switch it stayed up under
+  // the new profile's name. (Its Undo did nothing for them; the title's
+  // name was shown.) The startup binding arriving is not a switch, and
+  // drops nothing.
+  const toastsUserRef = useRef<number | false | null>(null)
+  useEffect(() => {
+    const now = user ? user.id : user
+    const before = toastsUserRef.current
+    toastsUserRef.current = now
+    if (now === false || (typeof before === 'number' && before !== now)) setToasts(t => (t.length ? [] : t))
+  }, [user])
   useOnProfileChange(activeProfileId, resetForProfileChange)
   // Whether the startup load had settled before this render; written after
   // the effect above has read it, so on the render that settles it and sets
@@ -6035,42 +6141,92 @@ export default function App() {
     setHeroPool(pool)
     heroIndexRef.current = 0
     setHeroIndex(0)
-    // Re-point the displayed hero only if the panned title was showing.
-    // Empty pool: keep the current hero on screen (same rule as
-    // reloadHeroPool's empty-response path) — the nonce refetch or the
-    // catalog fallback will replace it.
-    setHomeHero(prev => (prev && prev.id === mediaId && pool.length > 0 ? pool[0].media : prev))
+    // The hero is derived from the pool (the slate), so it follows. With the
+    // pool emptied it is the catalog's stand-in, labelled as that.
   }, [])
 
-  // "Not tonight" — advance to the NEXT pick in the loaded hero pool
-  // instantly (no refetch), distinct from "Surprise me" (a whole fresh
-  // pool via reloadHeroPool). Uses heroIndexRef so rapid skips advance
-  // correctly and stay in sync with the 9s auto-rotation. Falls back to a
-  // fresh pool when there's nothing to advance to (pool of 0 or 1).
-  const advanceHero = useCallback(() => {
-    if (heroPool.length < 2) { void reloadHeroPool(true); return }
-    const next = (heroIndexRef.current + 1) % heroPool.length
-    heroIndexRef.current = next
-    setHeroIndex(next)
-    setHomeHero(heroPool[next].media); setHomeHeroIsFallback(false)
-    // Restart the 9s auto-rotation dwell from this pick (see rotEpoch) so a
-    // skip isn't cut short by the next tick when the hero isn't hover-paused.
+  // Tonight's slate: the title to resume, then the picks (lib/tonightSlate).
+  // Derived on every render from Continue Watching and the pool as they are,
+  // never stored, so it cannot outlive either: a profile switch empties both
+  // and the slate with them, and on the commit that makes the switch there
+  // is no lead at all.
+  const kidsTonight = navScope === 'restricted'
+  const heroLead = useMemo(
+    () => (profileSwitchPending ? null : resumeLead(continueItems, heroNow)),
+    [profileSwitchPending, continueItems, heroNow],
+  )
+  // Whether the lead is known: Continue Watching has answered for this user
+  // and profile, or never will (no profile to ask for: an unreadable binding
+  // or a failed profile list, once the startup load has settled).
+  // Or the wait for it has run out (leadWaitOverFor).
+  const heroOwner = user && personalProfileReady ? `${user.id}:${activeProfileId ?? 'none'}` : null
+  const heroLeadSettled = !!user && (heroOwner !== null
+    ? continueFor === heroOwner || leadWaitOverFor === heroOwner
+    : catalogProfileSettled)
+  useEffect(() => {
+    heroOwnerRef.current = heroOwner
+    if (heroOwner === null || continueFor === heroOwner) return
+    const timer = window.setTimeout(() => {
+      leadWaitOverForRef.current = heroOwner
+      setLeadWaitOverFor(heroOwner)
+    }, HERO_LEAD_WAIT_MS)
+    return () => window.clearTimeout(timer)
+  }, [heroOwner, continueFor])
+  const heroSlate = useMemo(() => buildSlate(heroLead, heroPool), [heroLead, heroPool])
+  const heroSlateIndex = shownSlateIndex(heroSlate, heroOnLead, heroIndex)
+  const heroEntry = heroSlateIndex >= 0 ? heroSlate[heroSlateIndex] : null
+  // The hero: the slate's entry, else the catalog's fallback (no lead and no
+  // picks), else nothing.
+  const tonightHero = heroEntry ? heroEntry.media : homeHero
+  const heroSlateRef = useRef(heroSlate)
+  const heroSlateIndexRef = useRef(heroSlateIndex)
+  // useLayoutEffect, not useEffect: the filmstrip hands back a place in the
+  // slate it was drawn from, and a press reads the slate here. Mirrored in a
+  // passive effect, a press in the frame the strip was drawn in read the
+  // slate of the commit before: another pick went up, or none.
+  useLayoutEffect(() => { heroSlateRef.current = heroSlate; heroSlateIndexRef.current = heroSlateIndex }, [heroSlate, heroSlateIndex])
+  // Put one of the slate's entries up. The lead is a flag; a pick is its
+  // place in the recommender's pool, which is also what its exposure is
+  // reported under.
+  const applySlateEntry = useCallback((entry: SlateEntry | undefined) => {
+    if (!entry) return
+    if (entry.kind === 'resume') { setHeroOnLead(true); return }
+    setHeroOnLead(false)
+    if (entry.poolIndex === null) return
+    heroIndexRef.current = entry.poolIndex
+    setHeroIndex(entry.poolIndex)
+  }, [])
+  // A choice from the filmstrip. It also restarts the rotation's dwell (see
+  // rotEpoch), so the chosen title is not swapped out by a tick that was
+  // already due.
+  const pickSlateEntry = useCallback((i: number) => {
+    heroTouchedForRef.current = heroOwnerRef.current
+    applySlateEntry(heroSlateRef.current[i])
     setRotEpoch(e => e + 1)
-  }, [heroPool, reloadHeroPool])
+  }, [applySlateEntry])
+  const holdHeroWhileIn = useCallback((inside: boolean) => {
+    if (inside) heroTouchedForRef.current = heroOwnerRef.current
+    setHeroPaused(inside)
+  }, [])
+  // Nothing rotates for a reader who asked for less motion, and the pause
+  // control is not offered for a rotation that does not run.
+  const [reducedMotion] = useState(() => typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
+  const heroRotates = !kidsTonight && !reducedMotion && heroSlate.length > 1
 
   // "Surprise me" — immediately START a random recommended pick, EXCLUDING the
   // one currently on screen so it always feels like a fresh surprise. (Was
   // wired to reloadHeroPool, which only refetched the pool and — on a stable
   // recommender — visibly did nothing.) Falls back to the current hero when the
   // pool is too small to offer a different title.
+  const tonightHeroId = tonightHero?.id
   const onSurprise = useCallback(() => {
-    const others = heroPool.filter((_, i) => i !== heroIndex)
+    const others = heroPool.filter(p => p.media.id !== tonightHeroId)
     const choices = others.length ? others : heroPool
     const media = choices.length
       ? choices[Math.floor(Math.random() * choices.length)].media
       : homeHero
     if (media) void handlePlay(media)
-  }, [heroPool, heroIndex, homeHero, handlePlay])
+  }, [heroPool, tonightHeroId, homeHero, handlePlay])
 
   // "{N} worth your time" counts the real AI-curated set — the
   // personalized hero picks plus the items on the "✨ AI PICK" rails
@@ -6138,53 +6294,50 @@ export default function App() {
   }, [homeLibraryUserId, catalogProfileSettled, activeProfileId, catalogVersionRef])
   const homeLibraryTotal = homeLibraryCount && homeLibraryCount.key === homeLibraryKey ? homeLibraryCount.total : null
 
-  // Keep heroIndexRef in sync with heroIndex across every change path
-  // (auto-rotation, manual "Not tonight" skip, pool resets) so the
-  // rotation interval below always reads the latest index.
+  // Keep heroIndexRef in sync with heroIndex across every change path (the
+  // rotation, a choice from the filmstrip, pool resets).
   useEffect(() => { heroIndexRef.current = heroIndex }, [heroIndex])
 
-  // Hero rotation. Cycles every 9s; pauses on hover via heroPaused. CSS in
-  // HeroSection handles the crossfade. Reads the current index from
-  // heroIndexRef (synced above) instead of a captured closure local, so it
-  // always advances from the latest pick. heroIndex stays OUT of the deps
-  // (it would re-create the interval every tick and drift the cadence); a
-  // manual "Not tonight" skip instead bumps rotEpoch, which re-runs this
-  // effect to restart the 9s dwell from the chosen pick without affecting
-  // steady-state cadence.
+  // The rotation: every nine seconds the hero moves to the slate's next
+  // entry, and back to the first after the last. It is the filmstrip's, so
+  // it can be seen (which entry is up) and stopped: by the viewer's pause
+  // (heroHold), and for the moment the pointer or focus is in the hero
+  // (heroPaused). Not for a reader who asked for less motion, not for the
+  // children's presentation, and only while Tonight is on screen: without
+  // that gate the interval kept re-rendering App on every other page.
+  // heroSlateIndex stays OUT of the deps (it would re-create the interval
+  // every tick and drift the cadence); the tick reads it from a ref, and a
+  // choice from the filmstrip bumps rotEpoch to restart the dwell.
   useEffect(() => {
-    // Only while Home is on screen. Without the view gate this interval
-    // kept firing on Settings, Detail, Admin — three setState calls every
-    // 9s → a full re-render of App and every eager child on pages that
-    // never show the hero. Pool and index are untouched while skipped, so
-    // returning to Home resumes from the same pick.
-    if (view !== 'home' || heroPool.length < 2 || heroPaused) return
-    // 2026-06-17 (a11y quick-win) — respect prefers-reduced-motion (see
-    // the BrowseView hero for rationale): skip the 9s auto-rotation so
-    // the hero doesn't swap art + text out from under a low-vision
-    // reader. Manual advance / hover-pause still work.
-    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
+    if (view !== 'home' || !heroRotates || heroPaused || heroHold) return
     const id = window.setInterval(() => {
-      const next = (heroIndexRef.current + 1) % heroPool.length
-      setHeroIndex(next)
-      setHomeHero(heroPool[next].media); setHomeHeroIsFallback(false)
+      const slate = heroSlateRef.current
+      if (slate.length < 2) return
+      applySlateEntry(slate[(Math.max(0, heroSlateIndexRef.current) + 1) % slate.length])
     }, 9000)
     return () => window.clearInterval(id)
-  }, [view, heroPool, heroPaused, rotEpoch])
+  }, [view, heroRotates, heroPaused, heroHold, rotEpoch, applySlateEntry])
 
   // Home rails, memoized. This was an inline IIFE in the JSX, so every App
   // render — each hero tick, toast, poll, keystroke — built new arrays and
   // every one of the 100–160 cards on Home re-rendered with them. Same
   // logic and inputs; one array identity until an input changes, which is
   // what lets React.memo on MediaCardCinema skip the untouched cards.
+  // The profile's own list, for the calmer Tonight's "Your list" rail: only
+  // the server's answer for this profile, never this browser's snapshot,
+  // which can hold titles saved before the profile's limit was set. Empty
+  // (and the same array) for everyone else, so saving a title does not
+  // rebuild Home's rails for a session that has no such rail.
+  const kidsList = useMemo(
+    () => (kidsTonight && libraryServerFor !== null && libraryServerFor === libraryCacheKey ? library : NO_MEDIA),
+    [kidsTonight, libraryServerFor, libraryCacheKey, library],
+  )
   const homeRailsProp = useMemo<HomeViewProps['rails']>(() => {
-    // Phase D — conversational discovery: when a vibe search is
-    // active, pin its results as the first rail.
-    const convoRail: NonNullable<HomeViewProps['rails']> = convoResults.length > 0
-      ? [{ title: convoQuery, items: convoResults, aspect: 'poster' as const, aiPick: true, showBadges: true, subtitle: 'Your conversational search' }]
-      : []
-    if (!homeRails && continueItems.length === 0) return convoRail.length > 0 ? convoRail : undefined
+    if (!kidsTonight) {
+      if (!homeRails && continueItems.length === 0) return undefined
+      if (continueItems.length === 0) return homeRails ?? []
+    }
     const base = homeRails ?? []
-    if (continueItems.length === 0) return [...convoRail, ...base]
     // Prepend the Continue Watching rail. Dedupe by media_item_id at the
     // rail level so a show with progress on multiple episodes only
     // surfaces one card (most-recently-watched) — avoids duplicate-key
@@ -6203,8 +6356,28 @@ export default function App() {
     // media_item_id to match MediaCardCinema's item.id.
     const cwSubtitles: Record<number, string> = {}
     for (const c of deduped) cwSubtitles[c.media_item_id] = cwSubtitle(c)
+    if (kidsTonight) {
+      // The calmer Tonight of a profile with a content limit: what it has
+      // started, its own list, and the two shelves, on larger cards. None
+      // of the recommender's rails, and no "Recently Added".
+      const out: NonNullable<HomeViewProps['rails']> = []
+      // The hero already holds the title to resume; a rail of one would
+      // only repeat it.
+      if (deduped.length >= 2) {
+        out.push({
+          title: 'Keep watching', items: deduped.map(c => mapContinueToMedia(c)) as Media[],
+          aspect: 'landscape', kind: 'continue-watching', cardSubtitles: cwSubtitles,
+        })
+      }
+      if (kidsList.length > 0) out.push({ title: 'Your list', items: kidsList, aspect: 'poster', size: 'large' })
+      for (const [kind, title] of [['top-movies', 'Movies'], ['top-shows', 'Shows']] as const) {
+        const shelf = base.find(r => r.kind === kind)
+        if (shelf && shelf.items.length > 0) out.push({ ...shelf, title, size: 'large' })
+      }
+      // Nothing yet, and the catalog still on its way: the skeleton stands.
+      return out.length > 0 || homeRails ? out : undefined
+    }
     return [
-      ...convoRail,
       {
         title: 'Continue Watching',
         items: deduped.map(c => mapContinueToMedia(c)) as Media[],
@@ -6221,7 +6394,7 @@ export default function App() {
       },
       ...base,
     ]
-  }, [homeRails, continueItems, convoResults, convoQuery])
+  }, [homeRails, continueItems, kidsTonight, kidsList])
 
   // Continue Watching rail. Its own fetch (independent of home
   // rails) so retry/failure paths don't couple. Re-fetches on
@@ -6238,11 +6411,25 @@ export default function App() {
     if (!user || !personalProfileReady) return
     let cancelled = false
     const ac = new AbortController()
+    const owner = `${user.id}:${activeProfileId ?? 'none'}`
     listContinueWatching(50, activeProfileId ?? undefined, ac.signal)
-      .then(items => { if (!cancelled) setContinueItems(items) })
+      .then(items => {
+        if (cancelled) return
+        // The first answer for this session, after the hero stopped waiting
+        // for it, with the viewer already doing something in the hero: the
+        // title to resume does not take the hero over. (Untouched, it does:
+        // the hero is on the lead by default.)
+        if (leadWaitOverForRef.current === owner && heroTouchedForRef.current === owner) setHeroOnLead(false)
+        // That is decided once: a later refresh of the list is not late.
+        leadWaitOverForRef.current = null
+        setContinueItems(items)
+        setContinueFor(owner)
+      })
       .catch(err => {
         // Non-fatal — continue rail just stays empty.
         if (!cancelled && err && (err as Error).name !== 'AbortError') {
+          // An answer all the same: the hero stops waiting for a lead.
+          setContinueFor(owner)
           console.warn('[Aurora] continue-watching fetch failed', err)
         }
       })
@@ -6273,13 +6460,10 @@ export default function App() {
   // is User | null | false; null and false are both falsy), so the
   // truthy check alone gives us `user.id` safely.
   const userIdForBugReport = user ? user.id : undefined
-  // Deep-debug M1 — on-demand refresh callable so the launcher can
-  // re-fetch when the user opens the modal. The server's PAT
-  // health check updates every 6h on its own ticker; without the
-  // on-demand refresh an admin who stays logged in past a token
-  // expiry never sees the banner until next login. Stable identity
-  // via useCallback so the BugReportButton's `onRefreshConfig`
-  // prop reference doesn't churn.
+  // Deep-debug M1 — on-demand refresh, asked for each time the dialog
+  // is. The server's PAT health check updates every 6h on its own
+  // ticker; without the on-demand refresh an admin who stays logged in
+  // past a token expiry never sees the banner until next login.
   const refreshBugReportConfig = useCallback(() => {
     if (!userIdForBugReport) return
     getBugReportConfig()
@@ -6299,12 +6483,42 @@ export default function App() {
       })
       .catch(err => {
         if (err && (err as Error).name === 'AbortError') return
-        // Non-fatal — the launcher just stays hidden.
+        // Non-fatal — the entries just stay hidden.
         console.warn('[Aurora] bug-report config fetch failed', err)
       })
     return () => { ac.abort() }
     // adminUI: the server sends the token's health only with admin powers.
   }, [userIdForBugReport, adminUI])
+
+  // "Report a bug" is in the identity panel and on the Me page. The dialog
+  // describes the page it is over (its capture, and the address a report
+  // carries), so from Me the app first goes back to the page the person
+  // came from: hooks/useBugReportEntry. Only to a page this session's
+  // routes would show it now, by the gates the routes themselves use.
+  const navigationType = useNavigationType()
+  const mayReturnTo = (pathname: string) => {
+    const v = pathToView(pathname)
+    if (hiddenFromRestricted(v) && !hiddenOk) return false
+    // The admin page only for a session shown the admin UI: an admin whose
+    // profile is not yet confirmed would be sent back to a page that shows
+    // its "checking" notice and nothing else.
+    if (v === 'admin' && !adminUI) return false
+    return true
+  }
+  const reportsOn = !!bugReportConfig?.enabled
+  const bugReport = useBugReportEntry({
+    enabled: reportsOn,
+    userId: userIdForBugReport ?? null,
+    profileId: activeProfileId,
+    location,
+    arrivedBy: navigationType,
+    viewOf: pathToView,
+    shownView: view,
+    mayShow: mayReturnTo,
+    goTo: path => { navigate(path) },
+    goBack: () => { navigate(-1) },
+    onAsk: refreshBugReportConfig,
+  })
 
   // An admin's list holds every member's requests (with their usernames) and
   // a restricted session's only the account's own, so it is dropped when the
@@ -6325,7 +6539,10 @@ export default function App() {
   // default before the startup re-selection moves the session is not shown.
   // A fetch in flight across a change of profile is dropped with it.
   useEffect(() => {
-    if (!user || view !== 'requests' || requestsList !== null || !catalogProfileSettled) return
+    // Not for a session the page is not rendered for (hiddenOk): a restricted
+    // session that opens /requests is sent to Tonight by an effect, and must
+    // not have asked for the list first.
+    if (!user || view !== 'requests' || requestsList !== null || !catalogProfileSettled || !hiddenOk) return
     let cancelled = false
     const ac = new AbortController()
     listRequests(ac.signal)
@@ -6336,7 +6553,7 @@ export default function App() {
         setRequestsList([])
       })
     return () => { cancelled = true; ac.abort() }
-  }, [user, view, requestsList, catalogProfileSettled, requestsKey])
+  }, [user, view, requestsList, catalogProfileSettled, requestsKey, hiddenOk])
 
   // Logout — shares resetUserState with the cross-tab logout path.
   const handleLogout = useCallback(async () => {
@@ -6350,9 +6567,14 @@ export default function App() {
       ready: () => navigator.serviceWorker.ready,
     })
     await apiLogout()
+    // Signing out forgets what this account's profiles searched for in this
+    // browser (description text included). A session that expires does not
+    // come through here and leaves them, as it leaves the My Library
+    // snapshot: the same person signs in again.
+    if (user) forgetAccountRecentSearches(user.id)
     setUser(false)
     resetUserState()
-  }, [party, resetUserState])
+  }, [party, resetUserState, user])
 
   if (user === null) {
     // Auth check in flight on a fresh tab with a stored token. Render
@@ -6368,12 +6590,35 @@ export default function App() {
     return <AuthView onLogin={(u) => setUser(u)} />
   }
 
+  // The nav's presence pill. In a party, it is that party; otherwise the
+  // most watched party someone else is running, if any. The list is empty
+  // for a session not offered Together and on a profile switch's first
+  // commit (useActiveParties), so the pill cannot name another profile's.
+  // The bar says who is watching only to a session known to be offered
+  // Together; the list is also polled for one that merely may open the page.
+  const livePresence = partyPresence(navScope === 'full' ? activeParties.parties : NO_PARTIES, user.id)
+  const navPresence: NavPresence | null = party.state.code
+    ? { label: 'In a watch party', short: 'In a party', expanded: partyPanelOpen }
+    : livePresence.label && livePresence.short
+      ? { label: livePresence.label, short: livePresence.short }
+      : null
+  const settingsPane: SettingsPane | null = settingsPaneFromPath(location.pathname)
+  // Something neutral in the page's place until it may render. Nothing for
+  // a restricted session: it is about to be sent to Tonight.
+  const hiddenPending = hiddenFromRestricted(view) && !hiddenOk && navScope !== 'restricted'
+  // A session with the admin powers is listed every member's requests, so
+  // its page and menu entry are "Requests"; everyone else's are their own.
+  const requestsLabel = adminUI ? 'Requests' : 'My requests'
+  // What the phone's top bar calls the page. A restricted session's bar
+  // says "Shows", so its page does too.
+  const pageTitle = view === 'requests' ? requestsLabel
+    : view === 'shows' && navScope === 'restricted' ? 'Shows'
+      : PAGE_TITLES[view] ?? ''
+
   return (
-    <div className="min-h-screen bg-[#050505] aurora-bg">
-      {/* 2026-07-25 (Aurora Stage Phase 2) — the 240px <Sidebar> and its
-          mobile drawer + hamburger (QA BUG-012) are gone; <TopNav> below
-          owns navigation at every breakpoint, with its own menu sheet
-          below md carrying the drawer's role. */}
+    <div className="min-h-screen bg-surface-page aurora-bg">
+      {/* Navigation is <TopNav> at every width, plus <BottomTabBar> below md,
+          where the bar's destinations, search and the account page live. */}
 
       <ServerPanel
         open={serverOpen}
@@ -6419,28 +6664,17 @@ export default function App() {
         }}
       />
 
-      {/* Cmd+K Spotlight palette. Overlays everything at z-200. */}
-      <SearchPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
-        onSelect={(m) => {
-          setPaletteOpen(false)
-          // Reuse handleSelect so the palette pushes the same
-          // /title/:id history entry as a card click.
-          handleSelect(m as Media)
-        }}
-      />
-
       {/* Main Content. No left offset any more — the sidebar is gone, so
           pages run the full width of the viewport (Aurora Stage M2).
 
-          Aurora Stage Phase 7b — dimmed and inert behind the theater (D6).
+          Aurora Stage Phase 7b — inert behind the theater (D6), not dimmed.
           `inert` is doing the load-bearing work: it blocks pointer events,
           removes every descendant from the tab order, AND hides the subtree from
           assistive tech, which is all three halves of "inert" in one attribute.
           React 19 supports it as a real prop (PlayerControls already relies on
-          that). `.stage-dim-app` carries the opacity/saturate and repeats
-          pointer-events: none — redundant where inert is supported, and a
+          that). `.stage-dim-app` only repeats pointer-events: none (it does
+          not dim: the player covers the page; see its rule) — redundant
+          where inert is supported, and a
           PARTIAL fallback where it isn't (Safari < 15.5): it stops the mouse and
           nothing else. On those browsers the app behind stays tabbable and
           screen-reader reachable. An earlier version of this comment called it
@@ -6450,7 +6684,7 @@ export default function App() {
           TWO KNOWN GAPS, both deliberate, both worth knowing about:
 
           1. `<main>` is not the whole app. ServerPanel, NotificationPanel,
-             SearchPalette, the toasts, both gates and the party surfaces all
+             the toasts, both gates and the party surfaces all
              render as siblings AFTER it, so none of them goes inert — they stay
              tabbable behind the veil. That is right for the party surfaces
              (a watch-party host has to keep using them mid-playback) and it is
@@ -6471,78 +6705,62 @@ export default function App() {
 
           `inert={x || undefined}` rather than `inert={x}` so the attribute is
           absent, not `inert="false"` — the HTML attribute is presence-based. */}
-      <main className={`min-h-screen ${theaterActive ? 'stage-dim-app' : ''}`} inert={theaterActive || undefined}>
-        {/* Sticky stack: scan bar + nav in one sticky container so the
+      <main className={`min-h-screen stage-shell ${theaterActive ? 'stage-dim-app' : ''}`} inert={theaterActive || onboardingOpen || undefined}>
+        {/* Sticky stack: nav + scan bar in one sticky container so the
             scan bar contributes its height to flow and both pin together
-            on scroll. The bar stays ABOVE the nav, as in the mockup. */}
+            on scroll. The bar is UNDER the nav, as in the mockup (it was
+            above it). */}
         <div ref={chromeRef} className="sticky top-0 z-50">
-          {/* Global scan progress bar (admin-only). Returns null when
-              no scan is active. NOTE: it renders IN FLOW above the nav, so
-              it changes the height of this whole sticky stack — which is
-              why chromeRef publishes the measured height as --chrome-h
-              (see the effect above) for everything anchored below it. */}
-          <ScanProgressBar isAdmin={adminUI} onScanComplete={notifyCatalogChanged} />
           <TopNav
             user={user}
             adminUI={adminUI}
+            navScope={navScope}
             currentView={view}
+            pageTitle={pageTitle}
             onNavigate={handleNavigate}
             onPrefetch={prefetchView}
             searchQuery={searchQuery}
             onSearchQueryChange={(v) => {
-              setSearchQuery(v)
-              if (v) {
-                setView('search')
-              } else if (view === 'search') {
-                setView('home')
-              }
+              // The first key shows the search page (at its address). With
+              // the words deleted the page stays, listing recent searches:
+              // it used to drop to Tonight between two tries at a title.
+              changeSearchQuery(v)
+              if (v) showSearchPage()
             }}
-            onSearchFocus={() => setSearchOpen(true)}
-            onSearchClose={closeSearch}
+            onSearchSubmit={() => describeSearch(searchQuery)}
+            onSearchClear={clearSearch}
             searchInputRef={searchInputRef}
-            onOpenPalette={() => setPaletteOpen(true)}
-            // Party — M10 Phase 4. Click opens the panel if already in a
-            // party, otherwise prompts for a code to join.
-            partyActive={!!party.state.code}
-            partyLabel={party.state.code ? `In party ${party.state.code}` : 'Join a watch party'}
-            onPartyClick={() => {
-              if (party.state.code) {
-                setPartyPanelOpen(o => !o)
-              } else {
-                setPartyJoinPrompt(true)
-              }
+            presence={navPresence}
+            onPresenceClick={() => {
+              // In a party: the pill is that party, and toggles its panel.
+              // Otherwise it is other people's, and leads to Together.
+              if (party.state.code) setPartyPanelOpen(o => !o)
+              else handleNavigate('together')
             }}
-            partyPanelOpen={partyPanelOpen}
-            serverOpen={serverOpen}
-            onToggleServer={() => { setServerOpen(!serverOpen); setNotifOpen(false) }}
-            notifOpen={notifOpen}
-            onToggleNotifications={() => { setNotifOpen(!notifOpen); setServerOpen(false) }}
-            // Force-open variants for the avatar dropdown's rows. A row
-            // labelled "Notifications" must never CLOSE the panel because it
-            // happened to already be open — below md that dropdown is the
-            // only surface for these, with no icon state to explain it.
+            // The identity menu's rows force-open their panel: a row
+            // labelled "Notifications" must never CLOSE it because it
+            // happened to be open already.
             onOpenServerPanel={() => { setServerOpen(true); setNotifOpen(false) }}
             onOpenNotificationsPanel={() => { setNotifOpen(true); setServerOpen(false) }}
-            // Social phase 1 — "My Profile" dropdown row. Path nav (not a
-            // view id): the member page is keyed by username in the URL,
-            // same pattern as /title/:id.
-            onOpenMyProfile={() => navigate(`/user/${encodeURIComponent(user.username)}`)}
-            // Social phase 2 — the member directory. A real view id, so it
-            // rides handleNavigate like Settings does from this menu.
-            onOpenMembers={() => handleNavigate('members')}
             notifCount={unreadCount}
             profiles={profiles}
             activeProfileId={activeProfileId}
-            onSelectProfile={id => { void switchProfile(id) }}
-            // The dashed Add-Profile row routes here rather than duplicating
-            // the create form in the menu — SettingsView's
-            // ProfilesAndWatchlistsCard already owns creation plus the taste
-            // onboarding it kicks off.
-            onAddProfile={() => handleNavigate('settings')}
+            onSelectProfile={id => { void switchProfileWatched(id) }}
             onOpenProfilesGate={() => setProfilesGateForced(true)}
-            avatarUrl={profiles.find(p => p.id === activeProfileId)?.avatar_url}
+            // Profile creation and limits live in Settings' profiles pane.
+            onManageProfiles={() => navigate(settingsPath('profiles'))}
+            onOpenMyProfile={() => handleNavigate('profile')}
+            onOpenRequests={() => handleNavigate('requests')}
+            requestsLabel={requestsLabel}
+            onReportBug={reportsOn ? bugReport.openHere : undefined}
             onSignOut={() => { void handleLogout() }}
           />
+          {/* The scan bar (admin-only). Returns null when no scan is
+              active. NOTE: it renders IN FLOW under the nav, so it changes
+              the height of this whole sticky stack — which is why chromeRef
+              publishes the measured height as --chrome-h (see the effect
+              above) for everything anchored below it. */}
+          <ScanProgressBar isAdmin={adminUI} onScanComplete={notifyCatalogChanged} onOpenLibraries={openAdminLibraries} />
         </div>{/* /sticky stack */}
 
         {/* Page Content. The global `p-8` is gone (Aurora Stage M2): pages
@@ -6553,6 +6771,58 @@ export default function App() {
             edge-to-edge hero and pad their own sections with .stage-gutter
             instead (Phase 4 added home/movies/shows to what was just
             `detail`). Everything else keeps the standard page pad. */}
+        {isLibraryView(view) && (!hiddenFromRestricted(view) || hiddenOk) && (
+          <LibraryHeader
+            current={view}
+            navScope={navScope}
+            onNavigate={handleNavigate}
+            onPrefetch={prefetchView}
+            // A grid has no heading or toolbar of its own: its name, count,
+            // sort, layout and genres are this row's, which stays mounted
+            // while the grid reloads for a new sort or genre.
+            title={view === 'movies' ? 'Movies' : view === 'shows' ? 'TV Shows' : undefined}
+            tools={view === 'movies' ? (
+              <BrowseTools
+                noun="movie" total={profileSwitchPending ? null : moviesTotal}
+                sortBy={moviesSort} onSortChange={handleMoviesSortChange}
+                layout={moviesLayout} onLayoutChange={changeBrowseLayout}
+                genre={moviesGenre} onGenreChange={handleMoviesGenreChange} genres={moviesGenreList}
+              />
+            ) : view === 'shows' ? (
+              <BrowseTools
+                noun="show" total={profileSwitchPending ? null : showsTotal}
+                sortBy={showsSort} onSortChange={handleShowsSortChange}
+                layout={showsLayout} onLayoutChange={changeBrowseLayout}
+                genre={showsGenre} onGenreChange={handleShowsGenreChange} genres={showsGenreList}
+              />
+            ) : undefined}
+            toolsRef={setLibraryToolsEl}
+          >
+            {view === 'movies' && <GenreChips genre={moviesGenre} onGenreChange={handleMoviesGenreChange} genres={moviesGenreList} />}
+            {view === 'shows' && <GenreChips genre={showsGenre} onGenreChange={handleShowsGenreChange} genres={showsGenreList} />}
+          </LibraryHeader>
+        )}
+        {/* A grid sorted by title: its A to Z strip, between the header and
+            the grid and a sibling of both, so it can stay under the top bar
+            while the grid scrolls. Not while the grid loads, and not for an
+            empty one.
+
+            Only for a list that can be loaded whole in the pages a grid
+            keeps live (CATALOG_REFRESH_MAX_PAGES): a jump then asks for the
+            few pages that are left at most, and the grid is still refreshed
+            afterwards. A longer list gets no strip at all: a jump there
+            would be a long chain of requests that are each a pass over the
+            whole library, and needs a "titles from a letter" request the
+            server does not have. */}
+        {view === 'movies' && moviesStrip && !!moviesList?.length && (
+          <LetterStrip states={moviesJump.states} pending={moviesJump.pending} progress={moviesJump.progress} missing={moviesJump.missing} onJump={moviesJump.jump} />
+        )}
+        {view === 'shows' && showsStrip && !!showsList?.length && (
+          <LetterStrip states={showsJump.states} pending={showsJump.pending} progress={showsJump.progress} missing={showsJump.missing} onJump={showsJump.jump} />
+        )}
+        {/* A Library scope that keeps its own state hands its controls to the
+            header through this (LibraryTools). */}
+        <LibraryToolsProvider value={isLibraryView(view) ? libraryToolsEl : null}>
         <div className={FULL_BLEED_VIEWS.has(view) ? undefined : 'stage-page'}>
           {view === 'home' && (
             <HomeView
@@ -6563,33 +6833,51 @@ export default function App() {
               // skeletons: the hero, rails, Continue Watching and
               // conversational results in state are the previous profile's
               // until that render's effects clear them.
-              hero={profileSwitchPending ? undefined : homeHero ?? undefined}
+              // Nor is there a hero before the title to resume is known
+              // (heroLeadSettled): it leads, and a pick shown first would be
+              // swapped out for it.
+              hero={profileSwitchPending || !heroLeadSettled ? undefined : tonightHero ?? undefined}
               // The core rails set the catalog-fallback hero when they land,
               // so until they land (or fail) a pick is still on its way.
-              heroLoading={profileSwitchPending || (homeRails === undefined && !homeError)}
-              // Memoized above (homeRailsProp) — Continue Watching prepended
-              // and deduped, conversational results pinned first.
+              heroLoading={profileSwitchPending || !heroLeadSettled || (homeRails === undefined && !homeError)}
+              // Memoized above (homeRailsProp): Continue Watching prepended
+              // and deduped.
               rails={profileSwitchPending ? undefined : homeRailsProp}
               loading={profileSwitchPending || homeLoading}
-              convoLoading={convoLoading}
               error={homeError}
               onRetry={requestHomeReload}
               onCardContext={openCardContextMenu}
-              heroReason={heroPool[heroIndex]?.reason}
-              heroIsCatalogFallback={homeHeroIsFallback}
-              heroMatch={heroPool[heroIndex]?.match}
-              heroScore={heroPool[heroIndex]?.score}
+              // What the hero is, its filmstrip, and its place in the
+              // recommender's slate: the entry's own, so a pick chosen from
+              // the strip is reported at its position and a title Aurora did
+              // not pick (a resume lead outside the pool, the catalog's
+              // fallback) is not reported at all.
+              heroKind={heroEntry ? heroEntry.kind : 'catalog'}
+              heroReason={heroEntry?.reason}
+              heroSlate={profileSwitchPending || !heroLeadSettled ? undefined : heroSlate}
+              heroSlateIndex={heroSlateIndex}
+              onHeroPick={pickSlateEntry}
               heroSlateToken={heroSlateToken}
-              heroPosition={heroIndex}
+              heroPosition={heroEntry?.position ?? undefined}
               activeProfileId={activeProfileId ?? undefined}
               // "Surprise me" — play a random recommended pick (not the one shown).
-              onSurprise={onSurprise}
-              onConversationalSearch={runConversational}
-              onRefreshRecs={handleRefreshRecs}
+              onSurprise={heroPool.length > 0 ? onSurprise : undefined}
+              // "Refresh picks" sits beside the hero's picks, so it asks for
+              // new ones there as well as in the recommender's rails (it
+              // used to rebuild the rails only, from the greeting band).
+              onRefreshRecs={() => { void reloadHeroPool(true); void handleRefreshRecs() }}
               recsRefreshing={recsRefreshing}
-              // "Not tonight" — advance to the next pick in the loaded pool.
-              onNextPick={advanceHero}
-              onHeroPauseChange={setHeroPaused}
+              onHeroPauseChange={holdHeroWhileIn}
+              heroRotationPaused={heroHold}
+              onToggleHeroRotation={heroRotates ? toggleHeroHold : undefined}
+              // A party on the hero's title, with the same episode choice a
+              // card's menu makes. Not for a profile with a content limit.
+              onHeroWatchTogether={navScope === 'full'
+                ? (m) => { void startPartyFromCard(m, heroEntry?.record ?? continueItems.find(c => c.media_item_id === m.id && isResumable(c))) }
+                : undefined}
+              kids={kidsTonight}
+              limitLabel={kidsTonight ? profiles.find(p => p.id === activeProfileId)?.max_age_rating?.trim() || undefined : undefined}
+              onSwitchProfile={() => setProfilesGateForced(true)}
               heroPersonalization={heroPersonalization}
               libraryIds={libraryIds}
               onToggleLib={handleToggleLib}
@@ -6614,43 +6902,27 @@ export default function App() {
                     ? null
                     : (moviesTotal ?? 0) + (showsTotal ?? 0)
               }
-              // Opens the existing Watch Party hub (same as the top bar).
-              onOpenParty={() => setPartyJoinPrompt(true)}
-              // Join a specific active party (Watch-together card) — same path
-              // as PartyHubModal's onJoin: join by code, then open the panel.
-              onJoinParty={(code) => party.join(code).then((r) => {
-                if (r.ok) setPartyPanelOpen(true)
-                return r
-              })}
-              // 2026-05-27 — Hero resume bundle. Same lookup as
-              // DetailView's `resume`: find the user's CW record for
-              // the current hero (movie OR show) with position_ms > 0.
-              // When present, HeroSection swaps its primary CTA from
-              // "Play" to "Resume at MM:SS" (or "Resume S2E5 · MM:SS"
-              // for shows) and dispatches handlePlayContinue with the
-              // matched record. Resolved via an IIFE so the lookup
-              // sits inline at the call site and re-runs naturally
-              // when continueItems or homeHero changes.
+              // The live strip, for a session offered Together and no other
+              // (parties is what turns it on). The party list is the one App
+              // polls for the whole app, already empty on the commit that
+              // switches profile. The invitations are the account's, the
+              // same under any of its profiles.
+              parties={navScope === 'full' ? activeParties.parties : undefined}
+              invites={myPartyInvites}
+              inPartyCode={party.state.code}
+              onJoinParty={code => void handleJoinInviteParty(code)}
+              onInviteRsvp={handleInviteRsvp}
+              // The record the hero resumes from: the lead's own, else the
+              // viewer's position in the pick that is up, if they have one
+              // (the same threshold every other Resume uses).
               heroResume={(() => {
-                if (!homeHero) return undefined
-                // isResumable replaces the bare `position_ms > 0` check
-                // so the Hero matches every other surface's threshold
-                // (deep-debug H2: was an asymmetry — Hero was the only
-                // site already using the 5s gate; detail/CW lookups
-                // were on > 0).
-                const item = continueItems.find(c =>
-                  c.media_item_id === homeHero.id && isResumable(c),
-                )
-                return item ? { item, onPlay: handlePlayContinue } : undefined
+                if (!tonightHero || profileSwitchPending) return undefined
+                const item = heroEntry?.record
+                  ?? continueItems.find(c => c.media_item_id === tonightHero.id && isResumable(c))
+                return item && isResumable(item) ? { item, onPlay: handlePlayContinue } : undefined
               })()}
-              // 2026-05-27 — Continue Watching one-click resume on
-              // the home CW rail. HomeView scopes the resume pill
-              // to rail.kind === 'continue-watching'; this prop
-              // just supplies the lookup data + handler.
-              // Deep-debug M2 — memoized so HomeView / MediaRail can
-              // benefit from React.memo in the future without the
-              // bundle re-creating fresh references every render.
-              cwResume={homeCwResumeBundle}
+              onCardPlay={playOrResume}
+              resumableIds={profileSwitchPending ? undefined : resumableIds}
               onNavigate={(v, opts) => {
                 // QA 2026-05-25 — "See All" deep-link to a browse
                 // page with an explicit sort. If the destination's
@@ -6673,74 +6945,67 @@ export default function App() {
               While loading, show a brief loading state instead of
               flashing the prototype's mock library to the user. */}
           {view === 'movies' && (
-            <ViewSuspense fallback={<BrowseLoadingState title="Movies" />}>
+            <ViewSuspense fallback={<BrowseLoadingState compact={moviesLayout === 'compact'} />}>
               {moviesList === null || profileSwitchPending
-                ? <BrowseLoadingState title="Movies" />
+                ? <BrowseLoadingState compact={moviesLayout === 'compact'} />
                 : <BrowseView
                     items={moviesList}
                     total={moviesTotal}
-                    title="Movies"
-                    subtitle="Browse your movie collection"
-                    mediaType="movie"
-                    sortBy={moviesSort}
-                    onSortChange={handleMoviesSortChange}
-                    genreFilter={moviesGenre}
-                    onGenreChange={handleMoviesGenreChange}
-                    availableGenres={moviesGenres}
+                    layout={moviesLayout}
                     onLoadMore={handleLoadMoreMovies}
                     isLoadingMore={moviesLoadingMore}
                     onSelect={handleSelect}
-                    onPlay={handlePlay}
                     onCardContext={openCardContextMenu}
+                    onCardPlay={playOrResume}
+                    resumableIds={profileSwitchPending ? undefined : resumableIds}
+                    progressById={profileSwitchPending ? undefined : listProgressById}
                     libraryIds={libraryIds}
                     onToggleLib={handleToggleLib}
-                    continueItems={continueItems}
-                    onPlayContinue={handlePlayContinue}
                   />
               }
             </ViewSuspense>
           )}
           {view === 'shows' && (
-            <ViewSuspense fallback={<BrowseLoadingState title="TV Shows" />}>
+            <ViewSuspense fallback={<BrowseLoadingState compact={showsLayout === 'compact'} />}>
               {showsList === null || profileSwitchPending
-                ? <BrowseLoadingState title="TV Shows" />
+                ? <BrowseLoadingState compact={showsLayout === 'compact'} />
                 : <BrowseView
                     items={showsList}
                     total={showsTotal}
-                    title="TV Shows"
-                    subtitle="Browse your series collection"
-                    mediaType="show"
-                    sortBy={showsSort}
-                    onSortChange={handleShowsSortChange}
-                    genreFilter={showsGenre}
-                    onGenreChange={handleShowsGenreChange}
-                    availableGenres={showsGenres}
+                    layout={showsLayout}
                     onLoadMore={handleLoadMoreShows}
                     isLoadingMore={showsLoadingMore}
                     onSelect={handleSelect}
-                    onPlay={handlePlay}
                     onCardContext={openCardContextMenu}
+                    onCardPlay={playOrResume}
+                    resumableIds={profileSwitchPending ? undefined : resumableIds}
+                    progressById={profileSwitchPending ? undefined : listProgressById}
                     libraryIds={libraryIds}
                     onToggleLib={handleToggleLib}
-                    continueItems={continueItems}
-                    onPlayContinue={handlePlayContinue}
                   />
               }
             </ViewSuspense>
           )}
-          {view === 'library' && (
-            <ViewSuspense fallback={<ViewFallback />}>
+          {hiddenPending && <ViewFallback />}
+          {view === 'library' && hiddenOk && (
+            <HiddenPage name="library"><ViewSuspense fallback={<ViewFallback />}>
               <LibraryView
                 library={profileSwitchPending ? NO_MEDIA : library}
                 loading={profileSwitchPending || !libraryLoaded}
                 continueItems={profileSwitchPending ? NO_CONTINUE : continueItems}
                 onSelect={handleSelect}
                 onToggleLib={handleToggleLib}
-                // 2026-05-27 — Continue Watching one-click resume on
-                // the LibraryView CW grid (mirrors home CW rail).
+                onCardContext={openCardContextMenu}
+                onCardPlay={playOrResume}
+                resumableIds={profileSwitchPending ? undefined : resumableIds}
+                // The Continue Watching grid's Play resumes its own record.
                 onPlayContinue={handlePlayContinue}
+                profileName={profileSwitchPending ? undefined : profiles.find(p => p.id === activeProfileId)?.name}
+                // An empty list offers what to do next, in place.
+                onFind={findInLibrary}
+                onBrowse={handleNavigate}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
           {/* /title/:id deep link, selection still hydrating from the
               API — hold the layout with a skeleton instead of a blank
@@ -6749,9 +7014,9 @@ export default function App() {
           {view === 'detail' && selectedMedia && !profileSwitchPending && (
             <ViewSuspense fallback={<DetailSkeleton />}>
               <DetailView
-                // Reset internal state (active tab, cast-expand) per title so
-                // detail→detail navigation (e.g. Cmd+K search) never leaves a
-                // stale tab selected (an Episodes tab on a movie = blank column).
+                // Remount per title, so going from one title straight to
+                // another (Cmd+K search, a "more like this" card) carries
+                // nothing of the first page's own state into the second.
                 key={selectedMedia.id}
                 media={selectedMedia}
                 onBack={handleBack}
@@ -6777,7 +7042,18 @@ export default function App() {
                 }}
                 loading={detailLoading}
                 error={detailError}
-                onStartParty={handleStartParty}
+                // The page passes the episode it would start from the season
+                // it is showing. When that season has nothing to play (the
+                // viewer moved to it), the party still needs an episode if
+                // the show has one anywhere: the card's lookup finds it.
+                // A viewer with a place in the show never gets here: the page
+                // passes that episode whatever season it is showing (its
+                // resume record is the one found for `resume` below), so
+                // there is no record to hand the lookup.
+                onStartParty={(m, episodeId) => {
+                  if (m.type === 'show' && episodeId === undefined) void startPartyFromCard(m, undefined)
+                  else handleStartParty(m, episodeId)
+                }}
                 inParty={!!party.state.code}
                 seasons={detailSeasons}
                 selectedSeason={detailSelectedSeason}
@@ -6818,16 +7094,64 @@ export default function App() {
             </ViewSuspense>
           )}
           {view === 'device' && (
-            <DeviceApprovalView key={location.key} username={user.username} initialCode={new URLSearchParams(location.search).get('code') ?? ''} />
+            <DeviceApprovalView
+              key={location.key}
+              username={user.username}
+              initialCode={new URLSearchParams(location.search).get('code') ?? ''}
+              // For the sentence that says locked profiles still ask for
+              // their PIN on the TV: unknown until the profiles are loaded.
+              someProfileUnlocked={profilesLoaded ? profiles.some(p => !p.has_pin) : null}
+            />
           )}
           {view === 'search' && (
             <ViewSuspense fallback={<ViewFallback />}>
-              <SearchView key={`profile-${activeProfileId}`} query={searchQuery} onSelect={handleSelect} libraryIds={libraryIds} onToggleLib={handleToggleLib} />
+              <SearchView
+                key={`profile-${activeProfileId}`}
+                query={searchQuery}
+                // The page's own field, shown below md, where the top bar
+                // has none. It only sets the query: unlike the bar's field,
+                // clearing it does not leave the page it is on.
+                onQueryChange={changeSearchQuery}
+                // Asked for by Enter in either field, or the page's own
+                // button; handed over only while it is still this session's.
+                describe={searchDescribe && searchDescribe.owner === searchOwner ? searchDescribe : null}
+                onDescribe={describeSearch}
+                // A search that finds nothing ends in the titles that can
+                // be requested, on the page itself. For a session known to
+                // be offered requests: not a profile with a content limit,
+                // and not one whose profile is not known yet (the identity
+                // menu offers Requests to the same).
+                requesting={navScope === 'full' ? searchRequesting : undefined}
+                // What this profile searched for lately in this browser. A
+                // search is remembered when something is done with it: a
+                // result opened or played, or a search by description asked
+                // for (describeSearch).
+                recent={recentSearches.owner === searchOwner ? recentSearches.list : NO_RECENT}
+                onPickRecent={changeSearchQuery}
+                onClearRecent={clearRecentSearches}
+                focusNonce={searchFocusNonce}
+                takeFocus={takeSearchFieldFocus}
+                onSelect={selectFromSearch}
+                onCardContext={openCardContextMenu}
+                onCardPlay={playFromSearch}
+                resumableIds={profileSwitchPending ? undefined : resumableIds}
+                progressById={profileSwitchPending ? undefined : listProgressById}
+                // A party with the best match, and the collections that hold
+                // the words: for a session offered Together and the
+                // Library's Collections, which a profile with a content
+                // limit is not.
+                onWatchTogether={navScope === 'full' ? partyFromSearch : undefined}
+                onOpenCollection={navScope === 'full' ? collectionFromSearch : undefined}
+                libraryIds={libraryIds}
+                onToggleLib={handleToggleLib}
+              />
             </ViewSuspense>
           )}
           {view === 'settings' && (
             <ViewSuspense fallback={<ViewFallback />}>
               <SettingsView
+                pane={settingsPane}
+                onPaneChange={(pane) => navigate(settingsPath(pane))}
                 user={user}
                 onLogout={handleLogout}
                 onToast={addToast}
@@ -6838,30 +7162,13 @@ export default function App() {
                 profileKnown={activeProfileId !== null
                   ? profiles.some(p => p.id === activeProfileId)
                   : profilesLoaded && profiles.length === 0}
-                onMaturityChange={(pref) => {
-                  if (!activeProfileId) return
-                  // Return the promise so SettingsView can roll back its optimistic
-                  // selection on failure; re-throw after toasting so that .catch fires.
-                  return setProfileMaturity(activeProfileId, pref)
-                    .then(() => listProfiles())
-                    .then(setProfiles)
-                    .then(() => addToast('Content tone updated — your feed will re-curate', 'success'))
-                    .catch((e) => { addToast('Failed to update content tone', 'error'); throw e })
-                }}
-                onAvatarChange={(avatarUrl) => {
-                  if (!activeProfileId) return
-                  return updateProfile(activeProfileId, { avatar_url: avatarUrl })
-                    .then(() => listProfiles())
-                    .then(setProfiles)
-                    .then(() => addToast('Avatar updated', 'success'))
-                    .catch((e) => { addToast('Failed to update avatar', 'error'); throw e })
-                }}
-                onOpenMyProfile={() => navigate(`/user/${encodeURIComponent(user.username)}`)}
+                profileSettled={catalogProfileSettled}
+                onOpenProfilePage={() => handleNavigate('profile')}
                 onProfilesChanged={() => { void listProfiles().then(setProfiles).catch(() => { /* next load refreshes it */ }) }}
               />
             </ViewSuspense>
           )}
-          {view === 'member' && (() => {
+          {view === 'member' && hiddenOk && (() => {
             // Social phase 1 — /user/:username. The username lives in the
             // URL (parsed fresh each render, like the detail view's id);
             // the lazy view fetches its own data, so a stale username can't
@@ -6871,7 +7178,7 @@ export default function App() {
             // lags a popstate by one frame.
             const uname = memberUsernameFromPath(location.pathname)
             return uname ? (
-              <ViewSuspense fallback={<ViewFallback />}>
+              <HiddenPage name="member"><ViewSuspense fallback={<ViewFallback />}>
                 {/* key: remount per username so profile A's in-flight
                     fetches (connections, follow toggle) can't write into
                     profile B's freshly-seeded state (PR-429 review). */}
@@ -6879,19 +7186,91 @@ export default function App() {
                   key={`${uname}:${activeProfileId}`}
                   username={uname}
                   onSelect={handleSelect}
+                  onCardContext={openCardContextMenu}
                   onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
                 />
-              </ViewSuspense>
+              </ViewSuspense></HiddenPage>
             ) : null
           })()}
-          {view === 'members' && (
+          {view === 'together' && hiddenOk && (
+            <HiddenPage name="together"><ViewSuspense fallback={<ViewFallback />}>
+              <TogetherView
+                // Remount per account and profile: the view holds its own
+                // state (a join in flight, a refusal), and nothing of one
+                // session's may show under another's name. The account is
+                // part of the key because two accounts with no profiles would
+                // otherwise share it across a sign-out and sign-in.
+                key={`together:${user.id}:${activeProfileId}`}
+                currentUserId={user.id}
+                profileId={activeProfileId}
+                activeParties={activeParties.parties}
+                partiesLoaded={activeParties.loaded}
+                partiesFailed={activeParties.failed}
+                invites={profileSwitchPending ? null : myPartyInvites}
+                inPartyCode={party.state.code ?? null}
+                onOpenPartyPanel={() => setPartyPanelOpen(true)}
+                onJoinParty={async (code) => {
+                  const r = await party.join(code)
+                  if (r.ok) { setPartyPanelOpen(true); activeParties.reload() }
+                  return r
+                }}
+                onOpenTitle={(id) => navigate(`/title/${id}`)}
+                onRsvp={handleInviteRsvp}
+                onRefreshInvites={refreshMyPartyInvites}
+                onOpenMembers={() => handleNavigate('members')}
+                onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
+                // To the catalog, by name. The Library destination opens the
+                // library scope last used, which can be My Library: a saved
+                // list, possibly empty, is not where to pick something from.
+                onBrowse={() => handleNavigate('movies')}
+              />
+            </ViewSuspense></HiddenPage>
+          )}
+          {view === 'profile' && hiddenOk && (
+            <HiddenPage name="profile"><ViewSuspense fallback={<ViewFallback />}>
+              <MyProfileView
+                key={`profile:${activeProfileId}`}
+                user={user}
+                activeProfile={profileSwitchPending ? null : profiles.find(p => p.id === activeProfileId) ?? null}
+                profileKnown={personalProfileReady && !profileSwitchPending}
+                onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
+                onOpenSettings={(pane) => (pane ? navigate(settingsPath(pane)) : handleNavigate('settings'))}
+                onToast={addToast}
+                onProfilesChanged={() => { void listProfiles().then(setProfiles).catch(() => { /* next load refreshes it */ }) }}
+              />
+            </ViewSuspense></HiddenPage>
+          )}
+          {view === 'me' && (
             <ViewSuspense fallback={<ViewFallback />}>
+              <MeView
+                user={user}
+                navScope={navScope}
+                adminUI={adminUI}
+                profiles={profiles}
+                activeProfileId={activeProfileId}
+                notifCount={unreadCount}
+                onSelectProfile={id => { void switchProfileWatched(id) }}
+                onManageProfiles={() => navigate(settingsPath('profiles'))}
+                onOpenNotifications={() => { setNotifOpen(true); setServerOpen(false) }}
+                onOpenMyProfile={() => handleNavigate('profile')}
+                onOpenRequests={() => handleNavigate('requests')}
+                requestsLabel={requestsLabel}
+                onOpenSettings={() => handleNavigate('settings')}
+                onReportBug={reportsOn ? bugReport.openFromMe : undefined}
+                onOpenAdmin={() => handleNavigate('admin')}
+                onOpenServer={() => { setServerOpen(true); setNotifOpen(false) }}
+                onSignOut={() => { void handleLogout() }}
+              />
+            </ViewSuspense>
+          )}
+          {view === 'members' && hiddenOk && (
+            <HiddenPage name="members"><ViewSuspense fallback={<ViewFallback />}>
               <MembersView
                 onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
                 currentUsername={user.username}
                 onToast={addToast}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
           {/* Not before the startup profile load settles
               (catalogProfileSettled): it fetches on mount, and a fresh
@@ -6901,13 +7280,15 @@ export default function App() {
               the binding cannot be read or the profile list fails, and the
               view then mounts under whatever the server has bound, as the
               catalog does. */}
-          {view === 'collections' && !catalogProfileSettled && <ViewFallback />}
-          {view === 'collections' && catalogProfileSettled && (
-            <ViewSuspense fallback={<ViewFallback />}>
+          {view === 'collections' && hiddenOk && !catalogProfileSettled && <ViewFallback />}
+          {view === 'collections' && hiddenOk && catalogProfileSettled && (
+            <HiddenPage name="collections"><ViewSuspense fallback={<ViewFallback />}>
               <CollectionsView
                 key={`profile-${activeProfileId}-${adminUI}`}
                 isAdmin={adminUI}
                 rewindNonce={navRewindNonce}
+                open={collectionAsk && collectionAsk.owner === searchOwner ? collectionAsk : null}
+                onOpenTaken={forgetCollectionAsk}
                 onOpenCreate={() => setCollectionsModalOpen(true)}
                 onOpenMedia={(id) => {
                   // Synthesize a minimal Media shape for handleSelect;
@@ -6932,24 +7313,14 @@ export default function App() {
                 // entry shows up as a posterless year-0 placeholder
                 // until the next /api/media refresh re-hydrates it).
                 libraryIds={libraryIds}
-                onToggleLib={(m) => handleToggleLib({
-                  id: m.id,
-                  title: m.title,
-                  year: m.year ?? 0,
-                  rating: m.rating ?? 0,
-                  duration: '',
-                  genre: (m.genres && m.genres[0]) || '',
-                  type: m.type,
-                  poster: posterURL(m.poster_path),
-                  backdrop: backdropURL(m.backdrop_path),
-                  description: m.overview ?? '',
-                })}
+                onToggleLib={(m) => handleToggleLib(collectionItemToMedia(m))}
+                onCardContext={(e, m) => openCardContextMenu(e, collectionItemToMedia(m))}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
           {/* Phase 6 — Calendar view (upcoming TV episodes). */}
-          {view === 'calendar' && (
-            <ViewSuspense fallback={<ViewFallback />}>
+          {view === 'calendar' && hiddenOk && (
+            <HiddenPage name="calendar"><ViewSuspense fallback={<ViewFallback />}>
               <CalendarView
                 key={`profile-${activeProfileId}`}
                 onOpenMedia={(id) => {
@@ -6968,31 +7339,24 @@ export default function App() {
                 currentUserId={user.id}
                 onJoinParty={code => void handleJoinInviteParty(code)}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
-          {view === 'requests' && (
-            <ViewSuspense fallback={<ViewFallback />}>
+          {view === 'requests' && hiddenOk && (
+            <HiddenPage name="requests"><ViewSuspense fallback={<ViewFallback />}>
               <RequestsView
+                everyone={adminUI}
                 requests={requestsList}
-                onRequestSubmitted={(r) => {
-                  // Not loaded yet (or dropped on a switch): leave it to the
-                  // fetch, which will include this one, rather than show it
-                  // alone and cancel the fetch.
-                  setRequestsList(prev => prev ? [r, ...prev] : prev)
-                  const id = nextToastId()
-                  setToasts(prev => [...prev, {
-                    id,
-                    message: `Requested "${r.title}"`,
-                    type: 'success',
-                  }])
-                }}
-                onRequestDeleted={(id) => {
-                  setRequestsList(prev => prev ? prev.filter(r => r.id !== id) : prev)
-                  const tId = nextToastId()
-                  setToasts(prev => [...prev, { id: tId, message: 'Request deleted', type: 'info' }])
-                }}
+                userId={user.id}
+                onRequestSubmitted={requestsPage.submitted}
+                onRequestDeleted={requestsPage.deleted}
+                onRequestMoved={requestsPage.moved}
+                // Asking for a title is the end of a search that finds
+                // nothing: the page's row opens the search page with its
+                // field ready (the bar's, or on a phone the page's own).
+                onAsk={() => { handleNavigate('search'); searchInputRef.current?.focus() }}
+                onFind={findInLibrary}
               />
-            </ViewSuspense>
+            </ViewSuspense></HiddenPage>
           )}
           {/* security — gate the mount on role, not just the view string.
               The sidebar link is admin-only, but typing /admin would otherwise
@@ -7002,7 +7366,10 @@ export default function App() {
               as an unrestricted profile, as the server's admin routes do. */}
           {view === 'admin' && adminUI && (
             <ViewSuspense fallback={<ViewFallback />}>
-              <AdminView currentAdminId={user.id} catalogVersion={catalogVersion} />
+              {/* sectionAsk: the scan bar's "Open Libraries" opens the page
+                  on that section, also when the page is already up on
+                  another, and without mounting it again. */}
+              <AdminView currentAdminId={user.id} catalogVersion={catalogVersion} initialSection={adminAsk > 0 ? 'libraries' : undefined} sectionAsk={adminAsk} />
             </ViewSuspense>
           )}
           {/* An admin whose session's profile is not known yet (startup), or
@@ -7018,12 +7385,22 @@ export default function App() {
             </p>
           )}
         </div>
+        </LibraryToolsProvider>
+        <BottomTabBar
+          currentView={view}
+          navScope={navScope}
+          onNavigate={handleNavigate}
+          onPrefetch={prefetchView}
+          live={navPresence !== null}
+          notifCount={unreadCount}
+          activeProfile={profiles.find(p => p.id === activeProfileId) ?? null}
+          username={user.username}
+        />
       </main>
+      {adminUI && user && <RestoreOutcomeAlert accountId={user.id} />}
 
-      {/* Video Player */}
-      {/* M10 Phase 2 — real HLS player. The mock VideoPlayer that
-          animated a fake currentTime is now unused (still defined
-          for reference); future cleanup will remove it. */}
+      {/* The player. Mounted for the life of the app and shown while it has
+          a target; it reports the surface it presents (onSurfaceChange). */}
       {playerLoading && !playerTarget && (
         <div className="fixed inset-0 z-[60] bg-black/80 flex items-center justify-center">
           <div className="text-white/70 text-sm">Resolving stream…</div>
@@ -7227,7 +7604,7 @@ export default function App() {
               .catch(err => {
                 setToasts(prev => [...prev, {
                   id: nextToastId(),
-                  message: err instanceof Error ? err.message : 'Failed to reschedule',
+                  message: failureWords(err, 'move the party') ?? 'Could not move the party just now.',
                   type: 'error',
                 }])
               })
@@ -7244,7 +7621,7 @@ export default function App() {
       {partyInviteOpen && partyPanelOpen && party.state.code &&
         party.state.hostUserId === user.id && partyVariant === 'rail' && (
         <div
-          className="fixed inset-0 z-[75] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm motion-safe:animate-fade-in"
+          className="fixed inset-0 z-[75] flex items-center justify-center p-4 bg-[var(--scrim)] motion-safe:animate-fade-in"
           onClick={() => setPartyInviteOpen(false)}
         >
           <div onClick={e => e.stopPropagation()} className="w-full max-w-sm">
@@ -7266,7 +7643,7 @@ export default function App() {
       <ProfilesGate
         profiles={profiles}
         activeProfileId={activeProfileId}
-        onSelect={switchProfile}
+        onSelect={switchProfileWatched}
         onAddProfile={() => handleNavigate('settings')}
         // `ready` = the list has actually been fetched. It must NOT be
         // `profiles.length > 0`: the policy's own `profileCount < 2` check
@@ -7291,6 +7668,10 @@ export default function App() {
           profileId={activeProfileId}
           profile={profiles.find(p => p.id === activeProfileId) ?? null}
           soleUnrestricted={isSoleUnrestrictedProfile(profiles, activeProfileId)}
+          // The picker and the PIN prompt are drawn over the flow: while
+          // either is up the flow is out of reach.
+          covered={profilesGateOpen || !!pinTarget}
+          onOpenChange={setOnboardingOpen}
           onComplete={() => window.location.reload()}
         />
       )}
@@ -7311,14 +7692,14 @@ export default function App() {
       )}
 
       {addToListMedia && activeProfileId && (
-        <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 stage-scrim-in" onClick={() => setAddToListMedia(null)}>
+        <div className="fixed inset-0 z-[70] bg-[var(--scrim)] flex items-center justify-center p-4 stage-scrim-in" onClick={() => { setAddToListMedia(null); setAddToListFailed(null) }}>
           <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 stage-dialog-in" onClick={e => e.stopPropagation()}>
             <h2 className="text-white text-lg font-semibold mb-2">Add "{addToListMedia.title}" to…</h2>
             <p className="text-white/50 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>
             {addToListLists === null && <p className="text-white/50 text-sm">Loading…</p>}
             {addToListLists && addToListLists.length === 0 && (
               <div className="text-white/50 text-sm mb-3">
-                No watchlists yet. Create one in Settings → Profiles &amp; Watchlists first.
+                No lists yet. Make one in Settings, under Profiles and parental controls: open a profile and add a list.
               </div>
             )}
             {addToListLists && addToListLists.map(l => (
@@ -7327,13 +7708,15 @@ export default function App() {
                 disabled={addToListBusy}
                 onClick={async () => {
                   setAddToListBusy(true)
+                  setAddToListFailed(null)
                   try {
                     await addToWatchlist(activeProfileId, l.id, addToListMedia.id)
                     const tId = nextToastId()
                     setToasts(prev => [...prev, { id: tId, message: `Added to "${l.name}"`, type: 'success' }])
-                    setAddToListMedia(null)
+                    closeAddToList()
                   } catch (err) {
-                    window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
+                    const says = failureWords(err, `add it to "${l.name}"`)
+                    if (says) setAddToListFailed({ mediaId: addToListMedia.id, says })
                   } finally {
                     setAddToListBusy(false)
                   }
@@ -7343,8 +7726,11 @@ export default function App() {
                 {l.name}
               </button>
             ))}
+            {addToListFailed?.mediaId === addToListMedia.id && (
+              <p role="alert" className="mt-2 text-sm text-danger-ink">{addToListFailed.says}</p>
+            )}
             <button
-              onClick={() => setAddToListMedia(null)}
+              onClick={closeAddToList}
               className="w-full mt-3 py-2 text-white/60 hover:text-white text-sm transition-colors"
             >
               Cancel
@@ -7353,24 +7739,22 @@ export default function App() {
         </div>
       )}
 
-      {/* Watch Party hub — replaces the old "type a 6-character code"
-          modal. Three sections: Recently in (localStorage cache), My
-          Rooms (persistent rooms via /api/rooms), Enter a code. See
-          PartyHubModal.tsx for the rationale. */}
-      {partyJoinPrompt && user && typeof user === 'object' && (
-        <PartyHubModal
-          currentUserId={user.id}
-          onClose={() => setPartyJoinPrompt(false)}
-          onJoin={async (joinCode) => {
-            const r = await party.join(joinCode)
-            if (r.ok) {
-              setPartyJoinPrompt(false)
-              setPartyPanelOpen(true)
-            }
-            return r
-          }}
-        />
-      )}
+      <ConfirmDialog
+        open={confirmAsk !== null}
+        title={confirmAsk?.title ?? ''}
+        confirmLabel={confirmAsk?.confirmLabel ?? ''}
+        destructive={confirmAsk?.destructive ?? false}
+        safeFirst={confirmAsk?.destructive ?? false}
+        onConfirm={() => {
+          const run = confirmAskRef.current?.run
+          confirmAskRef.current = null
+          setConfirmAsk(null)
+          run?.()
+        }}
+        onCancel={() => setConfirmAsk(null)}
+      >
+        {confirmAsk?.body ?? ''}
+      </ConfirmDialog>
 
       {/* Watch-party invite composer — "Plan a Watch Party" (now or
           scheduled + people picker). Opened by the detail page's Party
@@ -7385,12 +7769,16 @@ export default function App() {
         />
       )}
 
-      {contextMenu && (
+      {/* Not on the commit that switches profile: the menu is the previous
+          profile's (see the effect that closes it). */}
+      {contextMenu && !profileSwitchPending && (
         <ContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
           items={contextMenu.items}
           title={contextMenu.title}
+          reason={contextMenu.reason}
+          opener={contextMenu.opener}
           onClose={() => setContextMenu(null)}
         />
       )}
@@ -7405,56 +7793,32 @@ export default function App() {
         />
       )}
 
-      {/* 2026-05-27 — Bug-report launcher. Gated on the server-side
-          BUG_REPORT_ENABLED env var so a misconfigured deploy doesn't
-          dangle a non-functional button.
-          - prefillName uses the user's display username, NOT email,
-            so a public-repo deploy doesn't leak emails into issue
-            bodies that anyone with repo read access can see (deep-
-            debug #7).
-          - `hidden` props (was: gate on `!playerTarget`) — moved
-            INTO the component so the modal stays mounted across
-            player open/close events. This keeps an in-flight screen
-            recording or capture from being silently aborted if a
-            watch-party teleports the user into the host's player
-            mid-recording (holistic deep-debug M1).
-          - Component itself also hides when admin panels open
-            (Server / Notifications at z-[45] cover the launcher
-            on mobile — holistic deep-debug H2). */}
-      {bugReportConfig?.enabled && (
-        <BugReportButton
+      {/* The bug report dialog. Mounted while the server takes reports
+          (BUG_REPORT_ENABLED), so a misconfigured deploy offers nothing
+          that cannot work, and for nothing else: not the player, not a
+          panel. A recording or a capture in progress must outlive a player
+          that a watch party opens over the page.
+          - prefillName is the display username, NOT the email, so a
+            public-repository deploy does not put emails into issue bodies.
+          - The token's health is an admin's; a switch to a restricted
+            profile hides it at once, ahead of the refetch above. */}
+      {reportsOn && (
+        <BugReportHost
+          open={bugReport.open}
+          dismissed={bugReport.dismissed}
+          onClose={bugReport.close}
           prefillName={user.username}
           onToast={addToast}
-          // 2026-05-27 (PR #107 follow-up — deep-debug H1/M1):
-          // Restored serverOpen / notifOpen and added partyPanelOpen.
-          // The previous PR's reasoning "panels anchor LEFT" is only
-          // true on desktop — below md both panels span `left-2 right-2`
-          // (full viewport width). PartyPanel is a right-edge drawer at
-          // z-70 that covers the launcher on every viewport when open.
-          // Hiding the launcher in these cases is the cheap, correct fix
-          // — the admin can close the panel and reopen the bug-report
-          // flow.
-          //
-          // 2026-07-25 (Aurora Stage Phase 2) — the two drawers moved
-          // from bottom-anchored to top-anchored (they follow their
-          // trigger, which moved to the TopNav), so on a normal viewport
-          // they no longer reach the bottom-right launcher. Keeping them
-          // in this list anyway: it still holds on short viewports, where
-          // top + max-h-[70vh] can run into the launcher.
-          hidden={!!playerTarget || serverOpen || notifOpen || partyPanelOpen}
-          // 2026-05-27 — PAT health diagnostics. Server populates
-          // these fields only for admin requesters; the modal shows
-          // a warning banner when token_healthy === false.
-          // The token's health is an admin's; a switch to a restricted
-          // profile hides it at once, ahead of the refetch below.
-          tokenHealthy={adminUI ? bugReportConfig.token_healthy : undefined}
-          tokenHealthReason={adminUI ? bugReportConfig.token_health_reason : undefined}
-          onRefreshConfig={refreshBugReportConfig}
+          tokenHealthy={adminUI ? bugReportConfig?.token_healthy : undefined}
+          tokenHealthReason={adminUI ? bugReportConfig?.token_health_reason : undefined}
+          focusFallback={focusPageStart}
         />
       )}
 
       {/* Toast */}
-      <ToastContainer toasts={toasts} onRemove={removeToast} />
+      {/* None on a switch's first commit: they were said to the previous
+          profile, and are dropped by the reset that follows that commit. */}
+      <ToastContainer toasts={profileSwitchPending ? NO_TOASTS : toasts} onRemove={removeToast} />
     </div>
   )
 }

@@ -233,7 +233,7 @@ const SENSITIVE_PARAM_UQ_RE = new RegExp(
 // Wrapped so a pathological input can never throw out of the interceptor
 // — on any error we fall back to a fully-masked sentinel rather than
 // leak the raw string.
-function redactConsoleMessage(s: string): string {
+export function redactConsoleMessage(s: string): string {
   try {
     return s
       .replace(SENSITIVE_HEADER_RE, (_m, key: string, sep: string, val: string) => {

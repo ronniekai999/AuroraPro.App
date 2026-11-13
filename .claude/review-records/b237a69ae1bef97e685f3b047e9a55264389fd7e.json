@@ -1,0 +1,10 @@
+{
+  "sha": "b237a69ae1bef97e685f3b047e9a55264389fd7e",
+  "verdict": "lows-only",
+  "summary": "Two commits applied on the Library head. Report a bug (the corner button and its dialog on the new surfaces; fields read-only and Send aria-disabled while a report is out), one pass by a new reviewer: lows-only, no high or medium. Admin follow-ups (the eight lows from Admin's second pass), one pass by Admin's reviewer: lows-only, all eight in. Both were read on the builder's branch before Library landed; here App.tsx carries the same hunk and the contrast audit drops all three exemptions the two sides removed. Open lows: bug report tests cannot see an unusable launcher and do not pin a same-tick double press; the launcher covers the end of a page on a phone; three strings still say submit; the error is not tied to its field; read-only fields look editable; removing the attachment drops focus; the 320px action row is tight; after a refused send the action row can be partly out of view. Admin: the second read after a close mid-match can move focus and scroll; the two reads can land out of order; the slowest of N is a 95th percentile.",
+  "reviewer": "fresh-context-agents-ad83f58e-afa77048",
+  "findings": "12",
+  "diff_digest": "3f230df16eb8ca4eb9c5d3a992897d2f4be190986cb231f778a37b47e13c48aa",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T18:56:26Z"
+}

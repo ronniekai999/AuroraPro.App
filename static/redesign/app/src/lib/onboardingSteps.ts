@@ -11,10 +11,14 @@
 // Building them from one function also makes the machine testable without a
 // DOM, which the flow has never had.
 
-export type Step = 'avatar' | 'name' | 'age' | 'style' | 'titles' | 'referral' | 'welcome' | 'loading'
+/** 'you' is who the profile is (avatar, name, an optional age); 'titles'
+ *  the taste picks; 'referral' the one question a signup may be asked;
+ *  'welcome' the send-off of a pass that only asked that question; 'loading'
+ *  the step that saves everything and builds. */
+export type Step = 'you' | 'titles' | 'referral' | 'welcome' | 'loading'
 
 export interface StepMachine {
-  /** Full navigation order, including the terminal welcome/loading steps. */
+  /** Full navigation order, including the terminal welcome or loading step. */
   order: readonly Step[]
   /** The steps the progress bar counts — "Step N of {inputs.length}". */
   inputs: readonly Step[]
@@ -38,7 +42,7 @@ export interface BuildStepsOptions {
   taste: boolean
 }
 
-const TASTE_INPUT_STEPS: readonly Step[] = ['avatar', 'name', 'age', 'style', 'titles']
+const TASTE_INPUT_STEPS: readonly Step[] = ['you', 'titles']
 
 export function buildSteps({ referralPending, taste }: BuildStepsOptions): StepMachine {
   if (!taste) {
@@ -49,7 +53,9 @@ export function buildSteps({ referralPending, taste }: BuildStepsOptions): StepM
   }
   const inputs: Step[] = [...TASTE_INPUT_STEPS]
   if (referralPending) inputs.push('referral')
-  return { order: [...inputs, 'welcome', 'loading'], inputs }
+  // The last input step leads straight into the build: its button says
+  // "Finish", and there is no screen between.
+  return { order: [...inputs, 'loading'], inputs }
 }
 
 /** Next step after `step`, or null at the end of the order. */

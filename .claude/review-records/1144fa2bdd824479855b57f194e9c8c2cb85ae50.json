@@ -1,0 +1,10 @@
+{
+  "sha": "1144fa2bdd824479855b57f194e9c8c2cb85ae50",
+  "verdict": "lows-only",
+  "summary": "Motion: a plain press on a 2:3 poster card carries the poster to the title page's poster (View Transitions, one call site, lib/posterTravel.ts); page entrances fade in place; both reduced-motion settings remove it in script and stylesheet. Two passes by an independent reviewer who ran the real module in Chromium: fix-first (with the root captured, every press during the transition went to <html>, so Play and Back did nothing for its length; the brief's premise was wrong), then lows-only on this patch (reviewed as 4539375, the same patch on the previous head): the root is not captured and presses land (run); a waiting open is not dropped by the browser's own Back within the one frame before it lands; the audit's check can still be walked round by a guard that asks the wrong way; a poster in a rail's faded edge travels unmasked (a suspicion); a card with another radius would start with the wrong one. All recorded as known items. Gates: the first full unit run had three 5-second timeouts under a machine load of 16; the two files passed alone and the full re-run passed (164 files, 3,134 tests).",
+  "reviewer": "fresh-context-agent-adc7d679",
+  "findings": "4",
+  "diff_digest": "bef9746149c0db2b1cd77529de3194a6592d189a8b6b9651b223ee882f355a27",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T07:35:57Z"
+}

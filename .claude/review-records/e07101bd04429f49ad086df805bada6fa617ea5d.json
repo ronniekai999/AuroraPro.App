@@ -1,0 +1,10 @@
+{
+  "sha": "e07101bd04429f49ad086df805bada6fa617ea5d",
+  "verdict": "lows-only",
+  "summary": "Search, last step: the palette folded into the search page, which has its own address; Ctrl/Cmd K focuses the field; arrow keys by row; requests page lows; CLAUDE.md search paragraph. First pass fix-first (status line speaking for words whose answer was not in; typed words surviving sign-out and expiry), both fixed; re-check lows-only. Queued: Escape order with a minimised player and the add-to-list sheet, a failure flash after the field is cleared, one announcement nit.",
+  "reviewer": "fresh-context-agent-a27d5c3e",
+  "findings": "5",
+  "diff_digest": "d0915d6d74b33393b1b23444da08cbc9a4b3cc2076b371472b67290e3c6c892a",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T01:40:56Z"
+}

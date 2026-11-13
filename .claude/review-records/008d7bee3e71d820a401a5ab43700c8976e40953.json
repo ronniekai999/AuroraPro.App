@@ -1,0 +1,10 @@
+{
+  "sha": "008d7bee3e71d820a401a5ab43700c8976e40953",
+  "verdict": "lows-only",
+  "summary": "Connect your TV, four commits, four passes by one reviewer with the server's pairing routes and the Android TV client read. Pass 1 fix-first (after a refusal for a locked account the next lookup showed a dead card with no reason; a mistyped code was told it had expired). Pass 2 lows-only. Pass 3, on the page rebuilt to the design with a new Not my TV button, fix-first (after an approval whose outcome was unknown, Not my TV said nothing was approved and removed the warning). Pass 4 lows-only: the unknown outcome is remembered, Not my TV then says an approval may have gone through and that signing out signs out every device, which the reviewer confirmed against Logout and Poll. The tree is byte-identical to the one read. Open lows: while the outcome is unknown, a second Approve or a re-lookup that gets a 404 drops the warning; the sign-out remedy needs this browser's session to be live and leaves an open socket open.",
+  "reviewer": "fresh-context-agent-adcf6c9d",
+  "findings": "2",
+  "diff_digest": "98bb04c531e849fc3f7fc08bc0b4d93d75f200eebb01a4978da6e136d2243a44",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T20:42:17Z"
+}

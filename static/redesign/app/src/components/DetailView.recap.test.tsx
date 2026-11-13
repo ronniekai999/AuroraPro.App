@@ -5,6 +5,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import DetailView from './DetailView'
 import type { Media } from '@/lib/types'
+import { APIError } from '@/lib/api'
 
 const api = vi.hoisted(() => ({
   getRecap: vi.fn(),
@@ -21,12 +22,6 @@ vi.mock('@/lib/api', async () => {
     getUserRating: api.getUserRating,
   }
 })
-
-vi.mock('@/components/detail/DetailRail', () => ({
-  DetailRail: ({ onPrevious }: { onPrevious?: () => void }) => (
-    <div>{onPrevious && <button type="button" onClick={onPrevious}>Previously</button>}</div>
-  ),
-}))
 
 const show: Media = {
   id: 42,
@@ -70,7 +65,7 @@ describe('DetailView Previously affordance', () => {
     api.getRecapStatus.mockResolvedValue({ available: true, has_ask_history: false })
     renderDetail(7)
 
-    expect(await screen.findByRole('button', { name: 'Previously' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Previously on' })).toBeInTheDocument()
     expect(api.getRecapStatus).toHaveBeenCalledWith(42, 7, expect.any(AbortSignal))
   })
 
@@ -79,7 +74,7 @@ describe('DetailView Previously affordance', () => {
       .mockResolvedValueOnce({ available: true, has_ask_history: false })
       .mockResolvedValueOnce({ available: false, reason: 'no_history', has_ask_history: true })
     const rendered = renderDetail(7)
-    expect(await screen.findByRole('button', { name: 'Previously' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Previously on' })).toBeInTheDocument()
 
     rendered.rerender(
       <DetailView
@@ -94,7 +89,7 @@ describe('DetailView Previously affordance', () => {
       />,
     )
     await waitFor(() => expect(api.getRecapStatus).toHaveBeenLastCalledWith(42, 8, expect.any(AbortSignal)))
-    expect(screen.getByRole('button', { name: 'Previously' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Previously on' })).toBeInTheDocument()
   })
 
   it('never renders the previous profile recap while the new profile loads', async () => {
@@ -109,7 +104,7 @@ describe('DetailView Previously affordance', () => {
       })
       .mockReturnValueOnce(new Promise(() => {}))
     const rendered = renderDetail(7)
-    await user.click(await screen.findByRole('button', { name: 'Previously' }))
+    await user.click(await screen.findByRole('button', { name: 'Previously on' }))
     expect(await screen.findByText('Private recap for profile seven.')).toBeInTheDocument()
 
     rendered.rerender(
@@ -128,6 +123,20 @@ describe('DetailView Previously affordance', () => {
     await waitFor(() => expect(api.getRecap).toHaveBeenLastCalledWith(42, 8))
     expect(screen.queryByText('Private recap for profile seven.')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Generating recap')).toBeInTheDocument()
+  })
+})
+
+describe('DetailView: a recap that cannot be read', () => {
+  // The server's words are for a log ("llm: provider timeout"): the recap
+  // says what could not be done.
+  it('says so in the app\'s words', async () => {
+    const user = userEvent.setup()
+    api.getRecapStatus.mockResolvedValue({ available: true, has_ask_history: false })
+    api.getRecap.mockRejectedValue(new APIError(502, 'llm: provider timeout', null))
+    renderDetail(7)
+    await user.click(await screen.findByRole('button', { name: 'Previously on' }))
+    expect(await screen.findByText('Could not load the recap just now.')).toBeInTheDocument()
+    expect(document.body.textContent).not.toMatch(/llm:/)
   })
 })
 

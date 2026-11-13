@@ -18,9 +18,10 @@
 
 import { Profiler } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import App from './App'
+import { pageText } from '@/test/pageText'
 
 const NOW = '2026-11-01T00:00:00Z'
 const item = (id: number, title: string) => ({
@@ -110,14 +111,19 @@ let server: ReturnType<typeof stubServer>
 function renderApp(path: string) {
   const commits: { text: string }[] = []
   let sampling = false
-  const onRender = () => { if (sampling) commits.push({ text: document.body.textContent ?? '' }) }
+  const onRender = () => { if (sampling) commits.push({ text: pageText() }) }
   render(<Profiler id="app" onRender={onRender}><MemoryRouter initialEntries={[path]}><App /></MemoryRouter></Profiler>)
   return { commits, on: () => { sampling = true } }
 }
 
-function goTo(label: string) {
-  const tab = [...document.querySelectorAll('button.stage-tab')].find(b => b.textContent?.startsWith(label))
-  if (!tab) throw new Error(`no ${label} tab`)
+/** Navigates through the top bar. Home is the Tonight destination; Movies is
+ *  where the Library destination lands (its first scope), or a destination of
+ *  its own for a restricted session. */
+function goTo(label: 'Home' | 'Movies') {
+  const tab = label === 'Home'
+    ? document.querySelector('header .stage-tab[data-nav="home"]')
+    : document.querySelector('header .stage-tab[data-nav="movies"]') ?? document.querySelector('header .stage-tab[data-nav="catalog"]')
+  if (!tab) throw new Error(`no ${label} destination in the top bar`)
   fireEvent.click(tab)
 }
 
@@ -172,16 +178,16 @@ describe('a scan’s new titles appear without a reload', () => {
     renderApp('/')
     await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0), { timeout: 5000 })
     await screen.findByText(ANCHOR_RAIL, undefined, { timeout: 5000 })
-    expect(screen.queryByLabelText('More info about First Import')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Details of First Import' })).toBeNull()
     server.add(item(5, 'First Import'))
     scanAdded(1)
-    await screen.findByLabelText('More info about First Import', undefined, { timeout: 5000 })
+    await screen.findByRole('button', { name: 'Details of First Import' }, { timeout: 5000 })
   })
 
   it('refreshes Home with its personalized rails and library count kept on screen', async () => {
     const page = renderApp('/')
     await screen.findByText(ANCHOR_RAIL, undefined, { timeout: 5000 })
-    await waitFor(() => expect(document.body.textContent).toMatch(/\b1 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(pageText()).toMatch(/\b1 titles in your library/), { timeout: 5000 })
     await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
     // Everything Home's startup asked for has landed.
     await new Promise(done => setTimeout(done, 300))
@@ -190,7 +196,7 @@ describe('a scan’s new titles appear without a reload', () => {
     server.add(item(2, 'New Movie'))
     scanAdded(1)
     await screen.findAllByText('New Movie', undefined, { timeout: 5000 })
-    await waitFor(() => expect(document.body.textContent).toMatch(/\b2 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(pageText()).toMatch(/\b2 titles in your library/), { timeout: 5000 })
     await new Promise(done => setTimeout(done, 300))
     // Only the catalog rails and the count were asked for again.
     for (const p of ['/api/me/hero', '/api/progress/continue', '/api/me/anchor-rails', '/api/me/discover']) {
@@ -310,7 +316,7 @@ function stubProfiles() {
   }
 }
 
-const label = () => document.querySelector('button[title^="Switch profile"] span.truncate')?.textContent ?? null
+const label = () => document.querySelector('[data-identity-name]')?.textContent ?? null
 /** Renders `path`, recording at every commit the profile the top bar names
  *  and whose titles are on the page. */
 function renderSampled(path: string) {
@@ -323,8 +329,8 @@ function renderSampled(path: string) {
   return commits
 }
 function pickProfile(name: RegExp) {
-  fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
-  fireEvent.click(screen.getByRole('menuitemradio', { name }))
+  fireEvent.click(document.querySelector('[data-identity-trigger]')!)
+  fireEvent.click(within(screen.getByRole('group', { name: 'Watching as' })).getByRole('button', { name }))
 }
 
 
@@ -605,13 +611,13 @@ describe('a full Home load and a live refresh overlapping', () => {
     vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 31_000)
   }
 
-  it('updates the greeting count when the full load lands before the live refresh', async () => {
+  it('updates the library count when the full load lands before the live refresh', async () => {
     // Returning to Home after a scan runs both at the same version; the count
     // comes only with the live refresh, which must not be dropped for it.
     const server = stubProfiles()
     render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
     await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
-    await waitFor(() => expect(document.body.textContent).toMatch(/\b1 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(pageText()).toMatch(/\b1 titles in your library/), { timeout: 5000 })
     await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
     await new Promise(done => setTimeout(done, 300))
     goTo('Movies')
@@ -626,7 +632,7 @@ describe('a full Home load and a live refresh overlapping', () => {
     await waitFor(() => expect(main()).toContain('Parentonly New'), { timeout: 5000 })
     await new Promise(done => setTimeout(done, 300))
     count.release()
-    await waitFor(() => expect(document.body.textContent).toMatch(/\b2 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(pageText()).toMatch(/\b2 titles in your library/), { timeout: 5000 })
   })
 
   it('lands a newer live refresh that was out when an older full load landed', async () => {
@@ -712,7 +718,7 @@ describe('a full Home load and a live refresh overlapping', () => {
     const server = stubProfiles()
     render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
     await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
-    await waitFor(() => expect(document.body.textContent).toMatch(/\b1 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(pageText()).toMatch(/\b1 titles in your library/), { timeout: 5000 })
     await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
     await new Promise(done => setTimeout(done, 500))
     const r = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
@@ -727,7 +733,7 @@ describe('a full Home load and a live refresh overlapping', () => {
     act(() => { window.dispatchEvent(new Event('focus')) })
     await waitFor(() => expect(main()).toContain('Bravo New'), { timeout: 5000 })
     r.release()
-    await waitFor(() => expect(document.body.textContent).toMatch(/\b3 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(pageText()).toMatch(/\b3 titles in your library/), { timeout: 5000 })
   }, 30000)
 
   it('asks for the count again when a switch drops the refresh that carried it', async () => {
@@ -739,7 +745,9 @@ describe('a full Home load and a live refresh overlapping', () => {
     const server = stubProfiles()
     render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
     await screen.findAllByText('Parentonly Old', undefined, { timeout: 5000 })
-    await waitFor(() => expect(document.body.textContent).toMatch(/\b1 titles in your library/), { timeout: 5000 })
+    // pageText, not textContent: the count is Tonight's closing line now, and
+    // textContent runs the last card's year straight into it ("20201 titles").
+    await waitFor(() => expect(pageText()).toMatch(/\b1 titles in your library/), { timeout: 5000 })
     await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0))
     await new Promise(done => setTimeout(done, 500))
     const r = server.hold((u, b) => b === 1 && u.pathname === '/api/media/recent')
@@ -753,9 +761,9 @@ describe('a full Home load and a live refresh overlapping', () => {
     const cancel = await screen.findByRole('button', { name: 'Cancel' })
     r.release()
     await new Promise(done => setTimeout(done, 500))
-    expect(document.body.textContent).toMatch(/\b1 titles in your library/)
+    expect(pageText()).toMatch(/\b1 titles in your library/)
     fireEvent.click(cancel)
-    await waitFor(() => expect(document.body.textContent).toMatch(/\b2 titles in your library/), { timeout: 5000 })
+    await waitFor(() => expect(pageText()).toMatch(/\b2 titles in your library/), { timeout: 5000 })
   }, 20000)
 
   it('runs again when a live refresh lands older than a full load and is dropped', async () => {

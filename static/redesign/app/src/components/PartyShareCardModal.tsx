@@ -26,6 +26,7 @@ import {
   type CardFormat,
   type PartyCardLinks,
 } from '@/lib/partyShare'
+import { failureWords } from '@/lib/failureWords'
 
 export interface PartyShareCardModalProps {
   code: string
@@ -57,7 +58,8 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
       .then(setLinks)
       .catch((err: unknown) => {
         if (err instanceof Error && err.name === 'AbortError') return
-        setError(err instanceof Error ? err.message : 'Could not build the share card')
+        // The route refuses anyone but the party's host with a 403.
+        setError(failureWords(err, 'make the share card', { status: { 403: 'Only the party’s host can share its card.' } }) ?? 'Could not make the share card.')
       })
     return () => ac.abort()
   }, [code])
@@ -125,7 +127,7 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
 
   return (
     <div
-      className="fixed inset-0 z-[80] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in"
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-[rgba(6,7,8,0.72)] p-4 animate-fade-in"
       onClick={onClose}
       role="presentation"
     >
@@ -135,29 +137,27 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
         role="dialog"
         aria-modal="true"
         aria-label="Watch party share card"
-        // The dialog itself takes programmatic focus on open (tabIndex -1), so
-        // the outline is suppressed for the pointer path and replaced with a
-        // ring that only paints for keyboard focus — the same shape the
-        // focus-indicator audit requires of every outline suppression.
-        className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-5 max-h-[90vh] overflow-y-auto overscroll-contain focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
+        // The dialog itself takes focus when it opens (tabIndex -1), and
+        // keeps the app's own focus ring for a keyboard.
+        className="max-h-[90vh] w-full max-w-sm overflow-y-auto overscroll-contain rounded-sheet bg-surface-raised-2 p-5 shadow-[0_24px_64px_rgba(0,0,0,0.6)]"
         onClick={e => e.stopPropagation()}
       >
-        <div className="flex items-baseline justify-between gap-3">
-          <h2 className="text-white text-base font-semibold">{title ?? 'Share card'}</h2>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="font-display text-[17px] font-semibold text-ink">{title ?? 'Share card'}</h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close share card"
-            className="text-white/40 hover:text-white/80 text-sm transition-colors"
+            className="-mr-2 -mt-1 grid h-11 w-11 flex-none place-items-center rounded-control text-ink-2 transition-colors hover:bg-surface-raised hover:text-ink"
           >
-            ✕
+            <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
           </button>
         </div>
-        {subtitle && <p className="text-white/50 text-xs mt-1">{subtitle}</p>}
+        {subtitle && <p className="text-[13px] text-ink-2">{subtitle}</p>}
 
-        {/* Format tabs. Switching one re-points the preview at a
-            different signed URL; the token is the same for all three. */}
-        <div role="tablist" aria-label="Card format" className="flex gap-1.5 mt-3 p-1 rounded-xl bg-white/[0.04]">
+        {/* Format tabs. Switching one points the preview at a different
+            signed URL; the token is the same for all three. */}
+        <div role="tablist" aria-label="Card format" className="mt-3 flex gap-1 rounded-control bg-surface-raised p-1">
           {FORMATS.map(f => (
             <button
               key={f}
@@ -165,10 +165,8 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
               role="tab"
               aria-selected={format === f}
               onClick={() => { setFormat(f); setImageReady(false) }}
-              className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                format === f
-                  ? 'bg-purple-500/25 text-white shadow-[inset_0_0_0_1px_rgba(216,180,254,0.35)]'
-                  : 'text-white/55 hover:text-white/80'
+              className={`h-11 flex-1 rounded-art text-[13px] font-semibold transition-colors ${
+                format === f ? 'bg-action text-action-on' : 'text-ink-2 hover:text-ink'
               }`}
             >
               {cardFormatLabel(f)}
@@ -176,10 +174,10 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
           ))}
         </div>
 
-        {/* Preview. The box reserves the card's aspect ratio up front so
-            the modal doesn't jump when a 2.9 MB PNG finishes decoding. */}
-        <div className="mt-3 grid place-items-center rounded-xl border border-white/[0.06] bg-black/40 p-3">
-          <div className="w-40 max-w-full rounded-lg overflow-hidden bg-white/[0.03]" style={previewStyle}>
+        {/* Preview. The box reserves the card's shape up front so the
+            dialog does not jump when a large image finishes decoding. */}
+        <div className="mt-3 grid place-items-center rounded-control bg-surface-page p-3">
+          <div className="w-40 max-w-full overflow-hidden rounded-art bg-surface-raised" style={previewStyle}>
             {imageURL && (
               <img
                 src={imageURL}
@@ -188,7 +186,7 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
                 height={dims.height}
                 onLoad={() => setImageReady(true)}
                 onError={() => setError('The card image could not be loaded')}
-                className={`w-full h-full object-cover transition-opacity duration-300 ${
+                className={`h-full w-full object-cover motion-safe:transition-opacity motion-safe:duration-300 ${
                   imageReady ? 'opacity-100' : 'opacity-0'
                 }`}
               />
@@ -196,40 +194,24 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
           </div>
         </div>
 
-        <p className="text-white/50 text-[11px] mt-2 leading-relaxed">
-          Times on the card are Eastern. Only your name appears — nobody
-          you invited is shown.
+        <p className="mt-2 text-[13px] leading-relaxed text-ink-2">
+          Times on the card are Eastern. Only your name appears: nobody you invited is shown.
         </p>
 
-        {error && <p className="text-red-400 text-xs mt-2">{error}</p>}
-        {notice && <p className="text-emerald-300 text-xs mt-2" role="status">{notice}</p>}
+        {error && <p className="mt-2 text-[13px] text-danger-ink" role="alert">{error}</p>}
+        {notice && <p className="mt-2 text-[13px] text-ok" role="status">{notice}</p>}
 
-        <div className="mt-4 flex gap-2 flex-wrap">
-          <button
-            type="button"
-            disabled={!imageURL || busy !== null}
-            onClick={() => void onDownload()}
-            className="px-3 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button type="button" disabled={!imageURL || busy !== null} onClick={() => void onDownload()} className="stage-btn stage-btn-primary px-4">
             {busy === 'download' ? 'Saving…' : 'Download PNG'}
           </button>
-          {/* Secondary, not primary, deliberately: on a desktop browser
-              this button saves the file, and the predictable action
-              should be the one that looks predictable. */}
-          <button
-            type="button"
-            disabled={!imageURL || busy !== null}
-            onClick={() => void onShare()}
-            className="px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.1] text-white/75 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
+          {/* Secondary on purpose: on a desktop browser this button saves
+              the file, and the predictable action should be the one that
+              looks predictable. */}
+          <button type="button" disabled={!imageURL || busy !== null} onClick={() => void onShare()} className="stage-btn stage-btn-ghost px-4">
             {busy === 'share' ? 'Sharing…' : 'Share…'}
           </button>
-          <button
-            type="button"
-            disabled={!links}
-            onClick={() => void onCopyLink()}
-            className="px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.1] text-white/75 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
+          <button type="button" disabled={!links} onClick={() => void onCopyLink()} className="stage-btn stage-btn-ghost px-4">
             Copy link
           </button>
         </div>

@@ -1,49 +1,25 @@
-// Aurora V2 — PartyPanel
+// The watch-party surface: who is here, voice, chat, the ready gate and the
+// way out. It reads `useParty().state` and calls its actions; it owns no
+// party state.
 //
-// The watch-party UX surface: members list, chat, leave button.
-//
-// Layout: fixed right-edge panel, 320px wide, slides in when open.
-// On small screens (<640px) the panel goes full-width as an overlay.
-//
-// What's NOT here yet (Phase 4.5+):
-//   - Voice mesh controls (mute/talk)
-//   - Reactions overlay (floating-emoji animation across video)
-//   - Ready-state UI ("I'm Ready" button + spoiler-free gate)
-//   - Hand-off / promote-to-host
-//
-// 2026-05-25 — added reaction picker next to the chat send button.
-// The picker also lives in the player header (VideoPlayer.tsx), but
-// users naturally look for emoji reactions next to the chat UI — the
-// "panel looks great but where are reactions?" feedback. Both
-// locations send through the same party.sendReaction action.
-//
-// The panel reads from `useParty().state` and dispatches via the
-// action methods (sendChat, leave). It does not own party state.
-//
-// 2026-05-30 — Cinematic Overlay. The panel is now a translucent
-// floating GLASS overlay that floats OVER the video instead of an
-// opaque slab bolted to the right edge, and it has two faces:
-//   - variant="rail"    (default) — the full feature set below
-//                         (members, voice strip, chat, ready, composer,
-//                         end-party, highlight reel, reconnecting badge),
-//                         restyled to read as floating glass.
-//   - variant="minimal" — the "just the movie" face: a lower-third chat
-//                         ticker, a corner voice pill, and a bottom mini
-//                         dock (CinematicChatTicker / VoicePill /
-//                         MiniDock), composed here so the parent keeps
-//                         ONE mount point and the header toggle just
-//                         flips `variant`.
-// `variant` defaults to "rail" so existing callers are unchanged.
+// Two faces, so the parent keeps ONE mount point and a header toggle just
+// flips `variant`:
+//   - "rail" (default): the whole party in a panel at the right edge.
+//   - "minimal": "just the film". A lower-third chat ticker, a corner voice
+//     pill and a bottom mini dock (CinematicChatTicker / VoicePill / MiniDock).
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PartyState } from '@/hooks/useParty'
 import { useExitTransition } from '@/hooks/useExitTransition'
+import { inForeignDialog, pushEscapeLayer } from '@/lib/escapeLayers'
 import type { VoiceState } from '@/lib/voice'
 import { ReactionPicker } from './ReactionOverlay'
 import { CinematicChatTicker } from './CinematicChatTicker'
 import { VoicePill } from './VoicePill'
 import { MiniDock } from './MiniDock'
 import { PartyLobbyCard } from './PartyLobbyCard'
+import { PersonDisc } from './PersonDisc'
+import { personColor } from '@/lib/personColor'
 
 interface PartyPanelProps {
   state: PartyState
@@ -130,6 +106,68 @@ export function PartyPanel({
   // a re-open mid-fade cancels the pending unmount (partyPanelLeave.test
   // closes and re-opens it within one test).
   const leaveExit = useExitTransition(showLeaveConfirm)
+  // The confirm says it is modal (`aria-modal`), so it has to behave like
+  // one: focus goes into it and stays in it, keys pressed while it is up are
+  // its own, Escape closes it, and focus goes back to the button that opened
+  // it. Without the first, a screen reader that honours `aria-modal` hides
+  // everything but a dialog the user is not in. Done here with a few lines
+  // rather than through a portalled dialog component: the confirm is three
+  // buttons inside the rail and needs nothing a portal gives. (The rail is a
+  // sibling of the player, outside the element that goes fullscreen, so
+  // neither it nor this is drawn in native fullscreen either way.)
+  const leaveButtonRef = useRef<HTMLButtonElement | null>(null)
+  const leaveDialogRef = useRef<HTMLDivElement | null>(null)
+  // Only the rail draws the confirm; the minimal face has no leave button.
+  const leaveConfirmUp = variant === 'rail' && showLeaveConfirm && leaveExit.mounted
+  useEffect(() => {
+    // Not until it is in the document: it mounts a render after the flag.
+    if (!leaveConfirmUp) return
+    const opener = leaveButtonRef.current
+    const dialog = leaveDialogRef.current
+    // The safe answer first: the first button is always "Keep watching".
+    dialog?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true })
+    // Escape closes the confirm, and only the confirm (lib/escapeLayers).
+    const dropEscape = pushEscapeLayer(() => setShowLeaveConfirm(false))
+    // Every other key pressed while it is up stops here, in the capture
+    // phase on window: the player behind it listens on window for its
+    // shortcuts, and an arrow or a k pressed at "End the party?" was seeking
+    // and pausing the film for everyone. Tab is kept among the confirm's
+    // buttons, wrapping at the ends, and brings focus in if it is outside.
+    //
+    // Only while the confirm is what the viewer is looking at. The rail is
+    // not drawn in browser fullscreen (it is outside the element that goes
+    // fullscreen), but focus can still be on its leave button there, and a
+    // Space would open a confirm nobody can see and leave the player's keys
+    // dead until it closed. And a prompt the app opens above it from
+    // elsewhere (the profile picker, a PIN prompt) keeps its own keys.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') return
+      // Both names, as the player reads it (older Safari has only one).
+      const fullscreen = document.fullscreenElement ?? document.webkitFullscreenElement
+      if (fullscreen && !(dialog && fullscreen.contains(dialog))) return
+      if (inForeignDialog(e.target)) return
+      e.stopPropagation()
+      // Tab with a modifier is the browser's or the system's.
+      if (e.key !== 'Tab' || e.altKey || e.ctrlKey || e.metaKey || !dialog) return
+      const stops = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled])')]
+      if (stops.length === 0) return
+      const first = stops[0], last = stops[stops.length - 1]
+      const active = document.activeElement
+      if (!dialog.contains(active)) { e.preventDefault(); first.focus() }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus() }
+      else if (e.shiftKey && active === first) { e.preventDefault(); last.focus() }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      dropEscape()
+      window.removeEventListener('keydown', onKey, true)
+      // Back to the leave button, unless focus has already gone somewhere
+      // of the viewer's choosing (or the panel is going away with it).
+      const active = document.activeElement
+      const ours = !active || active === document.body || !!dialog?.contains(active)
+      if (ours && opener?.isConnected) opener.focus({ preventScroll: true })
+    }
+  }, [leaveConfirmUp])
 
   // Auto-scroll chat to bottom on new messages — only if the user
   // was already near the bottom, so a user scrolled up reading
@@ -147,14 +185,31 @@ export function PartyPanel({
     setDraft('')
   }
 
+  // The rail tells the page it is open, so the player can leave room for it
+  // instead of sitting underneath (index.css `--theater-rail-space`,
+  // `--theater-rail-cover`). Before paint: as a passive effect a boxed player
+  // drew one frame under the rail.
+  useLayoutEffect(() => {
+    if (variant !== 'rail') return
+    const el = document.documentElement
+    el.dataset.partyRail = 'open'
+    return () => { el.removeAttribute('data-party-rail') }
+  }, [variant])
+
+  // The minimal face tells the page its dock is on screen, so the player can
+  // keep its Skip button and Up next card out of the dock's lane.
+  useLayoutEffect(() => {
+    if (variant !== 'minimal') return
+    const el = document.documentElement
+    el.dataset.partyDock = 'open'
+    return () => { el.removeAttribute('data-party-dock') }
+  }, [variant])
+
   // ──────────────────────────────────────────────────────────────────
-  // Minimal (cinematic) face. Renders the three lower-chrome surfaces
-  // over the video and a single small "expand to rail" affordance.
-  // Composed here so App keeps ONE mount point and the toggle just
-  // flips `variant`. Each child is itself a floating fixed/absolute
-  // overlay (positioned relative to the viewport like the rail), so we
-  // render them as siblings inside a Fragment — no wrapping box that
-  // would intercept clicks over the player.
+  // Minimal face: "just the film". Three small surfaces over the picture
+  // (a chat ticker, a voice pill, a mini dock) and one chip that brings
+  // the rail back. Each is its own fixed overlay, rendered as siblings in
+  // a Fragment so no wrapping box intercepts presses over the player.
   if (variant === 'minimal') {
     const selfLabel =
       state.participants.find(p => p.user_id === currentUserId)?.username || 'You'
@@ -167,6 +222,7 @@ export function PartyPanel({
           onLeaveVoice={onLeaveVoice}
           onToggleVoiceMute={onToggleVoiceMute}
           selfLabel={selfLabel}
+          selfUserId={currentUserId}
         />
         <MiniDock
           onSendChat={onSendChat}
@@ -174,40 +230,30 @@ export function PartyPanel({
           voice={voice}
           onToggleVoiceMute={onToggleVoiceMute}
         />
-        {/* Restore-to-rail affordance. Only when the parent supports
-            toggling; otherwise minimal is a locked presentation. Lives at
-            the viewport's top-left, mirroring the VoicePill pinned at the
-            viewport's top-right — in the inset theater that is the dimmed
-            strip above the box, opposite the pill. `.stage-party-dock`
-            (index.css) adjusts `top` ONLY, and only while the theater is
-            up: same 16px while the box is inset, below the topbar when the
-            theater goes full-bleed and the always-visible title would sit
-            under the chip. It must never re-anchor the chip into the box's
-            top-left — that corner belongs to the topbar's title block (the
-            original bug). Moot in element-fullscreen: the chip is a sibling
-            of the fullscreened player root, so it isn't rendered there —
-            same as the pill. The glyph is a chat bubble: the old
-            corners-out glyph read as "fullscreen" while the player's real
-            fullscreen button was on screen. */}
+        {/* The chip that restores the rail. Top left of the viewport,
+            mirroring the voice pill at the top right. `.stage-party-dock`
+            (index.css) moves it down, `top` ONLY, while the player is in
+            the window, because that corner is the player's back button and
+            title. It is a sibling of the player root, so it is not on
+            screen in browser fullscreen. The glyph is a chat bubble: a
+            corners-out glyph read as "fullscreen". */}
         {onToggleVariant && (
           <button
             type="button"
             onClick={onToggleVariant}
             data-screenshot-exclude="true"
-            className="stage-party-dock aurora-glass-overlay fixed top-4 left-4 z-[67] flex items-center gap-2 px-3 py-2 rounded-full
-                       bg-[rgba(8,6,14,0.5)] backdrop-blur-md border border-[rgba(220,200,255,0.16)]
-                       text-white/70 hover:text-white hover:border-[rgba(220,200,255,0.3)]
-                       text-xs font-medium transition-colors"
+            className="stage-party-dock fixed top-4 left-4 z-[67] flex items-center gap-2 h-10 px-3.5 rounded-control
+                       bg-surface-raised-2 text-ink text-[13px] font-semibold hover:brightness-110 transition-[filter]"
             title="Open the party chat"
             aria-label="Open the party chat"
           >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
               <path d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z" />
             </svg>
             Party
             {state.code && state.reconnecting && (
               <span
-                className="w-1.5 h-1.5 rounded-full bg-amber-400 motion-safe:animate-pulse"
+                className="w-2 h-2 rounded-full bg-warn motion-safe:animate-pulse"
                 title="Reconnecting to the party"
               />
             )}
@@ -217,52 +263,46 @@ export function PartyPanel({
     )
   }
 
+  const talking = state.participants.filter(p => {
+    const isSelf = currentUserId === p.user_id
+    return isSelf ? !!voice?.selfSpeaking : !!voice?.peers.find(v => v.userId === p.user_id)?.speaking
+  })
+
   // ──────────────────────────────────────────────────────────────────
-  // Rail (default) face — the full panel, restyled as floating glass.
-  // 2026-05-30 — was a near-opaque slab bolted to the right edge
-  // (`bg-[#0a0a0f]/95` + `border-l`, flush to top/right/bottom). Now a
-  // translucent glass card lifted off the edges (inset margins +
-  // rounded) so the movie glows through and around it. On phones it
-  // still spans (nearly) full width but keeps the float inset + radius.
+  // Rail (default) face: the whole party in one panel at the right edge.
+  // Opaque, because it sits over (or beside) playing video and blur over
+  // video is paid for on every frame.
   return (
-    // .stage-party-rail insets this by the theater's own offsets while the
-    // theater is up — it used to straddle the boundary, ~265px over the picture
-    // and ~75px over the dimmed app behind it. Its 0.4 fill sits on the video,
-    // so faint text here fails AA over a bright frame: see NOT COVERED in
-    // scripts/audit-glass-contrast.mjs.
-    <aside className="stage-party-rail aurora-glass-overlay fixed top-3 right-3 bottom-3 w-[calc(100%-1.5rem)] sm:w-[340px] sm:top-4 sm:right-4 sm:bottom-4 bg-[rgba(12,10,20,0.4)] backdrop-blur-xl rounded-2xl border border-[var(--glow-border)] shadow-[var(--glow-halo),0_20px_60px_rgba(0,0,0,0.5)] z-[70] flex flex-col overflow-hidden motion-safe:animate-fade-in">
+    <aside
+      aria-label="Party"
+      className="stage-party-rail fixed top-3 right-3 bottom-3 w-[calc(100%-1.5rem)] sm:w-[340px] sm:top-4 sm:right-4 sm:bottom-4 bg-surface-raised rounded-control shadow-[0_24px_64px_rgba(0,0,0,0.6)] z-[70] flex flex-col overflow-hidden motion-safe:animate-fade-in"
+    >
       {/* Header */}
-      <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
-        <div className="min-w-0">
-          <p className="text-white text-sm font-semibold truncate">
+      <div className="pl-5 pr-3 pt-4 pb-3 flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="font-display text-ink text-[22px] font-semibold tracking-[-0.01em] leading-tight truncate">
             {state.partyName || (state.mediaTitle ? `Watching ${state.mediaTitle}` : 'Watch Party')}
           </p>
-          <p className="text-white/50 text-xs mt-0.5 flex items-center gap-1.5 flex-wrap">
-            <span>{state.code ? `Code: ${state.code}` : 'Joining…'}</span>
-            {/* 2026-05-25 — connection status badge. Shows when the
-                room socket is reconnecting after an unexpected close
-                (e.g. proxy idle timeout, brief network blip). The
-                server's 90s host-disconnect grace period gives us up
-                to ~5 backoff attempts (1+2+4+8+16=31s) before guests
-                get kicked, so most outages are invisible to the UI
-                except for this badge briefly flickering. */}
+          <p className="text-ink-2 text-[12px] mt-0.5 flex items-center gap-2 flex-wrap">
+            <span className="tracking-[0.12em] tabular-nums">{state.code ? state.code : 'Joining…'}</span>
+            {/* Shown while the room socket reconnects after an unexpected
+                close. The server holds a host's place for 90 seconds, so
+                most outages are over before anyone notices more than this. */}
             {state.code && state.reconnecting && (
               <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-300 text-[10px] font-medium border border-amber-500/30"
-                title="Lost connection to the party — trying to reconnect"
+                className="inline-flex items-center gap-1.5 text-warn font-medium"
+                title="Lost connection to the party. Trying to reconnect"
               >
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 motion-safe:animate-pulse" />
+                <span className="w-2 h-2 rounded-full bg-warn motion-safe:animate-pulse" />
                 Reconnecting…
               </span>
             )}
             {state.code && (
               <button
                 onClick={() => {
-                  // Audit M2 (Phase 4.5 final-6) — clipboard API
-                  // requires HTTPS or localhost; many Aurora deploys
-                  // are HTTP intranet. Catch + fall back to a
-                  // textarea selection trick so the user gets the
-                  // code one way or another.
+                  // The clipboard API needs HTTPS or localhost, and many
+                  // installs are plain HTTP on a home network; fall back to
+                  // a hidden textarea so the code is copied either way.
                   const code = state.code!
                   const fallback = () => {
                     try {
@@ -274,7 +314,7 @@ export function PartyPanel({
                       ta.select()
                       document.execCommand('copy')
                       document.body.removeChild(ta)
-                    } catch { /* ignore — user can read the code on screen */ }
+                    } catch { /* the code is on screen to read */ }
                   }
                   if (navigator.clipboard && window.isSecureContext) {
                     navigator.clipboard.writeText(code).catch(fallback)
@@ -282,68 +322,61 @@ export function PartyPanel({
                     fallback()
                   }
                 }}
-                className="ml-2 text-purple-400 hover:text-purple-300"
+                className="text-ink underline underline-offset-2 hover:no-underline"
                 title="Copy code to clipboard"
               >
-                copy
+                Copy code
               </button>
             )}
           </p>
         </div>
-        <div className="flex items-center gap-1.5 flex-shrink-0">
-          {/* 2026-05-30 — host invite affordance. Opens the parent's
-              PartyInvite card (join code + QR deep link for phones).
-              Rendered only when the parent wires onInvite (host-only). */}
-          {onInvite && (
-            <button
-              onClick={onInvite}
-              className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/60 hover:text-white flex items-center justify-center transition-colors"
-              title="Invite friends to this party"
-              aria-label="Invite friends to this party"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-                <circle cx="9" cy="7" r="4" />
-                <path d="M19 8v6M22 11h-6" />
-              </svg>
-            </button>
-          )}
-          {/* 2026-05-30 — dock → minimal toggle. Collapses the rail into
-              the cinematic ticker/pill/dock face. Hidden when the parent
-              doesn't support toggling (rail-only callers). The glyph is a
-              window-chrome minus: the original corners-out glyph read as
-              "fullscreen" (the player's real fullscreen button is on screen
-              at the same time), so users avoided it. */}
-          {onToggleVariant && (
-            <button
-              onClick={onToggleVariant}
-              className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/60 hover:text-white flex items-center justify-center transition-colors"
-              title="Minimize the party chat"
-              aria-label="Minimize the party chat"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M5 11h14v2H5z" />
-              </svg>
-            </button>
-          )}
+        {/* Host only: opens the invite card (join code and a QR link for
+            phones). The parent wires it for the host alone. */}
+        {onInvite && (
           <button
-            onClick={onClose}
-            className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 hover:text-white text-lg flex items-center justify-center"
-            aria-label="Close panel"
+            onClick={onInvite}
+            className="h-10 px-3 rounded-control text-ink text-[13px] font-semibold hover:bg-action-soft transition-colors"
+            title="Invite friends to this party"
+            aria-label="Invite friends to this party"
           >
-            ×
+            Invite
           </button>
-        </div>
+        )}
+        {/* Collapses the rail to the minimal face. A window-chrome minus:
+            a corners-out glyph read as "fullscreen" next to the player's
+            real one. */}
+        {onToggleVariant && (
+          <button
+            onClick={onToggleVariant}
+            className="w-10 h-10 rounded-control text-ink-2 hover:text-ink hover:bg-action-soft grid place-items-center transition-colors"
+            title="Minimize the party chat"
+            aria-label="Minimize the party chat"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M5 11h14v2H5z" />
+            </svg>
+          </button>
+        )}
+        <button
+          onClick={onClose}
+          className="w-10 h-10 rounded-control text-ink-2 hover:text-ink hover:bg-action-soft grid place-items-center transition-colors"
+          aria-label="Close panel"
+          title="Hide the party panel"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
       </div>
 
       {/* Error banner */}
       {state.error && (
-        <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
+        <div role="alert" className="mx-3 mb-2 px-3 py-2 rounded-control bg-surface-raised-2 text-danger-ink text-[13px]">
           {state.error}
         </div>
       )}
 
-      {/* Scheduled-party lobby: countdown + RSVP roster + host controls.
+      {/* Scheduled-party lobby: countdown, RSVP roster and host controls.
           Visible until the countdown fires (party-starting clears
           scheduledStartAt) or the host starts early (isPlaying). */}
       {state.code && state.scheduledStartAt && !state.startedAt && !state.isPlaying && (
@@ -356,80 +389,85 @@ export function PartyPanel({
         />
       )}
 
-      {/* Members */}
-      <div className="px-5 py-3 border-b border-white/[0.06]">
-        <p className="text-white/50 text-[10px] uppercase tracking-wider mb-2">
+      {/* Who is here. A person's disc carries the aurora ring while they
+          are speaking; the line under the name says, in words, where they
+          are in voice and in playback. The two are independent: someone in
+          voice can also be ready, or buffering. */}
+      <div className="px-5 pb-3">
+        <p className="text-ink-2 text-[12px] font-semibold uppercase tracking-[0.08em] mb-2">
           Watching ({state.participants.length})
         </p>
-        <div className="flex flex-wrap gap-2">
+        <ul className="flex flex-wrap gap-x-3 gap-y-2">
           {state.participants.map(p => {
-            // Phase 4.6 — speaking-glow chip if voice is on and this
-            // participant is talking. self uses voice.selfSpeaking;
-            // peers use the speaking flag from voice.peers (indexed
-            // by user_id).
             const isSelf = currentUserId === p.user_id
             const peerVoice = voice?.peers.find(v => v.userId === p.user_id)
             const speaking = isSelf ? !!voice?.selfSpeaking : !!peerVoice?.speaking
             const onVoice = isSelf
               ? (voice?.enabled ?? false)
               : !!peerVoice
+            const state_ = [
+              speaking ? 'talking' : onVoice ? 'in voice' : '',
+              p.is_buffering ? 'buffering' : p.ready ? 'ready' : '',
+            ].filter(Boolean).join(' · ')
             return (
-              <div
+              <li
                 key={p.user_id}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border transition-shadow ${
-                  speaking
-                    ? 'bg-emerald-500/15 border-emerald-400/50 shadow-[0_0_10px_rgba(52,211,153,0.4)]'
-                    : 'bg-white/[0.04] border-white/[0.06]'
-                }`}
-                title={`${p.username}${p.is_host ? ' (host)' : ''}${p.is_buffering ? ' — buffering' : ''}${onVoice ? (speaking ? ' — talking' : ' — in voice') : ''}`}
+                className="flex items-center gap-2 min-w-0"
+                title={`${p.username}${p.is_host ? ' (host)' : ''}${state_ ? `, ${state_}` : ''}`}
               >
-                <div className={`w-2 h-2 rounded-full ${
-                  speaking
-                    ? 'bg-emerald-300'
-                    : p.is_buffering
-                      ? 'bg-amber-400'
-                      : (p.ready ? 'bg-emerald-400' : 'bg-white/30')
-                }`} />
-                <span className="text-white/80 text-xs">{p.username}</span>
-                {onVoice && (
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" className={speaking ? 'text-emerald-300' : 'text-white/40'}>
-                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zm7 10a1 1 0 0 0-2 0 5 5 0 0 1-10 0 1 1 0 0 0-2 0 7 7 0 0 0 6 6.93V21a1 1 0 0 0 2 0v-2.07A7 7 0 0 0 19 12z"/>
-                  </svg>
-                )}
-                {p.is_host && <span className="text-purple-300 text-[10px] font-semibold uppercase">host</span>}
-              </div>
+                <PersonDisc name={p.username} colorKey={p.user_id} size={32} speaking={speaking} />
+                <span className="min-w-0">
+                  <span className="block text-ink text-[13px] font-medium truncate max-w-[120px]">
+                    {p.username}{p.is_host && <span className="text-ink-2 font-normal"> · host</span>}
+                  </span>
+                  {state_ && (
+                    <span className={`block text-[12px] leading-tight ${p.is_buffering ? 'text-warn' : 'text-ink-2'}`}>
+                      {state_}
+                    </span>
+                  )}
+                </span>
+              </li>
             )
           })}
-        </div>
+        </ul>
       </div>
 
-      {/* Phase 4.6 — Voice strip. Mic button + status line. Hidden
-          unless the parent wired voice callbacks. */}
+      {/* Voice. Hidden unless the parent wired the voice callbacks. */}
       {voice && onJoinVoice && onToggleVoiceMute && onLeaveVoice && (
-        <div className="px-5 py-3 border-b border-white/[0.06] flex items-center gap-3">
+        <div className="mx-3 mb-3 p-3 rounded-control bg-surface-raised-2 flex items-center gap-3">
+          <span className="min-w-0 flex-1">
+            <span className="block text-ink text-[14px] font-semibold">
+              {voice.enabled
+                ? (talking.length > 0 ? `Voice · ${talking.length} talking` : `Voice · ${1 + voice.peers.length} here`)
+                : 'Voice'}
+            </span>
+            <span className="block text-ink-2 text-[12px] truncate">
+              {talking.length > 0
+                ? `${talking.map(t => (t.user_id === currentUserId ? 'You' : t.username)).join(', ')} ${talking.length === 1 && talking[0].user_id !== currentUserId ? 'is' : 'are'} speaking`
+                : voice.enabled ? voice.status : 'Talk while you watch'}
+            </span>
+          </span>
           {!voice.enabled ? (
             <button
               onClick={onJoinVoice}
-              className="px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.06] text-white/80 text-xs flex items-center gap-2 transition-colors"
+              className="h-10 px-4 rounded-full bg-action text-action-on text-[14px] font-semibold hover:brightness-95 transition-[filter] flex-none"
               title="Join voice chat"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zm7 10a1 1 0 0 0-2 0 5 5 0 0 1-10 0 1 1 0 0 0-2 0 7 7 0 0 0 6 6.93V21a1 1 0 0 0 2 0v-2.07A7 7 0 0 0 19 12z"/>
-              </svg>
               Join Voice
             </button>
           ) : (
             <>
               <button
                 onClick={onToggleVoiceMute}
-                className={`px-3 py-2 rounded-lg border text-xs flex items-center gap-2 transition-colors ${
+                aria-pressed={!voice.muted}
+                className={`h-10 px-3 rounded-control text-[13px] font-semibold flex items-center gap-2 transition-colors flex-none ${
                   voice.muted
-                    ? 'bg-white/[0.05] hover:bg-white/[0.1] border-white/[0.06] text-white/70'
-                    : 'bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-400/40 text-emerald-200'
+                    ? 'bg-action-soft text-ink hover:bg-white/[0.16]'
+                    : 'bg-action text-action-on hover:brightness-95'
                 }`}
                 title={voice.muted ? 'Click to unmute' : 'Click to mute'}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                   {voice.muted ? (
                     <path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23A6.93 6.93 0 0 0 19 11zm-4.02.17L12 8.18V5a3 3 0 0 1 3 3v3a3 3 0 0 1-.02.17zM4.27 3L3 4.27l6.01 6.01V11a3 3 0 0 0 3 3v.01l1.91 1.91c-.66.38-1.4.59-2.15.59A5 5 0 0 1 7 11H5c0 4.41 3.59 8 8 8 .82 0 1.61-.14 2.34-.37l4.39 4.39L21 21.73 4.27 3z"/>
                   ) : (
@@ -440,62 +478,50 @@ export function PartyPanel({
               </button>
               <button
                 onClick={onLeaveVoice}
-                className="px-3 py-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-300 text-xs transition-colors"
+                className="h-10 px-3 rounded-control text-danger-ink text-[13px] font-semibold hover:bg-action-soft transition-colors flex-none"
                 title="Leave voice chat"
               >
                 Leave Voice
               </button>
-              <span className="text-white/50 text-[10px] ml-auto">{voice.status}</span>
             </>
           )}
         </div>
       )}
 
       {/* Chat */}
-      <div ref={chatRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+      <div ref={chatRef} className="stage-party-chat flex-1 overflow-y-auto px-5 py-2 space-y-3">
         {state.chat.length === 0 && (
-          <p className="text-white/50 text-xs text-center py-8">No messages yet — say hi!</p>
+          <p className="text-ink-2 text-[13px] text-center py-8">No messages yet. Say hi!</p>
         )}
-        {state.chat.map(m => {
-          const mine = m.user_id === currentUserId
-          return (
-            <div key={m.id} className={`flex flex-col ${mine ? 'items-end' : 'items-start'}`}>
-              <div className="flex items-center gap-2 text-[10px] mb-0.5">
-                <span className={mine ? 'text-purple-300' : 'text-white/60'}>{m.username}</span>
-                <span className="text-white/50">{formatTime(m.timestamp)}</span>
-              </div>
-              <div className={`max-w-[85%] px-3 py-1.5 rounded-2xl text-sm ${
-                mine
-                  ? 'bg-purple-600/30 text-white rounded-br-sm'
-                  : 'bg-white/[0.05] text-white/90 rounded-bl-sm'
-              }`}>
-                {m.message}
-              </div>
-            </div>
-          )
-        })}
+        {state.chat.map(m => (
+          <p key={m.id} className="text-[14px] leading-[1.45] break-words">
+            <span className="font-semibold" style={{ color: personColor(m.user_id) }}>{m.username}</span>{' '}
+            <span className="text-[12px] text-ink-3 tabular-nums">{formatTime(m.timestamp)}</span>
+            <br />
+            <span className="text-ink">{m.message}</span>
+          </p>
+        ))}
       </div>
 
-      {/* Phase 4.6 — Ready dots / spoiler-free start. The "I'm Ready"
-          toggle is for everyone (host included). Host UI also shows
-          a summary: how many guests are ready, which aren't. Server
-          enforces the spoiler-free gate when host hits play. */}
+      {/* Ready dots / spoiler-free start. Everyone has the toggle; the host
+          also sees how many guests are ready. The server enforces the gate
+          when the host presses play. */}
       {onSendReady && (() => {
         const me = state.participants.find(p => p.user_id === currentUserId)
         if (!me) return null
         const isReady = !!me.ready
         const hostUid = state.hostUserId
-        // The people the server's spoiler-free gate waits for
-        // (spoilerGateBlockersLocked): phone companions have no player
-        // and no Ready control, so they are never counted.
+        // The people the server's spoiler-free gate waits for: phone
+        // companions have no player and no Ready control, so they are
+        // never counted.
         const guests = state.participants.filter(p => p.user_id !== hostUid && !p.companion)
         const notReadyGuests = guests.filter(g => !g.ready)
         const iAmHost = currentUserId === hostUid
         return (
-          <div className="px-5 py-3 border-b border-white/[0.06]">
+          <div className="px-5 py-3 border-t border-line">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <p className="text-white/60 text-[10px] uppercase tracking-wider mb-0.5">
+                <p className="text-ink text-[13px] font-medium">
                   {iAmHost
                     ? (notReadyGuests.length === 0
                         ? `Everyone's ready (${guests.length})`
@@ -503,17 +529,18 @@ export function PartyPanel({
                     : (isReady ? "You're ready" : 'Tap "I\'m Ready" when buffered')}
                 </p>
                 {iAmHost && notReadyGuests.length > 0 && (
-                  <p className="text-white/50 text-[10px] truncate">
+                  <p className="text-ink-2 text-[12px] truncate">
                     {notReadyGuests.map(g => g.username).join(', ')}
                   </p>
                 )}
               </div>
               <button
                 onClick={() => onSendReady(!isReady)}
-                className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors flex-shrink-0 ${
+                aria-pressed={isReady}
+                className={`h-10 px-4 rounded-control text-[13px] font-semibold transition-colors flex-shrink-0 ${
                   isReady
-                    ? 'bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-400/40 text-emerald-200'
-                    : 'bg-white/[0.05] hover:bg-white/[0.1] border-white/[0.06] text-white/80'
+                    ? 'bg-action text-action-on hover:brightness-95'
+                    : 'bg-action-soft text-ink hover:bg-white/[0.16]'
                 }`}
               >
                 {isReady ? "Ready ✓" : "I'm Ready"}
@@ -524,44 +551,40 @@ export function PartyPanel({
       })()}
 
       {/* Composer */}
-      <div className="px-4 py-3 border-t border-white/[0.06]">
+      <div className="px-3 pt-3 pb-3">
         <div className="flex gap-2 items-center">
-          {/* 2026-05-25 — reaction picker. Renders only when the parent
-              wired up onSendReaction. placement="left" anchors the
-              popover to the picker's LEFT edge so it grows rightward
-              into the chat-input space rather than off the panel's
-              left edge / behind the sidebar (M3 from PR #83 review).
-              Positioned BEFORE the input so the popover doesn't cover
-              the Send button when open. */}
+          {/* placement="left": the picker grows rightward into the input's
+              space instead of off the panel's left edge. Before the input,
+              so its popover never covers Send. */}
           {onSendReaction && state.roomConnected && (
             <ReactionPicker onSend={onSendReaction} placement="left" />
           )}
           <input
             type="text"
-            placeholder={state.roomConnected ? 'Send a message…' : 'Connecting…'}
+            aria-label="Message the party"
+            placeholder={state.roomConnected ? 'Message the party' : 'Connecting…'}
             value={draft}
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') handleSend() }}
             disabled={!state.roomConnected}
-            className="flex-1 px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm placeholder:text-white/50 focus:bg-white/[0.06] focus:outline-none disabled:opacity-50"
+            className="flex-1 min-w-0 h-11 px-3 bg-surface-page border border-line-strong rounded-control text-ink text-[14px] placeholder:text-ink-3 focus:outline-none focus-visible:border-ink disabled:opacity-50"
             maxLength={500}
           />
           <button
             onClick={handleSend}
             disabled={!draft.trim() || !state.roomConnected}
-            className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="h-11 px-4 bg-action text-action-on rounded-control text-[14px] font-semibold hover:brightness-95 transition-[filter] disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Send
           </button>
         </div>
-        {/* 2026-05-25 — the host gets a confirm dialog; guests get the
-            silent button (their leave is non-destructive). 2026-08 host
-            succession changed what the host's dialog offers: with an
-            eligible successor present, leaving hands the party off, so
-            the button reads "Leave Party" and the dialog offers hand-off
-            vs end-for-everyone. Without one, leaving still ends the
-            party, and button + dialog keep the historical end copy. */}
+        {/* A guest's leave is silent: the party goes on without them. A
+            host's opens a dialog. With an eligible successor present the
+            host's leave hands the party off, so the button reads "Leave
+            Party" and the dialog offers hand-off or end-for-everyone;
+            without one, leaving ends the party and the copy says so. */}
         <button
+          ref={leaveButtonRef}
           onClick={() => {
             if (isHost) {
               setShowLeaveConfirm(true)
@@ -569,46 +592,52 @@ export function PartyPanel({
               onLeave()
             }
           }}
-          className="w-full mt-3 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-lg text-red-300 text-sm transition-colors"
+          className="w-full mt-2 h-10 rounded-control text-danger-ink text-[14px] font-semibold hover:bg-action-soft transition-colors"
         >
           {isHost && !canHandOff ? 'End Party' : 'Leave Party'}
         </button>
         {leaveExit.mounted && (
           <div
-            className={`fixed inset-0 z-[80] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in${leaveExit.closing ? ' is-closing' : ''}`}
+            className={`fixed inset-0 z-[80] bg-[rgba(6,7,8,0.72)] flex items-center justify-center p-4 animate-fade-in${leaveExit.closing ? ' is-closing' : ''}`}
             onClick={() => setShowLeaveConfirm(false)}
           >
             <div
-              className="w-full max-w-sm bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-6"
+              ref={leaveDialogRef}
+              role="alertdialog"
+              aria-modal="true"
+              data-escape-layers=""
+              aria-labelledby="party-leave-title"
+              aria-describedby="party-leave-text"
+              className="w-full max-w-sm bg-surface-raised-2 rounded-sheet p-6"
               onClick={e => e.stopPropagation()}
             >
               {canHandOff ? (
                 <>
-                  <h2 className="text-white text-base font-semibold mb-2">Leave the party?</h2>
-                  <p className="text-white/60 text-sm mb-5 leading-snug">
+                  <h2 id="party-leave-title" className="font-display text-ink text-[22px] font-semibold mb-2">Leave the party?</h2>
+                  <p id="party-leave-text" className="text-ink-2 text-[15px] mb-5 leading-normal">
                     You're the host. If you leave, hosting passes to another
-                    watcher and the movie keeps playing — the code{' '}
-                    <span className="text-purple-300 font-mono">{state.code}</span>{' '}
+                    watcher and the movie keeps playing. The code{' '}
+                    <span className="text-ink font-semibold tracking-[0.08em]">{state.code}</span>{' '}
                     keeps working, and you can rejoin any time.
                   </p>
                   <div className="flex gap-2 justify-end flex-wrap">
                     <button
                       onClick={() => setShowLeaveConfirm(false)}
-                      className="px-4 py-2 text-white/70 hover:text-white text-sm transition-colors"
+                      className="h-11 px-4 rounded-control text-ink-2 hover:text-ink text-[14px] font-semibold transition-colors"
                     >
                       Keep watching
                     </button>
                     {onEndParty && (
                       <button
                         onClick={() => { setShowLeaveConfirm(false); onEndParty() }}
-                        className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 rounded-lg text-red-200 text-sm font-medium transition-colors"
+                        className="h-11 px-4 rounded-control bg-danger text-white text-[14px] font-semibold hover:brightness-110 transition-[filter]"
                       >
                         End for everyone
                       </button>
                     )}
                     <button
                       onClick={() => { setShowLeaveConfirm(false); onLeave() }}
-                      className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg text-white text-sm font-medium transition-colors"
+                      className="h-11 px-5 rounded-full bg-action text-action-on text-[14px] font-semibold hover:brightness-95 transition-[filter]"
                     >
                       Hand off &amp; leave
                     </button>
@@ -616,22 +645,22 @@ export function PartyPanel({
                 </>
               ) : (
                 <>
-                  <h2 className="text-white text-base font-semibold mb-2">End the party?</h2>
-                  <p className="text-white/60 text-sm mb-5 leading-snug">
+                  <h2 id="party-leave-title" className="font-display text-ink text-[22px] font-semibold mb-2">End the party?</h2>
+                  <p id="party-leave-text" className="text-ink-2 text-[15px] mb-5 leading-normal">
                     You're the host. Leaving will end the party for everyone
                     {state.participants.length > 1 && ` (${state.participants.length - 1} other ${state.participants.length === 2 ? 'guest' : 'guests'})`}
-                    . The join code <span className="text-purple-300 font-mono">{state.code}</span> will stop working.
+                    . The join code <span className="text-ink font-semibold tracking-[0.08em]">{state.code}</span> will stop working.
                   </p>
                   <div className="flex gap-2 justify-end">
                     <button
                       onClick={() => setShowLeaveConfirm(false)}
-                      className="px-4 py-2 text-white/70 hover:text-white text-sm transition-colors"
+                      className="h-11 px-4 rounded-control text-ink-2 hover:text-ink text-[14px] font-semibold transition-colors"
                     >
                       Keep watching
                     </button>
                     <button
                       onClick={() => { setShowLeaveConfirm(false); onLeave() }}
-                      className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 rounded-lg text-red-200 text-sm font-medium transition-colors"
+                      className="h-11 px-4 rounded-control bg-danger text-white text-[14px] font-semibold hover:brightness-110 transition-[filter]"
                     >
                       End party
                     </button>
@@ -641,9 +670,8 @@ export function PartyPanel({
             </div>
           </div>
         )}
-        {/* Phase 4.7 — the highlight reel only exists AFTER the party
-            ends, so there is no in-panel link; the host gets a bell
-            notification with the reel URL once it's rendered. */}
+        {/* The highlight reel only exists AFTER the party ends, so there is
+            no link here; the host gets a notification once it is rendered. */}
       </div>
     </aside>
   )

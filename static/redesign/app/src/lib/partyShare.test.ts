@@ -120,8 +120,8 @@ describe('downloadCard', () => {
       `${ORIGIN}/api/parties/7K2QD9/card.png?t=bad`, '7K2QD9', 'story',
       { origin: ORIGIN, fetchImpl: fetchImpl as unknown as typeof fetch, doc: fakeDoc },
     )
-    expect(res.ok).toBe(false)
-    expect(res.error).toContain('404')
+    // In the app's words: no status number, no server text.
+    expect(res).toEqual({ ok: false, error: 'That card is not available.' })
     expect(clicked).toEqual([])
   })
 
@@ -131,7 +131,7 @@ describe('downloadCard', () => {
       `${ORIGIN}/api/parties/7K2QD9/card.png?t=abc`, '7K2QD9', 'story',
       { origin: ORIGIN, fetchImpl: fetchImpl as unknown as typeof fetch, doc: fakeDoc },
     )
-    expect(res).toEqual({ ok: false, error: 'offline' })
+    expect(res).toEqual({ ok: false, error: 'The card could not be downloaded just now.' })
   })
 })
 
@@ -267,9 +267,19 @@ describe('shareCard', () => {
   it('reports a non-OK response instead of sharing an error page', async () => {
     const share = vi.fn(async () => {})
     const res = await run({ share, canShare: () => true }, vi.fn(async () => new Response('nope', { status: 404 })))
-    expect(res.ok).toBe(false)
-    expect(res.error).toContain('404')
+    expect(res).toEqual({ ok: false, error: 'That card is not available.' })
     expect(share).not.toHaveBeenCalled()
     expect(clicked).toEqual([])
+  })
+
+  // Saving the file can itself fail (a sandboxed frame refuses the link):
+  // said in the app's words, not the browser's.
+  it('says a save that the browser refused in its own words', async () => {
+    fakeDoc = {
+      createElement: () => { throw new DOMException('Blocked a frame from creating a link', 'SecurityError') },
+      body: { appendChild: () => {} },
+    } as unknown as Document
+    const res = await run({})
+    expect(res).toEqual({ ok: false, error: 'The card could not be shared just now.' })
   })
 })

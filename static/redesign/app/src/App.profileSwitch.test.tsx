@@ -27,23 +27,34 @@
 //
 // The same requirement holds for every commit after it, so a reset that
 // cleared nothing fails here too: the switch through the picker an unreadable
-// binding opens, a conversational search on screen, the grids' totals in
-// Home's greeting, and requests the previous profile started that answer
-// after the switch (a Load More, a first grid page, a vibe search). What no
-// commit shows is not pinned: the grids' next-page resets are replaced by the
-// next first page before a Load More can run.
+// binding opens, a search by description on screen, the grids' totals in
+// Tonight's closing line, and requests the previous profile started that
+// answer after the switch (a Load More, a first grid page, a search by
+// description).
+// What no commit shows is not pinned: the grids' next-page resets are
+// replaced by the next first page before a Load More can run.
 //
-// Home's own library count, in its greeting, is held to the profile the app
-// acts as on every commit, from the start: after the startup load re-selects
-// the profile this browser last showed (not a switch), after a switch, and
-// when the previous profile's answer arrives after one. It is asked for once
-// per profile, not again when the user object is replaced.
+// Home's own library count, in the closing line under its rails ("N titles
+// worth your time out of the T titles in your library"; it used to open the
+// page, in a greeting), is held to the profile the app acts as on every
+// commit, from the start: after the startup load re-selects the profile this
+// browser last showed (not a switch), after a switch, and when the previous
+// profile's answer arrives after one. It is asked for once per profile, not
+// again when the user object is replaced.
+//
+// Tonight's hero leads with the title the profile left unfinished
+// ("…Resume"), with Aurora's picks ("…Hero", "…Second") in the filmstrip
+// beside it. The Kid has a content limit, so its Tonight is the calmer one:
+// that title, two actions, no filmstrip, and a closing line that states the
+// limit instead of counting picks. `kidUnrestricted` gives the Kid the same
+// page as the Parent, so a pick or a count kept from the Parent would show.
 
 import { Profiler } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import App from './App'
+import { pageText } from '@/test/pageText'
 
 const NOW = '2026-10-01T00:00:00Z'
 const item = (id: number, title: string) => ({
@@ -53,6 +64,8 @@ const PROFILES = [
   { id: 1, user_id: 1, name: 'Parent', is_default: true, created_at: NOW, updated_at: NOW },
   { id: 2, user_id: 1, name: 'Kid', is_default: false, created_at: NOW, updated_at: NOW, max_age_rating: 'PG' },
 ]
+/** A title both profiles may have in their own lists (`sharedSaved`). */
+const SHARED = item(300, 'Shared Saved')
 const USER = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' }
 // What each profile may see. The server filters every list by the session's
 // profile, so the mock answers from the bound one.
@@ -77,26 +90,51 @@ const SEES: Record<number, { hero: Item[]; catalog: Item; page2: Item; vibe: Ite
  *  when the session's row is briefly unreachable. The server still has a
  *  binding (the Parent) and answers for it.
  *
- *  `homeCountFails`: Home's own library count fails, so its greeting falls
+ *  `homeCountFails`: Home's own library count fails, so its closing line falls
  *  back to the browse grids' totals. The Parent's catalog totals 37 titles
  *  and the Kid's 2, so a total tells them apart.
  *
  *  `hold(key)` keeps one answer back until the returned release is called;
- *  a browse page's key is `<type>-p<page>-<bound profile>`, a vibe search's
+ *  a browse page's key is `<type>-p<page>-<bound profile>`, a search's
  *  `search-<bound profile>`, Home's own library count's
- *  `count-<bound profile>`, the signed-in user's (`/api/auth/me`) `me`. An
+ *  `count-<bound profile>`, Continue Watching's `continue-<bound profile>`,
+ *  the signed-in user's (`/api/auth/me`) `me`. An
  *  aborted request rejects as fetch's does, once its answer would have
  *  arrived.
  *
  *  `counts` lists the profile the session was bound to when each request for
  *  Home's own library count was sent; `activations`, each profile bound;
- *  `profileLists`, how many times the profile list was asked for. */
-function stubServer({ bindingUnreadable = false, homeCountFails = false } = {}) {
+ *  `profileLists`, how many times the profile list was asked for;
+ *  `heroPools`, the profile each answered request for Aurora's picks was
+ *  answered for; `searches`, the profile each search was asked under and
+ *  how it was asked for (`literal`: by title; `semantic`: by description,
+ *  which costs the server a model call). */
+function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnrestricted = false, activationFails = false, sharedSaved = false } = {}) {
+  // `sharedSaved`: both profiles have SHARED in their own lists too.
+  // `kidUnrestricted`: the Kid profile has no content limit. A restricted
+  // profile is not shown My Library at all, so a switch on that page is held
+  // to the rule between two profiles that both may open it.
+  const profiles = kidUnrestricted ? PROFILES.map(p => ({ ...p, max_age_rating: undefined })) : PROFILES
   let bound = 1
   const holds = new Map<string, Promise<void>>()
   const counts: number[] = []
+  /** Each request for a page of a grid: its type, page, and the profile the
+   *  server answered it for (`movie-p2-1`). */
+  const gridAsks: string[] = []
   const activations: number[] = []
+  /** Each activation the server refused (`activationFails`). */
+  const refusals: number[] = []
+  const heroPools: number[] = []
+  // Profiles whose own list ("My Library") the server fails to answer for.
+  const listFails = new Set<number>()
+  const searches: { asked: number; mode: string | null }[] = []
   let profileLists = 0
+  /** Each write to a profile's own list, as the server was asked. */
+  const libraryWrites: string[] = []
+  /** How many of the next such writes the server refuses. */
+  const libraryWriteFails = { n: 0 }
+  /** Each read of a profile's own list, by the profile the address names. */
+  const libraryReads: number[] = []
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
@@ -110,11 +148,28 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false } = {}) 
     // Home's own count is the one catalog list asked for with no type.
     const isCount = p === '/api/media' && !url.searchParams.has('type')
     if (isCount) counts.push(asked)
+    if (p === '/api/media/search') searches.push({ asked, mode: url.searchParams.get('mode') })
     if (p === '/api/profiles') profileLists++
+    // A write to a profile's own list: recorded, kept back while
+    // 'library-write' is held, and refused when told to be. As the server
+    // does (resolveRequestProfile), a session acting as a restricted profile
+    // may name only that profile; an unrestricted one may name any.
+    if (/^\/api\/profiles\/\d+\/library(\/\d+)?$/.test(p) && init?.method && init.method !== 'GET') {
+      libraryWrites.push(`${init.method} ${p}`)
+      const named = Number(p.split('/')[3])
+      const restricted = !!profiles.find(x => x.id === asked)?.max_age_rating && named !== asked
+      const fails = libraryWriteFails.n > 0
+      if (fails) libraryWriteFails.n--
+      const kept = holds.get('library-write')
+      if (kept) await kept
+      if (restricted) return json({ error: { code: 403, message: 'profile is restricted', reason: 'profile_restricted' } }, 403)
+      return fails ? json({ error: { code: 500, message: 'failed to resolve library' } }, 500) : new Response(null, { status: 204 })
+    }
     const held = holds.get(p === '/api/auth/me' ? 'me'
       : p === '/api/media/search' ? `search-${asked}`
-        : p !== '/api/media' ? ''
-          : isCount ? `count-${asked}` : `${url.searchParams.get('type')}-p${page}-${asked}`)
+        : p === '/api/progress/continue' ? `continue-${asked}`
+          : p !== '/api/media' ? ''
+            : isCount ? `count-${asked}` : `${url.searchParams.get('type')}-p${page}-${asked}`)
     // The Kid's answers take a moment, as a server's do. Answered at once, they
     // land in the same render as the switch's resets and would hide a reset
     // that cleared nothing: the previous profile's titles would never be
@@ -125,23 +180,47 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false } = {}) 
     if (init?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     if (p === '/api/auth/me') return json(USER)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: USER })
-    if (p === '/api/profiles') return json(PROFILES)
+    if (p === '/api/profiles') return json(profiles)
     if (p === '/api/profiles/active') {
-      return bindingUnreadable ? json({ error: 'unavailable' }, 503) : json(PROFILES.find(x => x.id === bound))
+      return bindingUnreadable ? json({ error: 'unavailable' }, 503) : json(profiles.find(x => x.id === bound))
     }
     const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
     if (activate && init?.method === 'POST') {
+      // `activationFails`: the server refuses, binds nothing, and the tab
+      // ends its switch on the profile it already showed.
+      if (activationFails) { refusals.push(Number(activate[1])); return json({ error: 'unavailable' }, 503) }
       bound = Number(activate[1])
       activations.push(bound)
+      // 'activated' holds the ANSWER back after the server has bound: the
+      // window in which the tab still names the old profile and the server
+      // already answers for the new one.
+      const answered = holds.get('activated')
+      if (answered) await answered
       return new Response(null, { status: 204 })
     }
+    // A profile's own list, for the profile the address names, as the
+    // server answers it: a session acting as a restricted profile may name
+    // only that one (403), an unrestricted one any of the account's.
     if (/^\/api\/profiles\/\d+\/library$/.test(p)) {
-      return json([{ media_item_id: sees.saved.id, title: sees.saved.title, type: 'movie', year: 2020 }])
+      const named = Number(p.split('/')[3])
+      libraryReads.push(named)
+      // 'library-read-<profile>' keeps a read of that profile's list back.
+      const kept = holds.get(`library-read-${named}`)
+      if (kept) await kept
+      if (named !== asked && profiles.find(x => x.id === asked)?.max_age_rating) {
+        return json({ error: { code: 403, message: 'profile is restricted', reason: 'profile_restricted' } }, 403)
+      }
+      if (listFails.has(named)) return json({ error: 'unavailable' }, 503)
+      return json([SEES[named].saved, ...(sharedSaved ? [SHARED] : [])].map(x => ({ media_item_id: x.id, title: x.title, type: 'movie', year: 2020 })))
     }
-    if (p === '/api/me/hero') return json({ picks: sees.hero.map(it => ({ item: it, reason: 'Picked for you' })), slate_token: `slate-${bound}` })
+    if (p === '/api/me/hero') {
+      heroPools.push(asked)
+      return json({ picks: sees.hero.map(it => ({ item: it, reason: 'Picked for you' })), slate_token: `slate-${asked}` })
+    }
     if (p === '/api/media/recent') return json({ data: [sees.catalog] })
     if (isCount && homeCountFails) return json({ error: 'unavailable' }, 503)
     if (p === '/api/media') {
+      if (!isCount) gridAsks.push(`${url.searchParams.get('type')}-p${page}-${asked}`)
       return json({ data: [page === 1 ? sees.catalog : sees.page2], page, per_page: 1, total_items: asked === 1 ? 37 : 2, total_pages: 2 })
     }
     if (p === '/api/media/search') return json([sees.vibe])
@@ -151,10 +230,29 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false } = {}) 
     }
     const title = p.match(/^\/api\/media\/(\d+)$/)
     if (title) {
-      const it = [...sees.hero, sees.catalog, sees.page2, sees.vibe, sees.resume, sees.saved].find(x => x.id === Number(title[1]))
+      const it = [...sees.hero, sees.catalog, sees.page2, sees.vibe, sees.resume, sees.saved, SHARED].find(x => x.id === Number(title[1]))
       return it ? json(it) : json({ error: { code: 404, message: 'not found' } }, 404)
     }
     if (p.startsWith('/api/me/discover')) return json({ rails: [] })
+    // One live party, hosted by someone else, that only the Parent may be
+    // shown (the server judges a party's title against the session's limit).
+    if (p === '/api/parties/active') {
+      return json({ parties: asked === 1 ? [{
+        code: 'PARTY1', host_user_id: 9, party_name: '', media_title: 'Parentonly Party', media_poster: '',
+        participant_count: 3, max_participants: 0, is_playing: true, started_at: NOW,
+      }] : [] })
+    }
+    // One invitation nobody has answered. Invitations are the ACCOUNT's, so
+    // the server lists it whichever profile is bound: what keeps it off the
+    // Kid's Tonight is that a profile with a limit is shown no live strip.
+    // (Not with kidUnrestricted, where it would be shown, rightly, under
+    // either name, and the Parent-only probe would count it.)
+    if (p === '/api/me/party-invites') {
+      return json({ invites: kidUnrestricted ? [] : [{
+        invite_id: 7, party_code: 'INVITE1', media_title: 'Parentonly Invite', host_username: 'jonah', rsvp: 'pending',
+        scheduled_start_at: '2099-01-01T20:00:00Z', started_at: null, created_at: NOW,
+      }] })
+    }
     return json([])
   })
   // The event socket, and two browser APIs App's layout uses that jsdom lacks.
@@ -163,7 +261,16 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false } = {}) 
   vi.stubGlobal('scrollTo', () => {})
   return {
     counts,
+    gridAsks,
     activations,
+    refusals,
+    heroPools,
+    searches,
+    libraryWrites,
+    libraryReads,
+    failLibraryWrites(n = 1) { libraryWriteFails.n = n },
+    /** From now on the server fails to answer for this profile's own list. */
+    failListFor(profile: number) { listFails.add(profile) },
     get profileLists() { return profileLists },
     hold(key: string) {
       let release!: () => void
@@ -179,7 +286,7 @@ interface Commit {
   label: string | null
   /** Any Parent-only title, in the page's text or in a label that names one. */
   parentTitles: boolean
-  /** The Parent's pick count in Home's greeting. */
+  /** The Parent's pick count in Tonight's closing line. */
   parentCount: boolean
   /** The hero's no-pick card (an empty library), not its loading skeleton. */
   noPickCard: boolean
@@ -187,26 +294,54 @@ interface Commit {
   railsOrSkeleton: boolean
   /** My Library's empty-state message. */
   libraryEmpty: boolean
-  /** The Parent's catalog total in Home's greeting. */
+  /** What a grid's A to Z strip is saying ("Loading titles to find Z…"). */
+  jumpStatus: string
+  /** One of the Kid's titles is on the page. */
+  kidTitles: boolean
+  /** The Parent's catalog total in Tonight's closing line. */
   parentTotal: boolean
+  /** The title Tonight's hero names, when it is up. */
+  heroTitle: string | null
+  /** SHARED's card is drawn. */
+  sharedCard: boolean
+  /** The Kid's own saved title's card is drawn: the Kid's list is up. */
+  kidSavedCard: boolean
+}
+
+/** The name on the top bar's identity control: the profile the app says it
+ *  is acting as. It is the one place the bar names a profile. */
+const identityName = () => document.querySelector('[data-identity-name]')?.textContent ?? null
+
+/** Switches profile through the top bar: the identity control's menu. */
+function pickInTopBar(name: RegExp) {
+  fireEvent.click(document.querySelector('[data-identity-trigger]')!)
+  fireEvent.click(within(screen.getByRole('group', { name: 'Watching as' })).getByRole('button', { name }))
 }
 
 /** Samples the page at every commit. */
 function renderApp(path: string) {
   const commits: Commit[] = []
   const onRender = () => {
-    const text = document.body.textContent ?? ''
+    const text = pageText()
     const named = [...document.querySelectorAll('[aria-label], img[alt], [title]')]
       .map(el => `${el.getAttribute('aria-label') ?? ''} ${el.getAttribute('alt') ?? ''} ${el.getAttribute('title') ?? ''}`)
     commits.push({
-      label: document.querySelector('button[title^="Switch profile"] span.truncate')?.textContent ?? null,
+      label: identityName(),
       parentTitles: `${text} ${named.join(' ')}`.includes('Parentonly'),
-      parentCount: text.includes('2 titles worth your time'),
+      parentCount: /\b2 titles worth your time/.test(text),
       // The skeleton keeps this heading too, but only for assistive tech.
       noPickCard: [...document.querySelectorAll('h2')].some(h => h.textContent === 'Welcome to Aurora' && !h.classList.contains('sr-only')),
       railsOrSkeleton: !!document.querySelector('.rail-title') || text.includes('Loading your library…'),
-      libraryEmpty: text.includes('No saved titles yet'),
+      // By the page's own marker, not its wording: the words changed once
+      // and this went on looking for the old ones, passing whatever was drawn.
+      libraryEmpty: document.querySelector('[data-library-empty]') !== null,
+      jumpStatus: document.querySelector('.stage-jump-status')?.textContent ?? '',
+      kidTitles: `${text} ${named.join(' ')}`.includes('Kidonly'),
       parentTotal: /\b37 titles in your library/.test(text),
+      heroTitle: document.querySelector('section[data-hero-kind] h2')?.textContent ?? null,
+      // SHARED's card is drawn (`sharedSaved`).
+      sharedCard: document.querySelector(`[data-media-id="${SHARED.id}"]`) !== null,
+      kidSavedCard: document.querySelector(`[data-media-id="${SEES[2].saved.id}"]`) !== null,
     })
   }
   render(<Profiler id="app" onRender={onRender}><MemoryRouter initialEntries={[path]}><App /></MemoryRouter></Profiler>)
@@ -214,8 +349,39 @@ function renderApp(path: string) {
 }
 
 function switchToKid() {
-  fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
-  fireEvent.click(screen.getByRole('menuitemradio', { name: /Kid/ }))
+  pickInTopBar(/Kid/)
+}
+
+/** Types a description into the top bar's search field and asks for the
+ *  search by description (Enter). */
+function describeInTopBar(words: string) {
+  const field = screen.getByRole('textbox', { name: 'Search titles' })
+  fireEvent.change(field, { target: { value: words } })
+  fireEvent.keyDown(field, { key: 'Enter' })
+}
+
+/** Tonight's hero is up for the Parent, all of it: the title they left
+ *  unfinished leads, and Aurora's two picks are in the filmstrip beside it. */
+async function parentHeroUp() {
+  await screen.findByRole('button', { name: 'Details of Parentonly Resume' }, { timeout: 5000 })
+  const strip = await screen.findByRole('list', { name: /picks from Aurora/ }, { timeout: 5000 })
+  expect(within(strip).getAllByRole('button').map(b => b.getAttribute('aria-label'))).toEqual(['Parentonly Hero', 'Parentonly Second'])
+}
+
+/** Tonight's hero is up for the Kid, and everything it is made from has
+ *  been answered: the title the Kid left unfinished, and Aurora's picks for
+ *  the Kid. A profile with a limit is shown no filmstrip, so for it the
+ *  picks' arrival is read from the server; with no limit the one pick is in
+ *  the strip. A moment more then lets whatever that answer changed commit. */
+async function kidHeroUp() {
+  const hero = await screen.findByRole('button', { name: /^(More about|Details of) Kidonly Resume$/ }, { timeout: 5000 })
+  await waitFor(() => expect(server.heroPools).toContain(2), { timeout: 5000 })
+  if (hero.getAttribute('aria-label')!.startsWith('Details of')) {
+    await screen.findByRole('button', { name: 'Kidonly Hero' }, { timeout: 5000 })
+  } else {
+    await new Promise(done => setTimeout(done, 50))
+    expect(screen.queryByRole('list', { name: /picks from Aurora/ })).toBeNull()
+  }
 }
 
 /** The commits that showed the Kid profile's name over a Parent-only title. */
@@ -234,21 +400,182 @@ describe('a profile switch never commits the new name over the previous profile�
   beforeEach(signedIn)
   afterEach(() => { vi.unstubAllGlobals() })
 
-  it('on Home: the hero, the rails and Continue Watching', async () => {
+  // Into a profile with a limit (the calmer Tonight: no filmstrip, no pick
+  // count) and into one without (the Parent's own page, where a kept pick or
+  // count would have somewhere to show).
+  it.each([
+    ['into a profile with a limit', false],
+    ['into a profile with none', true],
+  ])('on Home: the hero, its picks, the rails and Continue Watching, %s', async (_how, kidUnrestricted) => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted })
     const commits = renderApp('/')
-    await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })
-    await screen.findAllByText('Parentonly Resume', undefined, { timeout: 5000 })
+    await parentHeroUp()
+    await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
     // Not vacuous: the Parent's name stood over the Parent's titles and count.
     expect(commits.some(c => c.label === 'Parent' && c.parentTitles)).toBe(true)
-    expect(commits.some(c => c.label === 'Parent' && c.parentCount)).toBe(true)
+    await waitFor(() => expect(commits.some(c => c.label === 'Parent' && c.parentCount)).toBe(true), { timeout: 5000 })
 
     switchToKid()
-    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
-    await screen.findAllByText('Kidonly Resume', undefined, { timeout: 5000 })
+    await kidHeroUp()
+    await screen.findAllByText('Kidonly Catalog', undefined, { timeout: 5000 })
+    // The Kid's own closing line is up: its own count, and for a profile
+    // with no limit its own number of picks.
+    await waitFor(() => expect(document.querySelector('[data-tonight-foot]')?.textContent).toMatch(
+      kidUnrestricted ? /^1 titles worth your time out of the 2 titles in your library\./ : /^Showing the 2 titles in your library rated PG and under\./,
+    ), { timeout: 5000 })
     expect(kidOverParent(commits)).toBe(0)
     expect(kid(commits).filter(c => c.parentCount)).toEqual([])
     expect(kid(commits).filter(c => c.noPickCard)).toEqual([])
     expect(kid(commits).filter(c => !c.railsOrSkeleton)).toEqual([])
+  })
+
+  // The hero remembers that the viewer moved off the title to resume, onto
+  // a pick, and which pick. That is the previous profile's glance at the
+  // previous profile's slate: the new profile's Tonight opens on its own
+  // unfinished title, as a first visit does.
+  it('on Home: the new profile\'s hero opens on its own unfinished title, not where the last one had moved to', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const commits = renderApp('/')
+    await parentHeroUp()
+    fireEvent.click(screen.getByRole('button', { name: 'Parentonly Second' }))
+    // Not vacuous: the Parent's hero moved to the second pick.
+    await screen.findByRole('button', { name: 'Details of Parentonly Second' }, { timeout: 5000 })
+
+    switchToKid()
+    await kidHeroUp()
+    const strip = screen.getByRole('list', { name: /picks from Aurora/ })
+    // On its own title to resume, with its one pick beside it, not showing.
+    expect(document.querySelector('section[data-hero-kind] h2')?.textContent).toBe('Kidonly Resume')
+    expect(within(strip).getAllByRole('button').map(b => b.getAttribute('aria-label'))).toEqual(['Kidonly Hero'])
+    // And no commit under the Kid's name had the pick up instead.
+    expect(kid(commits).filter(c => c.heroTitle !== null && c.heroTitle !== 'Kidonly Resume')).toEqual([])
+    expect(kidOverParent(commits)).toBe(0)
+  })
+
+  // The hero waits for Continue Watching for four seconds at most, and that
+  // the wait ran out is one visit's fact. It used to be kept for the user
+  // and profile for as long as the tab lived: after a switch away and back
+  // the wait was already over, so the hero put up a pick with Continue
+  // Watching still out, and the title to resume then took the hero over,
+  // also from under a viewer already in it.
+  it('on Home: the hero waits for the title to resume again after a switch away and back, though that wait once ran out', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const release = server.hold('continue-1')
+    const commits = renderApp('/')
+    // Not vacuous: the Parent's wait runs out, and a pick goes up.
+    await screen.findByRole('button', { name: 'Details of Parentonly Hero' }, { timeout: 8000 })
+    release()
+    await parentHeroUp()
+
+    switchToKid()
+    await kidHeroUp()
+    // Back to the Parent, whose Continue Watching is out again.
+    const again = server.hold('continue-1')
+    const since = commits.length
+    const pools = server.heroPools.filter(asked => asked === 1).length
+    pickInTopBar(/Parent/)
+    // The Parent's picks and rails have landed; only Continue Watching is out.
+    await waitFor(() => expect(server.heroPools.filter(asked => asked === 1).length).toBeGreaterThan(pools), { timeout: 5000 })
+    await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 300))
+    const back = () => commits.slice(since).filter(c => c.label === 'Parent')
+    expect(back().length).toBeGreaterThan(0)
+    expect(back().filter(c => c.heroTitle !== null)).toEqual([])
+
+    again()
+    await parentHeroUp()
+    // The hero opened on the title to resume: no commit showed a pick first.
+    expect(back().filter(c => c.heroTitle !== null && c.heroTitle !== 'Parentonly Resume')).toEqual([])
+    // Longer than the default: the first wait alone is four seconds.
+  }, 20_000)
+
+  // A profile with a limit has its own list as a rail on Tonight. This
+  // browser keeps a snapshot of each profile's list, and the Kid's can hold
+  // a title saved before the limit was set, which the server no longer
+  // lists. The rail is the server's answer for the Kid, on every commit:
+  // not the snapshot, and not on the strength of the Parent's answer.
+  it('on Home, into a profile with a limit: its list is the server\'s, never this browser\'s snapshot', async () => {
+    localStorage.setItem('aurora_my_library:1:2', JSON.stringify([{
+      id: 108, title: 'Parentonly Saved Before The Limit', year: 2020, rating: 7, duration: '', genre: '', type: 'movie', poster: '', backdrop: '', description: '',
+    }]))
+    const commits = renderApp('/')
+    await parentHeroUp()
+    switchToKid()
+    await kidHeroUp()
+    const list = (await screen.findByRole('heading', { name: 'Your list' }, { timeout: 5000 })).closest('section')!
+    expect(within(list).getAllByText('Kidonly Saved').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Parentonly Saved Before The Limit')).toBeNull()
+    expect(kid(commits).length).toBeGreaterThan(0)
+    expect(kidOverParent(commits)).toBe(0)
+  })
+
+  // The rail is the server's answer for the Kid "this time": an answer the
+  // Kid's list had on an earlier visit does not vouch for what this browser
+  // holds now. Kid, then Parent, then Kid again, with the Kid's list
+  // unanswered the second time and the snapshot changed meanwhile (another
+  // tab wrote it, or the limit was lowered from another device since).
+  it('on Home, back into a profile with a limit: an earlier answer for its list does not vouch for the snapshot', async () => {
+    const commits = renderApp('/')
+    await parentHeroUp()
+    switchToKid()
+    await kidHeroUp()
+    // Not vacuous: the Kid's list was answered once, and shown.
+    const first = (await screen.findByRole('heading', { name: 'Your list' }, { timeout: 5000 })).closest('section')!
+    expect(within(first).getAllByText('Kidonly Saved').length).toBeGreaterThan(0)
+
+    server.failListFor(1)
+    server.failListFor(2)
+    pickInTopBar(/Parent/)
+    await parentHeroUp()
+    // What this browser holds for the Kid now.
+    localStorage.setItem('aurora_my_library:1:2', JSON.stringify([{
+      id: 108, title: 'Parentonly Saved Before The Limit', year: 2020, rating: 7, duration: '', genre: '', type: 'movie', poster: '', backdrop: '', description: '',
+    }]))
+    const since = commits.length
+    switchToKid()
+    await kidHeroUp()
+    await screen.findAllByText('Kidonly Catalog', undefined, { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 300))
+    // No answer for the list this time: no rail, on any commit.
+    expect(screen.queryByRole('heading', { name: 'Your list' })).toBeNull()
+    expect(screen.queryByText('Parentonly Saved Before The Limit')).toBeNull()
+    expect(commits.slice(since).filter(c => c.label === 'Kid').length).toBeGreaterThan(0)
+    expect(kidOverParent(commits)).toBe(0)
+  })
+
+  it('in the top bar: the live-presence pill', async () => {
+    const commits = renderApp('/')
+    const pill = () => document.querySelector('[data-presence]')?.textContent ?? null
+    // Not vacuous: the bar named the Parent's live party under the Parent's name.
+    await waitFor(() => expect(pill()).toContain('3 watching Parentonly Party'), { timeout: 5000 })
+    expect(commits.some(c => c.label === 'Parent' && c.parentTitles)).toBe(true)
+
+    switchToKid()
+    await kidHeroUp()
+    expect(kidOverParent(commits)).toBe(0)
+    // A restricted session is not shown other people's parties at all.
+    expect(pill()).toBeNull()
+  })
+
+  // Tonight's live strip: the Parent's running party and the account's open
+  // invitation. A profile with a limit is offered no way to watch together,
+  // so the strip is not drawn for the Kid at all, on any commit.
+  it('on Home: the live strip', async () => {
+    const commits = renderApp('/')
+    const strip = () => document.querySelector('[data-tonight-live]')?.textContent ?? null
+    // Not vacuous: both rows are up for the Parent.
+    await waitFor(() => {
+      expect(strip()).toContain('3 watching Parentonly Party')
+      expect(strip()).toContain('jonah invited you to watch Parentonly Invite')
+    }, { timeout: 5000 })
+    switchToKid()
+    await kidHeroUp()
+    expect(kid(commits).length).toBeGreaterThan(0)
+    expect(kidOverParent(commits)).toBe(0)
+    expect(strip()).toBeNull()
   })
 
   it.each([['Movies', '/movies'], ['TV Shows', '/shows']])('on the %s grid', async (_name, path) => {
@@ -279,11 +606,92 @@ describe('a profile switch never commits the new name over the previous profile�
       expect(screen.getByRole('button', { name: 'Load 1 more' })).toBeEnabled()
     })
 
+  // The other half of that guard. A switch that ends on the profile already
+  // shown (here: the server refuses the activation) resets nothing and
+  // aborts nothing, so a page asked for before it is still out when it ends.
+  // The server may have answered that page for a profile bound in between,
+  // so it is dropped, though here it was right; the viewer asks again.
+  it.each([['Movies', '/movies', 'movie'], ['TV Shows', '/shows', 'show']])(
+    'drops a %s Load More answered after a switch that ended where it began, and lets it be asked again', async (_name, path, type) => {
+      server = stubServer({ activationFails: true })
+      renderApp(path)
+      await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
+      const release = server.hold(`${type}-p2-1`)
+      fireEvent.click(screen.getByRole('button', { name: /^Load \d+ more$/ }))
+      switchToKid()
+      await waitFor(() => expect(server.refusals).toEqual([2]), { timeout: 5000 })
+      // The switch is over, on the Parent: a press asks again (below), which
+      // it would not while one was out.
+      await waitFor(() => expect(identityName()).toBe('Parent'))
+      await new Promise(done => setTimeout(done, 300))
+      release()
+      await new Promise(done => setTimeout(done, 200))
+      expect(screen.queryAllByText('Parentonly Page Two')).toEqual([])
+      // Not left spinning, and the page can be asked for again.
+      const more = screen.getByRole('button', { name: /^Load \d+ more$/ })
+      expect(more).toBeEnabled()
+      fireEvent.click(more)
+      await screen.findAllByText('Parentonly Page Two', undefined, { timeout: 5000 })
+      // (The stub lists a page when it answers it: the dropped one, and this.)
+      expect(server.gridAsks.filter(a => a === `${type}-p2-1`)).toHaveLength(2)
+    })
+
+  // The window a switch opens: the server has bound the Kid, and the tab
+  // still names the Parent until the activation's answer arrives. A page
+  // asked for then would be the Kid's, appended under the Parent's name. The
+  // live refresh has always stood down for it; Load More, and a jump to a
+  // letter (which is Load More, asked for by the strip), now do too.
+  it.each([['Movies', '/movies', 'movie'], ['TV Shows', '/shows', 'show']])(
+    'asks for no page of the %s grid while a switch is out, by Load More or by a jump', async (_name, path, type) => {
+      const commits = renderApp(path)
+      await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
+      const strip = await screen.findByRole('toolbar', { name: 'Jump to letter' }, { timeout: 5000 })
+      const answer = server.hold('activated')
+      switchToKid()
+      // Bound on the server; the tab does not know yet.
+      await waitFor(() => expect(server.activations).toEqual([2]), { timeout: 5000 })
+      expect(identityName()).toBe('Parent')
+      fireEvent.click(screen.getByRole('button', { name: /^Load \d+ more$/ }))
+      fireEvent.click(within(strip).getByRole('button', { name: 'Z' }))
+      await new Promise(done => setTimeout(done, 300))
+      expect(server.gridAsks.filter(a => a.startsWith(`${type}-p2-`))).toEqual([])
+      // Nothing of the Kid's was drawn under the Parent's name.
+      expect(commits.filter(c => c.label === 'Parent' && c.kidTitles)).toEqual([])
+      answer()
+      await screen.findAllByText('Kidonly Catalog', undefined, { timeout: 5000 })
+      expect(kidOverParent(commits)).toBe(0)
+    })
+
+  // A jump to a letter asks for pages by itself, so a switch must drop it as
+  // it drops a Load More: no page of the Parent's under the Kid's name, and
+  // nothing of the jump (its "Loading titles to find Z…", or its answer)
+  // said under the Kid's name either.
+  it.each([['Movies', '/movies', 'movie'], ['TV Shows', '/shows', 'show']])(
+    'drops a jump to a letter on the %s grid that was still loading', async (_name, path, type) => {
+      const commits = renderApp(path)
+      await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
+      const release = server.hold(`${type}-p2-1`)
+      const strip = await screen.findByRole('toolbar', { name: 'Jump to letter' }, { timeout: 5000 })
+      fireEvent.click(within(strip).getByRole('button', { name: 'Z' }))
+      // Not vacuous: the jump was under way, and said so, under the Parent's name.
+      await waitFor(() => expect(commits.some(c => c.label === 'Parent' && c.jumpStatus.startsWith('Loading titles to find Z'))).toBe(true), { timeout: 5000 })
+      switchToKid()
+      await screen.findAllByText('Kidonly Catalog', undefined, { timeout: 5000 })
+      release()
+      await new Promise(done => setTimeout(done, 150))
+      expect(screen.queryAllByText('Parentonly Page Two')).toEqual([])
+      expect(kidOverParent(commits)).toBe(0)
+      expect(kid(commits).filter(c => c.jumpStatus !== '')).toEqual([])
+      expect(kid(commits).length).toBeGreaterThan(0)
+      // The Kid's own Load More is not left spinning by the Parent's jump.
+      expect(screen.getByRole('button', { name: 'Load 1 more' })).toBeEnabled()
+    })
+
   it.each([['Movies', '/movies', 'movie'], ['TV Shows', '/shows', 'show']])(
     'drops a first %s page that was in flight, and asks again', async (_name, path, type) => {
       const release = server.hold(`${type}-p1-1`)
       const commits = renderApp(path)
-      const label = () => document.querySelector('button[title^="Switch profile"] span.truncate')?.textContent
+      const label = identityName
       await waitFor(() => expect(label()).toBe('Parent'), { timeout: 5000 })
       switchToKid()
       await waitFor(() => expect(label()).toBe('Kid'), { timeout: 5000 })
@@ -292,55 +700,85 @@ describe('a profile switch never commits the new name over the previous profile�
       expect(kidOverParent(commits)).toBe(0)
     })
 
-  it('drops a vibe search that was in flight', async () => {
+  // The card menu holds the previous profile's Resume record and closures
+  // over its id (Add, the thumbs, Mark as watched): a pick made after a
+  // switch would act for the profile the session no longer is. It is named
+  // for its title, so a commit that drew it under the Kid's name is seen by
+  // the same probe as any other Parent-only title.
+  it('closes an open card menu', async () => {
     const commits = renderApp('/')
-    await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })
-    const release = server.hold('search-1')
-    fireEvent.change(screen.getByLabelText('Describe a vibe to search by'), { target: { value: 'cozy' } })
-    fireEvent.click(document.querySelector('.convo-search button[aria-label="Search"]')!)
-    await screen.findByText('Sensing the vibe...', undefined, { timeout: 5000 })
+    await parentHeroUp()
+    fireEvent.click((await screen.findAllByRole('button', { name: /^More actions for Parentonly/ }, { timeout: 5000 }))[0])
+    // Not vacuous: the menu is up, and named for a Parent-only title.
+    expect(screen.getByRole('menu').getAttribute('aria-label')).toMatch(/^Actions for Parentonly/)
     switchToKid()
-    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
-    await screen.findAllByText('Kidonly Resume', undefined, { timeout: 5000 })
-    release()
-    await new Promise(done => setTimeout(done, 100))
-    expect(screen.queryAllByText('Parentonly Vibe')).toEqual([])
-    // Nor is the Kid's Home left showing the search as still running.
-    expect(screen.queryByText('Sensing the vibe...')).toBeNull()
+    await kidHeroUp()
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(kid(commits).length).toBeGreaterThan(0)
     expect(kidOverParent(commits)).toBe(0)
   })
 
-  // Home's greeting counts the library from its own fetch, or, when that
-  // failed, from the browse grids' totals, which are the Parent's until the
-  // switch clears them. One grid each, so the greeting's total is that grid's.
+  // A search by description is the search page's now (it was a bar on Home
+  // with a rail of its own). The words stay in the field across a switch,
+  // and the page searches them again for the new profile, by title: nobody
+  // asked the model anything on the new profile's behalf.
+  it('drops a search by description that was in flight', async () => {
+    const commits = renderApp('/')
+    await parentHeroUp()
+    const release = server.hold('search-1')
+    describeInTopBar('cozy')
+    await screen.findByText('Looking for titles like "cozy"…', undefined, { timeout: 5000 })
+    // Not vacuous: the search that is out is the Parent's, by description.
+    await waitFor(() => expect(server.searches).toContainEqual({ asked: 1, mode: 'semantic' }), { timeout: 5000 })
+    switchToKid()
+    await screen.findAllByText('Kidonly Vibe', undefined, { timeout: 5000 })
+    release()
+    await new Promise(done => setTimeout(done, 100))
+    expect(screen.queryAllByText('Parentonly Vibe')).toEqual([])
+    // Nor is the Kid's page left saying the Parent's search is still running.
+    expect(screen.queryByText(/Looking for titles like/)).toBeNull()
+    expect(server.searches.filter(x => x.asked === 2).map(x => x.mode)).toEqual(['literal'])
+    expect(kid(commits).length).toBeGreaterThan(0)
+    expect(kidOverParent(commits)).toBe(0)
+  })
+
+  // Tonight's closing line counts the library from its own fetch, or, when
+  // that failed, from the browse grids' totals, which are the Parent's until
+  // the switch clears them. One grid each, so the line's total is that grid's.
   it.each([['Movies', '/movies'], ['Shows', '/shows']])(
-    "does not count the Parent's library in Home's greeting from the %s total", async (_grid, path) => {
+    "does not count the Parent's library in Tonight's closing line from the %s total", async (_grid, path) => {
       vi.unstubAllGlobals()
       server = stubServer({ homeCountFails: true })
       const commits = renderApp(path)
       await screen.findAllByText('Parentonly Catalog', undefined, { timeout: 5000 })
-      fireEvent.click([...document.querySelectorAll('button.stage-tab')].find(b => b.textContent === 'Home')!)
-      // Not vacuous: the fallback did put the Parent's total in the greeting.
-      await waitFor(() => expect(document.body.textContent).toMatch(/\b37 titles in your library/), { timeout: 5000 })
+      fireEvent.click(document.querySelector('header .stage-tab[data-nav="home"]')!)
+      // Not vacuous: the fallback did put the Parent's total in the line.
+      await waitFor(() => expect(pageText()).toMatch(/\b37 titles in your library/), { timeout: 5000 })
       switchToKid()
-      await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
+      await kidHeroUp()
       expect(kid(commits).filter(c => c.parentTotal)).toEqual([])
       expect(kidOverParent(commits)).toBe(0)
     })
 
-  it('clears a conversational search', async () => {
+  it('clears the results of a search by description', async () => {
     const commits = renderApp('/')
-    await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })
-    fireEvent.change(screen.getByLabelText('Describe a vibe to search by'), { target: { value: 'cozy' } })
-    fireEvent.click(document.querySelector('.convo-search button[aria-label="Search"]')!)
+    await parentHeroUp()
+    describeInTopBar('cozy')
+    // Not vacuous: the Parent's results are up, and marked as the model's.
     await screen.findAllByText('Parentonly Vibe', undefined, { timeout: 5000 })
+    expect(server.searches).toContainEqual({ asked: 1, mode: 'semantic' })
     switchToKid()
-    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
-    await screen.findAllByText('Kidonly Resume', undefined, { timeout: 5000 })
+    await screen.findAllByText('Kidonly Vibe', undefined, { timeout: 5000 })
+    expect(server.searches.filter(x => x.asked === 2).map(x => x.mode)).toEqual(['literal'])
+    expect(kid(commits).length).toBeGreaterThan(0)
     expect(kidOverParent(commits)).toBe(0)
   })
 
   it('on My Library', async () => {
+    // Between two profiles that may both open My Library: a restricted
+    // profile is not shown the page at all (the next case).
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
     const commits = renderApp('/library')
     await screen.findAllByText('Parentonly Saved', undefined, { timeout: 5000 })
     switchToKid()
@@ -349,12 +787,250 @@ describe('a profile switch never commits the new name over the previous profile�
     expect(kid(commits).filter(c => c.libraryEmpty)).toEqual([])
   })
 
+  // A toast is said to whoever is acting when it is raised. "Removed <title>
+  // from My Library. Undo" stays seven seconds, and stayed through a switch:
+  // the title's name was up under the new profile's.
+  const removeTheSavedTitle = async (title = 'Parentonly Saved') => {
+    fireEvent.click((await screen.findAllByRole('button', { name: `More actions for ${title}` }, { timeout: 5000 }))[0])
+    fireEvent.click(within(await screen.findByRole('menu', { name: `Actions for ${title}` })).getByRole('menuitem', { name: 'Remove from My Library' }))
+    return await screen.findByText(`Removed ${title} from My Library.`, undefined, { timeout: 5000 })
+  }
+  it('with a removal\'s toast up: the toast and its Undo go with the profile they were said to', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const commits = renderApp('/library')
+    await removeTheSavedTitle()
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument()
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    // Not vacuous: the toast was up when the switch was made, and it names a Parent-only title.
+    expect(commits.some(c => c.label === 'Parent' && c.parentTitles)).toBe(true)
+    expect(kid(commits).length).toBeGreaterThan(0)
+    expect(kidOverParent(commits)).toBe(0)
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull()
+    expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104'])
+  })
+
+  // The removal is still out when the switch is made, and the server then
+  // refuses it. Taking it back is an edit of the Parent's list, and saying
+  // so names the Parent's title: neither is the Kid's.
+  it('with a removal still out: its refusal edits no list of the new profile\'s and is not said to it', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const commits = renderApp('/library')
+    const release = server.hold('library-write')
+    server.failLibraryWrites()
+    await removeTheSavedTitle()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104']))
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    release()
+    await new Promise(done => setTimeout(done, 200))
+    expect(kidOverParent(commits)).toBe(0)
+    expect(screen.queryByText(/Couldn't/)).toBeNull()
+    // The Kid's own list, on screen and as this browser keeps it, is the Kid's.
+    expect(screen.queryByText('Parentonly Saved')).toBeNull()
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toEqual(['Kidonly Saved'])
+  })
+
+  // An Undo's save waits behind the removal it undoes, and a switch is made
+  // while both are out. The save names the Parent's profile in its address,
+  // which a session acting as an unrestricted profile may name: it is sent,
+  // and the server takes it. It is the Parent's list's business: nothing of
+  // it is drawn or said under the Kid.
+  it('with an Undo waiting behind its removal: the Undo is sent for the previous profile, and none of it shows on the new one', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const commits = renderApp('/library')
+    const release = server.hold('library-write')
+    const said = await removeTheSavedTitle()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104']))
+    fireEvent.click(within(said.closest('.toast') as HTMLElement).getByRole('button', { name: 'Undo' }))
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    release()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104', 'POST /api/profiles/1/library']))
+    await new Promise(done => setTimeout(done, 200))
+    expect(kidOverParent(commits)).toBe(0)
+    expect(screen.queryByText('Parentonly Saved')).toBeNull()
+    expect(screen.queryByText(/Couldn't|Parentonly/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull()
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toEqual(['Kidonly Saved'])
+  })
+
+  // The same into a restricted profile: a session acting as it may name only
+  // it, so the server refuses the Undo (403). Nothing is said, and nothing on
+  // the Kid's screen changes: the title is one both profiles have saved, and
+  // taking the refused Undo back on the Kid's screen would take the Kid's
+  // own copy of it off. (The Parent's removal stands: see CLAUDE.md's known
+  // gaps.)
+  it('with an Undo waiting behind its removal, into a restricted profile: the refused Undo says and changes nothing', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ sharedSaved: true })
+    const commits = renderApp('/library')
+    const release = server.hold('library-write')
+    const said = await removeTheSavedTitle(SHARED.title)
+    await waitFor(() => expect(server.libraryWrites).toEqual([`DELETE /api/profiles/1/library/${SHARED.id}`]))
+    fireEvent.click(within(said.closest('.toast') as HTMLElement).getByRole('button', { name: 'Undo' }))
+    switchToKid()
+    await kidHeroUp()
+    // The Kid's own list is up on Tonight, with its copy of the shared title.
+    await waitFor(() => expect(document.querySelector(`[data-media-id="${SHARED.id}"]`)).not.toBeNull(), { timeout: 5000 })
+    const settled = commits.length
+    const before = pageText()
+    release()
+    await waitFor(() => expect(server.libraryWrites).toEqual([`DELETE /api/profiles/1/library/${SHARED.id}`, 'POST /api/profiles/1/library']))
+    await new Promise(done => setTimeout(done, 200))
+    expect(kidOverParent(commits)).toBe(0)
+    expect(screen.queryByText(/Couldn't|Parentonly/)).toBeNull()
+    expect(document.querySelector('.toast')).toBeNull()
+    // Nothing drawn after the refusal differs from what was up before it.
+    expect(pageText()).toBe(before)
+    expect(commits.slice(settled).every(c => c.label === 'Kid' && !c.parentTitles && c.sharedCard)).toBe(true)
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toContain(SHARED.title)
+  })
+
+  // In-flight marks are the profile's. Both profiles have the shared title;
+  // the Parent's removal of it is still out when the switch is made, and the
+  // Kid's own list is answered meanwhile. Keyed by title alone, the
+  // Parent's mark took the title out of the Kid's list, on screen and in the
+  // Kid's stored copy, until the next read.
+  it('with a removal of a title both profiles have still out: the new profile\'s list keeps its own copy', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true, sharedSaved: true })
+    const commits = renderApp('/library')
+    const release = server.hold('library-write')
+    await removeTheSavedTitle(SHARED.title)
+    await waitFor(() => expect(server.libraryWrites).toEqual([`DELETE /api/profiles/1/library/${SHARED.id}`]))
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 200))
+    // Every commit that draws the Kid's own list draws the shared title in it.
+    const kidLists = kid(commits).filter(c => c.kidSavedCard)
+    expect(kidLists.length).toBeGreaterThan(0)
+    expect(kidLists.every(c => c.sharedCard)).toBe(true)
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toContain(SHARED.title)
+    release()
+    await waitFor(() => expect(server.libraryWrites).toEqual([`DELETE /api/profiles/1/library/${SHARED.id}`]))
+    await new Promise(done => setTimeout(done, 200))
+    expect(document.querySelector(`[data-media-id="${SHARED.id}"]`)).not.toBeNull()
+  })
+
+  // A write is the signed-in account's. One queued behind a slow one whose
+  // turn comes after a sign-out is not sent: answered 401, it would end
+  // whatever session the tab has by then.
+  it('with an Undo waiting behind its removal, then a sign-out: the Undo is not sent', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    renderApp('/library')
+    const release = server.hold('library-write')
+    const said = await removeTheSavedTitle()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104']))
+    fireEvent.click(within(said.closest('.toast') as HTMLElement).getByRole('button', { name: 'Undo' }))
+    fireEvent.click(document.querySelector('[data-identity-trigger]')!)
+    fireEvent.click(screen.getByRole('button', { name: /^Sign out/ }))
+    await screen.findByLabelText('Username', {}, { timeout: 5000 })
+    release()
+    await new Promise(done => setTimeout(done, 200))
+    expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104'])
+  })
+
+  // A queue that ends failed reads its profile's list again. The Parent's
+  // removal is refused (500) with the Undo behind it, and the switch to an
+  // unrestricted Kid comes first: the server answers that read with the
+  // Parent's list, as it does for an unrestricted session, and it is not
+  // the Kid's list's to take.
+  it('with a queue that ends failed across a switch: the read of the previous profile\'s list is not merged into the new one\'s', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const commits = renderApp('/library')
+    const release = server.hold('library-write')
+    server.failLibraryWrites()
+    const said = await removeTheSavedTitle()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104']))
+    fireEvent.click(within(said.closest('.toast') as HTMLElement).getByRole('button', { name: 'Undo' }))
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    const before = commits.length
+    const reads = server.libraryReads.length
+    release()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104', 'POST /api/profiles/1/library']))
+    await new Promise(done => setTimeout(done, 300))
+    // The queue ended after the switch: the Parent's list is not asked for.
+    expect(server.libraryReads.slice(reads)).not.toContain(1)
+    expect(commits.slice(before).every(c => c.label === 'Kid' && !c.parentTitles && c.kidSavedCard)).toBe(true)
+    expect(screen.queryByText(/Couldn't|Parentonly/)).toBeNull()
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toEqual(['Kidonly Saved'])
+  })
+
+  // The read is already out when the switch is made: the Parent's removal
+  // was refused and its queue ended, so the Parent's list is being read
+  // again; the switch comes before its answer. The answer is the Parent's
+  // list and lands while the Kid's is on screen: it is not merged into it.
+  it('with the read at the end of a failed queue out across a switch: its answer is not merged into the new profile\'s list', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const commits = renderApp('/library')
+    await screen.findAllByText('Parentonly Saved', undefined, { timeout: 5000 })
+    const releaseRead = server.hold('library-read-1')
+    server.failLibraryWrites()
+    const reads = server.libraryReads.length
+    await removeTheSavedTitle()
+    await waitFor(() => expect(server.libraryReads.slice(reads)).toContain(1))
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    const before = commits.length
+    releaseRead()
+    await new Promise(done => setTimeout(done, 300))
+    expect(commits.slice(before).every(c => c.label === 'Kid' && !c.parentTitles && c.kidSavedCard)).toBe(true)
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toEqual(['Kidonly Saved'])
+  })
+
+  // The reverse of the shared title's case: the Kid's stored copy still has
+  // a title from before its limit, which the server's list for the Kid
+  // leaves out, and the Parent's save of that title is out across the
+  // switch. The Parent's mark is not the Kid's: once the Kid's list has
+  // answered, the title is not on the Kid's screen.
+  it('with a save out across a switch of a title the new profile\'s stored copy still holds: the server\'s list for it stands', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer()
+    const CATALOG = SEES[1].catalog
+    localStorage.setItem('aurora_my_library:1:2', JSON.stringify([{
+      id: CATALOG.id, title: CATALOG.title, year: 2020, rating: 7, duration: '', genre: '', type: 'movie', poster: '', backdrop: '', description: '',
+    }]))
+    const commits = renderApp('/')
+    const release = server.hold('library-write')
+    fireEvent.click((await screen.findAllByRole('button', { name: `More actions for ${CATALOG.title}` }, { timeout: 5000 }))[0])
+    fireEvent.click(within(await screen.findByRole('menu', { name: `Actions for ${CATALOG.title}` })).getByRole('menuitem', { name: 'Add to My Library' }))
+    await waitFor(() => expect(server.libraryWrites).toEqual(['POST /api/profiles/1/library']))
+    switchToKid()
+    await kidHeroUp()
+    // The Kid's own list has answered and is up on Tonight.
+    await waitFor(() => expect(document.querySelector(`[data-media-id="${SEES[2].saved.id}"]`)).not.toBeNull(), { timeout: 5000 })
+    await new Promise(done => setTimeout(done, 200))
+    expect(document.querySelector(`[data-media-id="${CATALOG.id}"]`)).toBeNull()
+    expect(kidOverParent(commits)).toBe(0)
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { id: number }) => m.id)).not.toContain(CATALOG.id)
+    release()
+  }, 20_000)
+
+  it('on My Library, into a restricted profile: the page goes with the switch', async () => {
+    const commits = renderApp('/library')
+    await screen.findAllByText('Parentonly Saved', undefined, { timeout: 5000 })
+    switchToKid()
+    // A restricted profile sees Tonight, Movies and Shows: it lands on Tonight.
+    await kidHeroUp()
+    expect(kidOverParent(commits)).toBe(0)
+    expect(kid(commits).filter(c => c.libraryEmpty)).toEqual([])
+    expect(kid(commits).length).toBeGreaterThan(0)
+  })
+
   it('on an open title the new profile may not see', async () => {
     const commits = renderApp('/title/101')
     await screen.findAllByText('Parentonly Hero', undefined, { timeout: 5000 })
     switchToKid()
     // The hydration asks again, is refused, and goes Home.
-    await screen.findByLabelText('More info about Kidonly Hero', undefined, { timeout: 5000 })
+    await kidHeroUp()
     expect(kidOverParent(commits)).toBe(0)
   })
 
@@ -376,8 +1052,8 @@ describe('a profile switch never commits the new name over the previous profile�
     })
 })
 
-// Home's greeting counts the library from its own fetch ("N titles in your
-// library"), and the server counts what the session's profile may see: the
+// Tonight's closing line counts the library from its own fetch ("N titles in
+// your library"), and the server counts what the session's profile may see: the
 // Parent's catalog totals 37 titles and the Kid's 2. No commit may show one
 // profile's count while the app acts as another.
 describe('Home’s library count is the acting profile’s', () => {
@@ -385,8 +1061,8 @@ describe('Home’s library count is the acting profile’s', () => {
   afterEach(() => { vi.unstubAllGlobals() })
 
   const total = (n: number) => new RegExp(`\\b${n} titles in your library`)
-  const greetingCounts = (n: number) =>
-    waitFor(() => expect(document.body.textContent).toMatch(total(n)), { timeout: 5000 })
+  const lineCounts = (n: number) =>
+    waitFor(() => expect(pageText()).toMatch(total(n)), { timeout: 5000 })
 
   // A fresh sign-in on a browser the Kid last used: the server binds the
   // default (the Parent), then the startup load re-selects the Kid. That is
@@ -398,7 +1074,7 @@ describe('Home’s library count is the acting profile’s', () => {
     // server's answer for /me, held here until the startup load has settled.
     const releaseUser = server.hold('me')
     const commits = renderApp('/')
-    await greetingCounts(2)
+    await lineCounts(2)
     // Not vacuous: the session was the Parent's until the re-selection.
     expect(server.activations).toEqual([2])
     expect(commits.filter(c => c.parentTotal)).toEqual([])
@@ -413,7 +1089,7 @@ describe('Home’s library count is the acting profile’s', () => {
     releaseUser()
     await waitFor(() => expect(server.profileLists).toBe(lists + 1), { timeout: 5000 })
     expect(server.counts).toEqual([2])
-    expect(document.body.textContent).toMatch(total(2))
+    expect(pageText()).toMatch(total(2))
   })
 
   it.each([
@@ -423,17 +1099,17 @@ describe('Home’s library count is the acting profile’s', () => {
     vi.unstubAllGlobals()
     server = stubServer({ bindingUnreadable })
     const commits = renderApp('/')
-    // Not vacuous: the greeting counted the Parent's library first (with the
+    // Not vacuous: the line counted the Parent's library first (with the
     // binding unreadable, behind the picker, under the binding the server
     // does have).
-    await greetingCounts(37)
+    await lineCounts(37)
     if (bindingUnreadable) {
       const picker = await screen.findByRole('dialog', { name: "Who's watching?" }, { timeout: 5000 })
       fireEvent.click(within(picker).getByRole('radio', { name: /Kid/ }))
     } else {
       switchToKid()
     }
-    await greetingCounts(2)
+    await lineCounts(2)
     expect(kid(commits).length).toBeGreaterThan(0)
     expect(kid(commits).filter(c => c.parentTotal)).toEqual([])
     // Once for each profile.
@@ -443,37 +1119,36 @@ describe('Home’s library count is the acting profile’s', () => {
   it('drops an answer for the previous profile that arrives after a switch', async () => {
     const release = server.hold('count-1')
     const commits = renderApp('/')
-    await screen.findByLabelText('More info about Parentonly Hero', undefined, { timeout: 5000 })
+    await parentHeroUp()
     await waitFor(() => expect(server.counts).toEqual([1]), { timeout: 5000 })
     switchToKid()
-    await greetingCounts(2)
+    await lineCounts(2)
     release()
     await new Promise(done => setTimeout(done, 100))
-    expect(document.body.textContent).toMatch(total(2))
+    expect(pageText()).toMatch(total(2))
     expect(commits.filter(c => c.parentTotal)).toEqual([])
   })
 
-  // Back on the Parent before the Kid's count landed, the greeting waits for
+  // Back on the Parent before the Kid's count landed, the line waits for
   // the Parent's new answer rather than showing the one from before the
   // switch: kept, the same user and profile coming back (a sign-out and
   // sign-in in this tab, say) would show an answer from another session.
   it('asks again after a switch away and back, showing no earlier answer', async () => {
     const commits = renderApp('/')
-    await greetingCounts(37)
+    await lineCounts(37)
     const releaseKid = server.hold('count-2')
     switchToKid()
     await waitFor(() => expect(server.counts).toEqual([1, 2]), { timeout: 5000 })
     const release = server.hold('count-1')
     // Every commit from the click back on, until the Parent's new answer.
     const since = commits.length
-    fireEvent.click(document.querySelector('button[title^="Switch profile"]')!)
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Parent/ }))
+    pickInTopBar(/Parent/)
     await waitFor(() => expect(server.counts).toEqual([1, 2, 1]), { timeout: 5000 })
     expect(commits[commits.length - 1].label).toBe('Parent')
     await new Promise(done => setTimeout(done, 100))
     expect(commits.slice(since).filter(c => c.parentTotal)).toEqual([])
     release()
-    await greetingCounts(37)
+    await lineCounts(37)
     releaseKid()
   })
 })

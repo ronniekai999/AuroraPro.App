@@ -1,0 +1,10 @@
+{
+  "sha": "b9a45b4f71f571f50a71a6a3d37c9f3bad6f9ec8",
+  "verdict": "lows-only",
+  "summary": "Follow-ups to Settings and Together: 009c32d (a8ce3c17, lows-only), 01183e5 (af0ecbf9: fix-first for a room's row taking the focus unprompted at every reload) and its fix b9a45b4 (af0ecbf9: lows-only). Open lows: a leave after a profile switch is filed under the new profile; a room made before the first read of the rooms answers can hide that the read failed; a Join button removed while the window is unfocused does not hand focus to its row; Settings: a wrong 'changed on another device' message after a stalled reload; the quiet, danger and is-on ghost button hovers still show when aria-disabled; the acting and mounted refs are set in a passive effect.",
+  "reviewer": "fresh-context-agents-a8ce3c17-af0ecbf9",
+  "findings": "7",
+  "diff_digest": "ddd1c491a661b8ea17659463c8f875252fa5c3c45eb6445885b2ccceccfb92af",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T16:55:56Z"
+}

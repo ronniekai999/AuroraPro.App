@@ -76,7 +76,7 @@ console.log('\n>> Winner for `transform` on .stage-scrub-knob under :hover of .s
 
 // 2. New primitives emitted?
 const wanted = ['stage-controls-scrim', 'stage-player-topbar', 'stage-orb', 'stage-scrub',
-  'stage-party-dock', 'stage-party-rail', 'stage-party-reactions']
+  'stage-party-dock', 'stage-voice-pill', 'stage-party-reactions', 'stage-party-minidock', 'stage-party-ticker', 'stage-party-rail', 'stage-party-chat']
 console.log('\n## New primitives emitted')
 for (const w of wanted) {
   const n = find(r => new RegExp(`\\.${w}(?![-\\w])`).test(r.sel)).length

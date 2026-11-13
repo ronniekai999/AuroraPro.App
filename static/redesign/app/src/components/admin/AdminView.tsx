@@ -8,14 +8,24 @@
 // uses it (the global manual-identify overlay) and must not pull this
 // chunk to get it.
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useId, useLayoutEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Icon } from '@/components/Icon'
-import { PageHeader } from '@/components/PageHeader'
+import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { formatRequestDate } from '@/lib/format'
 import { skipCoverage, skipMarkerTotals, formatSkipMarkers } from '@/lib/adminDashboardTiles'
 import { castLabel, castRoles, groupCastStreams } from '@/lib/activeStreams'
 import ManualMatchModal from './ManualMatchModal'
+import { AdminShell, type AdminSection } from './AdminShell'
+import { PlaybackHealth } from './PlaybackHealth'
+import { SettingRow, SettingSwitch } from '@/components/settings/controls'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import { useReturnFocus } from '@/lib/returnFocus'
+import { ConfirmDialog } from '@/components/settings/ConfirmDialog'
+import { adminFailure, type Failure } from './adminFailure'
+import { FailureNote, FailureText, StandingNotice, StatusLine, useSaid } from './AdminNotes'
+import { useConfirmedAction } from './useConfirmedAction'
+import { backupPanelMounted, clearRestoreOutcome, finishRestore, holdPageForRestore, useRestoreOutcome } from './restoreOutcome'
 import {
   parseReferralOptionsSetting,
   serializeReferralOptions,
@@ -30,6 +40,7 @@ import {
 import {
   getAdminReferralSummary,
   type AdminReferralSummary,
+  APIError,
   apiFetchResponse,
   approveRequest,
   createInvite,
@@ -99,7 +110,7 @@ import {
 } from '@/lib/api'
 import { abortAfter } from '@/lib/catalogUpdates'
 
-// server_settings keys for the referral prompt (migration 046). Named here so
+// server_settings keys for the referral prompt, from migration 046. Named here so
 // the editor and the Go whitelist can't drift on a string literal.
 const REFERRAL_QUESTION_KEY = 'referral_prompt_question'
 const REFERRAL_OPTIONS_KEY = 'referral_prompt_options'
@@ -107,31 +118,57 @@ const REFERRAL_OPTIONS_KEY = 'referral_prompt_options'
 /* ─────────────────────── ADMIN VIEW ─────────────────────── */
 // Admin backup + restore card. Backup is a tokenized anchor
 // download; restore is a multipart upload guarded by a hard-confirm.
-function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) {
+function AdminBackupRestore({ downloadBackup, accountId }: {
+  downloadBackup: () => Promise<Failure | null>
+  /** The signed-in account: a restore's outcome is said to it only. */
+  accountId: number
+}) {
   const [file, setFile] = useState<File | null>(null)
-  const [submitting, setSubmitting] = useState(false)
-  const [status, setStatus] = useState<string>('')
   const [doneBlocked, setDoneBlocked] = useState(false)
+  const [downloadFailed, setDownloadFailed] = useState<Failure | null>(null)
+  // A refusal that lands after the dialog was left is said by the panel's
+  // record of the last restore (below), not a second time by the flow.
+  const restoreFlow = useConfirmedAction<File>(f => `restoring the database from ${f.name}`, { lateFailureInPanel: false })
+  const [restoreSaid, sayRestore] = useSaid()
+  const submitting = restoreFlow.busy
+  // What came of the last restore lives outside this panel (restoreOutcome):
+  // the restore can end after the panel, or the whole Admin page, has gone.
+  // While the panel is up it says it, so the app's alert does not.
+  const { outcome } = useRestoreOutcome()
+  useEffect(() => backupPanelMounted(), [])
+  const restored = outcome && outcome.accountId === accountId && outcome.ok ? outcome.file : null
+  // An outcome that lands while this panel is up is said in its status line,
+  // whichever panel sent the restore (the admin may have left the section
+  // and come back): the notice itself is not read out.
+  const outcomeAtMount = useRef(outcome)
+  useEffect(() => {
+    if (!outcome || outcome === outcomeAtMount.current || outcome.accountId !== accountId) return
+    outcomeAtMount.current = outcome
+    if (outcome.ok) sayRestore(`Restored the database from ${outcome.file}. Restart Aurora now.`)
+  }, [outcome, accountId, sayRestore])
+  const lastFailure = outcome && outcome.accountId === accountId && !outcome.ok ? outcome.failure : null
+  const restoreRef = useRef<HTMLButtonElement | null>(null)
+  const noticeRef = useRef<HTMLDivElement | null>(null)
   // The restore POST can take minutes — guard against setState after
   // unmount if the admin tabs away mid-upload.
   const mountedRef = useRef(true)
   useEffect(() => () => { mountedRef.current = false }, [])
 
-  const onSubmit = async () => {
-    if (!file) return
-    const sizeMB = (file.size / 1024 / 1024).toFixed(1)
-    const ok = window.confirm(
-      `RESTORE — destructive operation\n\n` +
-      `Overwrite ALL data with the contents of "${file.name}" (${sizeMB} MB)?\n\n` +
-      `Aurora MUST be restarted after the restore completes. This cannot be undone except by ` +
-      `restoring a different backup.`
-    )
-    if (!ok) return
-    setSubmitting(true)
-    setStatus('Uploading + restoring — may take a few minutes…')
+  const onSubmit = () => {
+    if (!file || submitting || doneBlocked) return
+    restoreFlow.ask(file)
+  }
+
+  // The dialog stays up while the restore runs (one answer, one upload)
+  // until it offers its way out; the outcome goes to restoreOutcome either way.
+  const restore = () => restoreFlow.run(async f => {
+    // The server runs the restore on this request: if the page goes (a
+    // reload, a closed tab), the restore is stopped part way. The browser is
+    // asked to check before the page is left, until the answer is in.
+    const release = holdPageForRestore()
     try {
       const form = new FormData()
-      form.append('backup', file)
+      form.append('backup', f)
       const res = await apiFetchResponse('/api/admin/restore', {
         method: 'POST',
         body: form,
@@ -155,64 +192,70 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
           const nested = (errField as Record<string, unknown>).message
           if (typeof nested === 'string') errMsg = nested
         }
-        throw new Error(errMsg)
+        // An APIError, so the status reaches the words below.
+        throw new APIError(res.status, errMsg, body)
       }
-      // alert() survives an unmounted React component, so the admin
-      // hears the outcome even if they tabbed away mid-restore.
-      window.alert((body && body.message) || 'The database has been restored. RESTART AURORA NOW to use the new data.')
-      if (!mountedRef.current) return
-      setStatus('Restore complete — RESTART AURORA NOW')
+      finishRestore({ accountId, file: f.name, ok: true })
       // Lock the button after success.
-      setDoneBlocked(true)
+      if (mountedRef.current) setDoneBlocked(true)
+      return null
     } catch (e) {
       console.error('[Aurora] Restore failed', e)
-      const msg = e instanceof Error ? e.message : 'see console'
-      // alert on failure too, so the admin still hears about it.
-      window.alert('Restore failed: ' + msg)
-      if (!mountedRef.current) return
-      setStatus('Failed: ' + msg)
+      const failure = restoreFailure(e)
+      finishRestore({ accountId, file: f.name, ok: false, failure })
+      return failure
     } finally {
-      if (mountedRef.current) setSubmitting(false)
+      release()
     }
-  }
+  })
 
   return (
     <div className="space-y-6">
-      <div className="glass-panel rounded-2xl p-6">
-        <h2 className="text-white font-semibold mb-2">Database Backup</h2>
-        <p className="text-white/50 text-sm mb-4 leading-relaxed">
+      {restored && (
+        <StandingNotice ref={noticeRef} title="Restart Aurora now" onDismiss={clearRestoreOutcome}>
+          The database has been restored from {restored}. Until Aurora is restarted, the server goes on
+          working from what it held before the restore, and what people see can be out of date.
+        </StandingNotice>
+      )}
+      <div className="bg-surface-raised rounded-control p-6">
+        <h3 className="text-ink font-semibold mb-2">Database backup</h3>
+        <p className="text-ink-2 text-sm mb-4 leading-relaxed">
           Download a binary snapshot of Aurora's database — users, libraries, media items, watch
           parties, progress, settings. Use this before a server migration or as a periodic safety net.
         </p>
-        <p className="text-white/50 text-xs mb-4 leading-relaxed">
-          <strong className="text-white/60">Included:</strong> all Aurora tables except ephemeral
+        <p className="text-ink-2 text-xs mb-4 leading-relaxed">
+          <strong className="text-ink-2">Included:</strong> all Aurora tables except ephemeral
           session state (refresh tokens, scanner progress).
           <br />
-          <strong className="text-white/60">Not included:</strong> the media files themselves and
+          <strong className="text-ink-2">Not included:</strong> the media files themselves and
           Aurora's config file (<code>aurora.env</code>) — copy those manually.
           <br />
-          <strong className="text-white/60">Format:</strong> PostgreSQL custom-format dump (<code>.dump</code>)
+          <strong className="text-ink-2">Format:</strong> PostgreSQL custom-format dump (<code>.dump</code>)
           — restorable here or via <code>pg_restore</code> from the command line.
         </p>
         <button
-          onClick={downloadBackup}
-          className="px-5 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+          onClick={() => {
+            setDownloadFailed(null)
+            void downloadBackup().then(failure => { if (mountedRef.current) setDownloadFailed(failure) })
+          }}
+          className="stage-btn stage-btn-primary"
         >
-          <Icon name="folder" size={16} /> Download Backup
+          <Icon name="folder" size={16} /> Download backup
         </button>
+        <FailureNote failure={downloadFailed} className="mt-3" />
       </div>
 
-      <div className="glass-panel rounded-2xl p-6" style={{ border: '1px solid rgba(255, 175, 0, 0.25)' }}>
-        <h2 className="font-semibold mb-2" style={{ color: '#ffd685' }}>Database Restore</h2>
-        <p className="text-white/50 text-sm mb-3 leading-relaxed">
+      <div className="bg-surface-raised rounded-control p-6">
+        <h3 className="text-warn font-semibold mb-2">Database restore</h3>
+        <p className="text-ink-2 text-sm mb-3 leading-relaxed">
           Upload a previously-downloaded <code>.dump</code> backup file to restore the database.
         </p>
-        <p className="text-sm mb-3 leading-relaxed px-3 py-2 rounded-lg border-l-2" style={{ color: '#ffd685', background: 'rgba(255, 175, 0, 0.08)', borderColor: 'rgba(255, 175, 0, 0.6)' }}>
+        <p className="text-warn text-sm mb-3 leading-relaxed pl-3 border-l-2 border-current">
           <strong>Destructive operation.</strong> This OVERWRITES all existing data. After restore
           completes, <strong>Aurora must be restarted</strong> — current connections will see stale
           state until you do.
         </p>
-        <p className="text-white/50 text-xs mb-4 leading-relaxed">
+        <p className="text-ink-2 text-xs mb-4 leading-relaxed">
           The restore wraps every change in a single transaction. If any statement fails, the entire
           restore rolls back and the database is left in an empty (wiped) state — you can retry with
           a different file. Legacy <code>.sql.gz</code> backups need to be restored via the
@@ -224,27 +267,70 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
             accept=".dump,application/octet-stream"
             disabled={submitting || doneBlocked}
             onChange={e => setFile(e.target.files?.[0] ?? null)}
-            className="text-sm text-white/70 file:mr-3 file:px-3 file:py-1.5 file:rounded-md file:border-0 file:bg-white/10 file:text-white/90 file:cursor-pointer hover:file:bg-white/15"
+            className="min-w-0 max-w-full text-sm text-ink-2 file:mr-3 file:px-3 file:py-1.5 file:rounded-chip file:border-0 file:bg-surface-raised-2 file:text-ink file:cursor-pointer hover:file:bg-action-soft"
           />
           <button
-            onClick={onSubmit}
+            ref={restoreRef}
+            onClick={e => {
+              // Not every browser focuses a button on a click, and the
+              // dialog gives focus back to what had it.
+              e.currentTarget.focus()
+              onSubmit()
+            }}
             disabled={!file || submitting || doneBlocked}
-            className="px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+            className="stage-btn stage-btn-destructive"
           >
-            <Icon name="refresh" size={16} /> {doneBlocked ? 'Restart Aurora to continue' : 'Restore Database'}
+            <Icon name="refresh" size={16} /> {doneBlocked ? 'Restart Aurora to continue' : 'Restore database'}
           </button>
         </div>
         {file && !doneBlocked && (
-          <p className="text-white/50 text-xs mt-2">
+          <p className="text-ink-2 text-xs mt-2">
             Selected: {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)
           </p>
         )}
-        {status && (
-          <p className={`text-sm mt-3 ${status.startsWith('Failed') ? 'text-red-300' : 'text-white/70'}`}>{status}</p>
-        )}
+        <StatusLine said={restoreSaid} className="mt-3" />
+        <div className="mt-3 empty:hidden">{restoreFlow.panelNotes}</div>
+        {/* The last restore's failure, kept in the panel once its dialog is
+            put down (or said here first, when the dialog was left): one that
+            stopped part way can have left the database empty. */}
+        {!restoreFlow.dialog.open && !restoreFlow.busy && <FailureNote failure={lastFailure} className="mt-3" />}
       </div>
+
+      <ConfirmDialog
+        {...restoreFlow.dialog}
+        error={restoreFlow.dialog.error && <FailureText failure={restoreFlow.dialog.error} />}
+        stopWaitingLabel="Close and keep it running"
+        title={restoreFlow.asked ? `Restore the database from ${restoreFlow.asked.name}?` : 'Restore the database?'}
+        confirmLabel={submitting ? 'Restoring…' : 'Restore database'}
+        destructive
+        safeFirst
+        onConfirm={() => { void restore() }}
+        // A restore that finished locks the button that asked: the notice
+        // that says to restart takes the focus.
+        fallbackFocus={() => noticeRef.current ?? restoreRef.current}
+        details={submitting
+          ? <p role="status" className="text-[14px] leading-snug text-ink">Uploading and restoring. This can take several minutes. Keep this tab open until it says it has finished: reloading or closing it, or losing the connection, stops the restore part way and can leave the database empty.</p>
+          : undefined}
+      >
+        Everything Aurora holds now is replaced by what is in this file{restoreFlow.asked ? ` (${(restoreFlow.asked.size / 1024 / 1024).toFixed(1)} MB)` : ''}:
+        accounts, profiles, libraries, watch history, lists and settings. What is there now cannot be brought
+        back except from another backup. Aurora must be restarted once the restore is done. Keep this tab open
+        until it says it has finished: reloading or closing it, or losing the connection, stops the restore part
+        way and can leave the database empty.
+      </ConfirmDialog>
     </div>
   )
+}
+
+/** What a restore that did not finish is said to have done. Where it stopped
+ *  decides the database's state: every refusal of the file comes before the
+ *  old data is cleared, and a failure of the restore itself comes after. */
+function restoreFailure(e: unknown): Failure {
+  // Aurora itself never answers a restore with 502, 503 or 504: those come
+  // from a proxy in front of it that gave up waiting, while the restore may
+  // still be running. They are no answer, not a restore that failed.
+  const lost = 'The connection to the server failed during the restore, so it is not known how far it got: the database may be as it was, restored, or empty. Check the server before going on.'
+  return adminFailure(e, 'restore the database', { 502: lost, 503: lost, 504: lost, 400: 'The server refused this file, and the database was not changed.', 409: 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.', 413: 'The file is too large to restore from here, and the database was not changed.', noAnswer: lost, otherwise: 'The restore did not finish. Depending on where it stopped, the database is either as it was or empty. Read what the server said before going on.' })
 }
 
 function NowPlayingWidget() {
@@ -276,9 +362,6 @@ function NowPlayingWidget() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   const nameFor = (s: ActiveStreamRow) => s.username || users.get(s.user_id) || `User ${s.user_id}`
-  // Initial for the avatar. Deliberately NOT nameFor()[0]: that falls back to
-  // `User 12`, which would render every unknown account as a uniform "U".
-  const initialFor = (s: ActiveStreamRow) => (s.username || users.get(s.user_id) || '?')[0]?.toUpperCase()
   // One group per VIEWER: a Chromecast's receiver session nests under the
   // local session driving it instead of standing beside it as an identical
   // second row. See lib/activeStreams for the orphan/cycle rules.
@@ -288,17 +371,17 @@ function NowPlayingWidget() {
   const roles = castRoles(items)
   const labelOf = (s: ActiveStreamRow) => castLabel(roles.get(s.id) ?? 'none')
   if (groups.length === 0) return (
-    <div className="glass-panel rounded-2xl p-6">
-      <h2 className="text-white font-semibold mb-2">Now Playing</h2>
-      <p className="text-white/50 text-sm">No active streams.</p>
+    <div className="bg-surface-raised rounded-control p-6">
+      <h3 className="text-ink font-semibold mb-2">Now playing</h3>
+      <p className="text-ink-2 text-sm">No active streams.</p>
     </div>
   )
   const kindBadge = (s: ActiveStreamRow) => (
-    <span className={`badge-glass text-xs ${s.kind === 'transcode' ? 'bg-amber-500/10 text-amber-300 border-amber-500/20' : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'}`}>{s.kind}</span>
+    <span className={`badge-glass text-xs ${s.kind === 'transcode' ? 'bg-surface-raised-2 text-warn border-line' : 'bg-surface-raised-2 text-ok border-line'}`}>{s.kind}</span>
   )
   return (
-    <div className="glass-panel rounded-2xl p-6">
-      <h2 className="text-white font-semibold mb-4">Now Playing ({groups.length})</h2>
+    <div className="bg-surface-raised rounded-control p-6">
+      <h3 className="text-ink font-semibold mb-4">Now playing ({groups.length})</h3>
       <div className="space-y-3">
         {groups.map(({ row: s, castRows }) => (
           // The relationship is carried by the TEXT ("Cast receiver for
@@ -308,14 +391,15 @@ function NowPlayingWidget() {
           // confusion this change exists to end. The <ul>/<li> below groups
           // the receivers of one session; it does not, on its own, tie them
           // to the row above.
-          <div key={s.id} className="border-b border-white/[0.03] last:border-0">
+          <div key={s.id} className="border-b border-line last:border-0">
             <div className="flex items-center gap-4 py-2">
-              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
-                {initialFor(s)}
-              </div>
+              {/* The disc's initial is the account's own name's, never the
+                  "User 12" fallback's, which would make every unknown account
+                  a uniform "U". */}
+              <ProfileAvatar name={s.username || users.get(s.user_id) || '?'} memberKey={s.user_id} size={40} />
               <div className="flex-1 min-w-0">
-                <p className="text-white/90 text-sm font-medium truncate">{nameFor(s)}</p>
-                <p className="text-white/50 text-xs truncate">
+                <p className="text-ink text-sm font-medium truncate">{nameFor(s)}</p>
+                <p className="text-ink-2 text-xs truncate">
                   {s.file_name}
                   {s.resolution && ` · ${s.resolution}`}
                   {s.kind === 'direct' && ` · Direct Play`}
@@ -338,18 +422,18 @@ function NowPlayingWidget() {
             {castRows.length > 0 && (
               <ul className="list-none m-0 p-0">
                 {castRows.map(c => (
-                  <li key={c.id} className="flex items-center gap-4 py-2 pl-6 ml-5 border-l border-white/10">
-                    <Icon name="tv" size={16} className="text-purple-300 flex-shrink-0" />
+                  <li key={c.id} className="flex items-center gap-4 py-2 pl-6 ml-5 border-l border-line">
+                    <Icon name="tv" size={16} className="text-ink flex-shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <p className="text-white/70 text-sm truncate">
+                      <p className="text-ink-2 text-sm truncate">
                         Cast receiver for {nameFor(s)}
                         {/* A clone the receiver has not fetched from yet:
                             minted, not yet leased (MarkCastHeld is earned by
                             a real fetch). Usually a blink; a persistent one
                             is a clone the TV never took. */}
-                        {!c.cast_held && <span className="text-white/50"> · connecting</span>}
+                        {!c.cast_held && <span className="text-ink-2"> · connecting</span>}
                       </p>
-                      <p className="text-white/50 text-xs truncate">
+                      <p className="text-ink-2 text-xs truncate">
                         {c.file_name}
                         {c.resolution && ` · ${c.resolution}`}
                       </p>
@@ -387,16 +471,20 @@ const ACTIVE_STATES = new Set<UpdateState>(['checking', 'updating', 'building', 
 
 function updateStateMeta(state: UpdateState): { label: string; color: string; spinning: boolean } {
   switch (state) {
-    case 'checking':      return { label: 'Checking',     color: 'bg-blue-500/10 text-blue-300 border-blue-500/20', spinning: true }
-    case 'updating':      return { label: 'Pulling',      color: 'bg-blue-500/10 text-blue-300 border-blue-500/20', spinning: true }
-    case 'building':      return { label: 'Building',     color: 'bg-amber-500/10 text-amber-300 border-amber-500/20', spinning: true }
-    case 'installing':    return { label: 'Installing',   color: 'bg-amber-500/10 text-amber-300 border-amber-500/20', spinning: true }
-    case 'restarting':    return { label: 'Restarting',   color: 'bg-amber-500/10 text-amber-300 border-amber-500/20', spinning: true }
-    case 'success':       return { label: 'Up to date',   color: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20', spinning: false }
-    case 'failed':        return { label: 'Failed',       color: 'bg-red-500/10 text-red-300 border-red-500/20', spinning: false }
-    case 'misconfigured': return { label: 'Misconfigured', color: 'bg-amber-500/10 text-amber-300 border-amber-500/20', spinning: false }
-    case 'idle':          return { label: 'Up to date',   color: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20', spinning: false }
-    case 'unknown':       return { label: 'Not run yet',  color: 'bg-white/5 text-white/50 border-white/10', spinning: false }
+    case 'checking':      return { label: 'Checking',     color: 'bg-surface-raised-2 text-ink-2 border-line', spinning: true }
+    case 'updating':      return { label: 'Pulling',      color: 'bg-surface-raised-2 text-ink-2 border-line', spinning: true }
+    case 'building':      return { label: 'Building',     color: 'bg-surface-raised-2 text-warn border-line', spinning: true }
+    case 'installing':    return { label: 'Installing',   color: 'bg-surface-raised-2 text-warn border-line', spinning: true }
+    case 'restarting':    return { label: 'Restarting',   color: 'bg-surface-raised-2 text-warn border-line', spinning: true }
+    case 'success':       return { label: 'Up to date',   color: 'bg-surface-raised-2 text-ok border-line', spinning: false }
+    case 'failed':        return { label: 'Failed',       color: 'bg-surface-raised-2 text-danger-ink border-line', spinning: false }
+    case 'misconfigured': return { label: 'Misconfigured', color: 'bg-surface-raised-2 text-warn border-line', spinning: false }
+    case 'idle':          return { label: 'Up to date',   color: 'bg-surface-raised-2 text-ok border-line', spinning: false }
+    case 'unknown':       return { label: 'Not run yet',  color: 'bg-surface-raised-2 text-ink-2 border-line', spinning: false }
+    // A state this build has no word for: the server can be newer than the
+    // page. Shown as the server names it, not left undefined (which took the
+    // whole admin page down when its fields were read).
+    default:              return { label: String(state), color: 'bg-surface-raised-2 text-ink-2 border-line', spinning: false }
   }
 }
 
@@ -503,9 +591,9 @@ function UpdatePanel() {
 
   if (!status) {
     return (
-      <div className="glass-panel rounded-2xl p-6">
-        <h2 className="text-white font-semibold mb-2">Updates</h2>
-        <p className="text-white/50 text-sm">{error ?? 'Loading update status…'}</p>
+      <div className="bg-surface-raised rounded-control p-6">
+        <h3 className="text-ink font-semibold mb-2">Updates</h3>
+        <p className="text-ink-2 text-sm">{error ?? 'Loading update status…'}</p>
       </div>
     )
   }
@@ -515,10 +603,10 @@ function UpdatePanel() {
   const shortSha = (s?: string | null) => (s ? s.slice(0, 7) : null)
 
   return (
-    <div className="glass-panel rounded-2xl p-6">
+    <div className="bg-surface-raised rounded-control p-6">
       <div className="flex items-start justify-between gap-4 mb-4">
         <div className="flex items-center gap-3">
-          <h2 className="text-white font-semibold">Updates</h2>
+          <h3 className="text-ink font-semibold">Updates</h3>
           <span className={`badge-glass text-xs ${meta.color}`}>
             {meta.spinning && (
               <span className="inline-block w-2 h-2 rounded-full bg-current mr-1.5 animate-pulse" />
@@ -530,7 +618,7 @@ function UpdatePanel() {
           type="button"
           onClick={handleTrigger}
           disabled={triggering || isActive}
-          className="px-4 py-2 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 text-purple-200 text-sm font-medium border border-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="stage-btn stage-btn-ghost"
           title={isActive ? 'An update is already in progress' : 'Pull, rebuild, restart now'}
         >
           {triggering ? 'Starting…' : isActive ? 'Updating…' : 'Update now'}
@@ -538,9 +626,9 @@ function UpdatePanel() {
       </div>
 
       <div className="space-y-2 text-sm">
-        <p className="text-white/85">{status.message}</p>
+        <p className="text-ink">{status.message}</p>
 
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-white/50">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-2">
           <span>Last check: {timeAgo(status.at)}</span>
           {shortSha(status.new_sha) && (
             <span className="font-mono">
@@ -553,13 +641,13 @@ function UpdatePanel() {
         </div>
 
         {status.state === 'unknown' && (
-          <p className="text-white/50 text-xs">
-            The auto-update timer fires every 5 minutes. If this never populates, run <code className="text-purple-300 bg-white/[0.04] px-1 rounded">systemctl status aurora-update.timer</code> on the server.
+          <p className="text-ink-2 text-xs">
+            The auto-update timer fires every 5 minutes. If this never populates, run <code className="text-ink bg-surface-raised-2 px-1 rounded-chip">systemctl status aurora-update.timer</code> on the server.
           </p>
         )}
 
         {error && (
-          <p className="text-red-300 text-xs">{error}</p>
+          <p className="text-danger-ink text-xs">{error}</p>
         )}
       </div>
     </div>
@@ -575,7 +663,7 @@ function UpdatePanel() {
 // The preview's items_to_delete is echoed back on confirm. If the catalog moved
 // in between (a scan finished, another admin acted) the server answers 409 and
 // nothing happens, so the number an admin approves is the number that goes.
-function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void }) {
+function RetypeLibraryButton({ lib, onDone, say }: { lib: Library; onDone: () => void; say: (text: string) => void }) {
   // BOTH targets are offered, including the one the library already claims.
   //
   // Offering only the opposite type made the documented repair path unreachable
@@ -584,96 +672,105 @@ function RetypeLibraryButton({ lib, onDone }: { lib: Library; onDone: () => void
   // with movie rows still present, the only button was "Change to Movies", whose
   // preview correctly reported 0 items to delete ("nothing to delete") and whose
   // confirm set the library back to movie. A review found it.
-  const [target, setTarget] = useState<'movie' | 'show' | null>(null)
-  const [preview, setPreview] = useState<RetypePreview | null>(null)
-  const [busy, setBusy] = useState(false)
+  const [checking, setChecking] = useState(false)
+  // A check that could not be made, said beside the buttons. The change it
+  // leads to is asked in the dialog, which says a refusal itself.
+  const [checkFailed, setCheckFailed] = useState<Failure | null>(null)
+  const change = useConfirmedAction<RetypePreview>(p => `changing ${p.library_name} to ${p.target_type === 'show' ? 'TV shows' : 'Movies'}`)
+  const preview = change.asked
+  const busy = checking || change.busy
+  const rowRef = useRef<HTMLDivElement | null>(null)
 
   const open = async (t: 'movie' | 'show') => {
-    setBusy(true)
-    try { setTarget(t); setPreview(await previewLibraryRetype(lib.id, t)) }
+    // Not `disabled` while it is out: the dialog gives the focus back to the
+    // button that asked, and a disabled one cannot take it.
+    if (busy) return
+    setChecking(true)
+    setCheckFailed(null)
+    try { change.ask(await previewLibraryRetype(lib.id, t)) }
     catch (e) {
-      setTarget(null)
-      window.alert('Could not check: ' + (e instanceof Error ? e.message : 'unknown'))
+      setCheckFailed(adminFailure(e, `check what changing ${lib.name} would delete`, { read: true, 404: `${lib.name} is no longer on the server.` }))
     }
-    finally { setBusy(false) }
+    finally { setChecking(false) }
   }
 
-  const close = () => { setPreview(null); setTarget(null) }
-
-  const confirm = async () => {
-    if (!preview || !target) return
-    setBusy(true)
+  const confirmRetype = () => change.run(async p => {
     try {
-      const res = await retypeLibrary(lib.id, target, preview.items_to_delete)
-      close()
-      window.alert(`Deleted ${res.items_deleted} item(s) and started a rescan.`)
+      const res = await retypeLibrary(lib.id, p.target_type, p.items_to_delete)
+      say(`Deleted ${res.items_deleted} item${res.items_deleted === 1 ? '' : 's'} from ${p.library_name} and started a rescan.`)
       onDone()
+      return null
     } catch (e) {
-      // A 409 here is the interlock doing its job, and the message says so.
-      window.alert('Change failed: ' + (e instanceof Error ? e.message : 'unknown'))
-    } finally { setBusy(false) }
-  }
+      if (e instanceof APIError && e.status === 404) {
+        say(`${p.library_name} is no longer on the server.`)
+        onDone()
+        return null
+      }
+      // A 409 here is the interlock doing its job: the count shown is not the
+      // count there now (or a scan holds the library), and nothing went.
+      return adminFailure(e, `change ${p.library_name}`, { 409: 'Nothing was deleted. The library has changed since it was checked, or a scan of it is running. Cancel, wait for any scan to finish, and check again to see the new figure.', 404: `${p.library_name} is no longer on the server.` })
+    }
+  })
 
-  if (!preview) {
-    return (
-      <div className="flex gap-2 mt-2">
+  const label = (t: 'movie' | 'show') => (t === 'show' ? 'TV shows' : 'Movies')
+  return (
+    <div ref={rowRef} className="mt-3">
+      <div className="flex flex-wrap gap-2.5">
         {(['movie', 'show'] as const).map(t => (
           <button
             key={t}
-            onClick={() => void open(t)}
-            disabled={busy}
+            onClick={e => { e.currentTarget.focus(); void open(t) }}
+            aria-disabled={busy || undefined}
+            data-retype={t}
             title={t === lib.type
               ? `Re-apply ${t === 'show' ? 'TV Shows' : 'Movies'}: purges any catalog rows that disagree with the library's type, then rescans`
               : `Change this library to ${t === 'show' ? 'TV Shows' : 'Movies'}`}
-            className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-50"
+            className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
           >
-            {busy ? 'Checking…' : t === lib.type
+            {checking ? 'Checking…' : t === lib.type
               ? `Re-apply ${t === 'show' ? 'TV' : 'Movies'}`
               : `Change to ${t === 'show' ? 'TV' : 'Movies'}`}
           </button>
         ))}
       </div>
-    )
-  }
-
-  return (
-    <div className="w-full mt-3 p-3 rounded-lg bg-red-500/[0.07] border border-red-500/20">
-      <p className="text-red-200 text-xs font-medium">
-        Change “{preview.library_name}” from {preview.current_type} to {preview.target_type}?
-      </p>
-      <p className="text-white/70 text-xs mt-2">
-        This deletes {preview.items_to_delete} catalog item(s) and everything attached to them,
-        then rescans from disk. {preview.items_kept > 0 && `${preview.items_kept} item(s) already of the target type are kept. `}
-        The files on disk are not touched. There is no undo.
-      </p>
-      {preview.casualties && preview.casualties.length > 0 && (
-        <ul className="mt-2 space-y-0.5">
-          {preview.casualties.map(c => (
-            <li key={c.table} className="text-amber-200/90 text-xs">
-              {c.rows} × <span className="font-mono">{c.table}</span>{c.why ? ` — ${c.why}` : ''}
-            </li>
-          ))}
-        </ul>
-      )}
-      {preview.items_to_delete === 0 && (
-        <p className="text-white/50 text-xs mt-2">Nothing to delete — this only changes the type and rescans.</p>
-      )}
-      <div className="flex gap-2 mt-3">
-        <button
-          onClick={() => void confirm()}
-          disabled={busy}
-          className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-200 text-xs rounded disabled:opacity-50"
-        >
-          {busy ? 'Working…' : 'Delete and rescan'}
-        </button>
-        <button
-          onClick={close}
-          disabled={busy}
-          className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-50"
-        >
-          Cancel
-        </button>
-      </div>
+      <FailureNote failure={checkFailed} className="mt-2" />
+      <div className="mt-2 empty:hidden">{change.panelNotes}</div>
+      <ConfirmDialog
+        {...change.dialog}
+        error={change.dialog.error && <FailureText failure={change.dialog.error} />}
+        title={preview
+          ? (preview.current_type === preview.target_type
+              ? `Re-apply ${label(preview.target_type)} to ${preview.library_name}?`
+              : `Change ${preview.library_name} to ${label(preview.target_type)}?`)
+          : ''}
+        confirmLabel={change.busy ? 'Working…' : preview && preview.items_to_delete === 0 ? 'Change and rescan' : 'Delete and rescan'}
+        destructive
+        safeFirst
+        onConfirm={() => { void confirmRetype() }}
+        fallbackFocus={() => rowRef.current?.querySelector<HTMLElement>(`[data-retype="${preview?.target_type ?? lib.type}"]`)}
+        details={preview && (
+          <div className="text-[14px] leading-snug">
+            {preview.casualties && preview.casualties.length > 0 && (
+              <ul className="space-y-0.5" aria-label="What is deleted">
+                {preview.casualties.map(c => (
+                  <li key={c.table} className="text-warn">
+                    <span className="tabular-nums">{c.rows}</span> × <span className="font-mono break-all">{c.table}</span>{c.why ? ` — ${c.why}` : ''}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {preview.items_to_delete === 0 && (
+              <p className="text-ink-2">Nothing to delete — this only changes the type and rescans.</p>
+            )}
+          </div>
+        )}
+      >
+        {preview && <>
+          This deletes {preview.items_to_delete} catalog item{preview.items_to_delete === 1 ? '' : 's'} and everything attached to them,
+          then rescans from disk. {preview.items_kept > 0 && `${preview.items_kept} item${preview.items_kept === 1 ? '' : 's'} already of the target type ${preview.items_kept === 1 ? 'is' : 'are'} kept. `}
+          The files on disk are not touched. There is no undo.
+        </>}
+      </ConfirmDialog>
     </div>
   )
 }
@@ -690,6 +787,30 @@ function AdminLibrariesTab() {
   // here is swallowed: it is a diagnostic, and losing it must not take the
   // libraries list down with it.
   const [health, setHealth] = useState<LibraryHealthReport | null>(null)
+  const [said, say] = useSaid()
+  const [addFailed, setAddFailed] = useState<Failure | null>(null)
+  // A scan that did not start, said under the row it was asked from.
+  const [scanFailed, setScanFailed] = useState<{ id: number; failure: Failure } | null>(null)
+  // The library a delete is being asked about, and what came of the answer.
+  const del = useConfirmedAction<Library>(lib => `deleting the library ${lib.name}`)
+  const listHeadingRef = useRef<HTMLHeadingElement | null>(null)
+  const confirmDelete = () => del.run(async lib => {
+    try {
+      await deleteLibrary(lib.id)
+      say(`Deleted the library ${lib.name}.`)
+      await reload()
+      return null
+    } catch (e) {
+      // Already gone: there is nothing to answer again. The list is read
+      // again and says so.
+      if (e instanceof APIError && e.status === 404) {
+        say(`${lib.name} was already gone from the server.`)
+        await reload()
+        return null
+      }
+      return adminFailure(e, `delete ${lib.name}`)
+    }
+  })
   const reload = useCallback(async () => {
     try { setItems(await listLibraries()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
@@ -700,71 +821,154 @@ function AdminLibrariesTab() {
   const healthFor = (id: number) => health?.libraries.find(h => h.library_id === id)
   return (
     <div className="space-y-4">
-      <div className="glass-panel rounded-2xl p-5">
-        <h2 className="text-white font-semibold mb-3">Add Library</h2>
+      <div className="bg-surface-raised rounded-control p-5">
+        <h3 className="text-ink font-semibold mb-3">Add a library</h3>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
-          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Name" className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
-          <select value={newType} onChange={e => setNewType(e.target.value as 'movie' | 'show')} className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
+          <input aria-label="Library name" value={newName} onChange={e => setNewName(e.target.value)} placeholder="Name" className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
+          <select aria-label="Library type" value={newType} onChange={e => setNewType(e.target.value as 'movie' | 'show')} className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm">
             <option value="movie">Movies</option>
             <option value="show">TV Shows</option>
           </select>
-          <input value={newPaths} onChange={e => setNewPaths(e.target.value)} placeholder="/path/to/library (comma-separated for multi)" className="md:col-span-2 px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          <input aria-label="Folders on the server, separated by commas" value={newPaths} onChange={e => setNewPaths(e.target.value)} placeholder="/path/to/library (comma-separated for multi)" className="md:col-span-2 px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </div>
         <button
           disabled={!newName || !newPaths || creating}
           onClick={async () => {
             setCreating(true)
+            setAddFailed(null)
             try {
               await createLibrary({ name: newName, type: newType, paths: newPaths.split(',').map(s => s.trim()).filter(Boolean) })
               setNewName(''); setNewPaths('')
               await reload()
             } catch (e) {
-              window.alert('Failed: ' + (e instanceof Error ? e.message : 'unknown'))
+              setAddFailed(adminFailure(e, 'add the library', { 400: 'The server refused this library.' }))
             } finally { setCreating(false) }
           }}
-          className="mt-3 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+          className="stage-btn stage-btn-primary mt-3"
         >
           {creating ? 'Adding…' : 'Add'}
         </button>
+        <FailureNote failure={addFailed} className="mt-3" />
       </div>
-      <div className="glass-panel rounded-2xl p-5">
-        <h2 className="text-white font-semibold mb-3">Existing Libraries</h2>
-        {err && <p className="text-red-300 text-sm">{err}</p>}
-        {items === null && <p className="text-white/50 text-sm">Loading…</p>}
-        {items && items.length === 0 && <p className="text-white/50 text-sm">No libraries yet.</p>}
+      <div className="bg-surface-raised rounded-control p-5">
+        <h3 ref={listHeadingRef} tabIndex={-1} className="text-ink font-semibold mb-3">Libraries on this server</h3>
+        <StatusLine said={said} className="mb-3" />
+        <div className="mb-3 empty:hidden">{del.panelNotes}</div>
+        {err && <p className="text-danger-ink text-sm">{err}</p>}
+        {items === null && <p className="text-ink-2 text-sm">Loading…</p>}
+        {items && items.length === 0 && <p className="text-ink-2 text-sm">No libraries yet.</p>}
         {health?.install_warning && (
-          <div className="mb-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
-            <p className="text-amber-200 text-xs">{health.install_warning}</p>
+          <div className="mb-3 p-3 rounded-control bg-surface-raised-2 border border-line">
+            <p className="text-warn text-xs">{health.install_warning}</p>
           </div>
         )}
         {items && items.map(lib => {
           const h = healthFor(lib.id)
           return (
-          <div key={lib.id} className="py-3 border-b border-white/[0.04] last:border-0">
+          <div key={lib.id} className="py-3 border-b border-line last:border-0">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0 flex-1">
-              <p className="text-white/90 text-sm font-medium truncate">{lib.name}</p>
-              <p className="text-white/50 text-xs truncate">
+              <p className="text-ink text-sm font-medium truncate">{lib.name}</p>
+              <p className="text-ink-2 text-xs truncate">
                 {lib.type} · {lib.paths.join(', ')}
                 {h && h.items > 0 && (
-                  <span className={h.warning ? 'text-amber-300' : ''}>
+                  <span className={h.warning ? 'text-warn' : ''}>
                     {' · '}{h.matched}/{h.items} matched ({h.matched_pct}%)
                   </span>
                 )}
               </p>
             </div>
-            <button onClick={async () => { try { await scanLibrary(lib.id); window.alert('Scan kicked off.') } catch (e) { window.alert('Scan failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded">Scan</button>
-            <button onClick={async () => { if (!window.confirm(`Delete library "${lib.name}" and all its media?`)) return; try { await deleteLibrary(lib.id); await reload() } catch (e) { window.alert('Delete failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Delete</button>
+            <button
+              onClick={async () => {
+                setScanFailed(null)
+                try { await scanLibrary(lib.id); say(`Started a scan of ${lib.name}.`) }
+                catch (e) {
+                  setScanFailed({ id: lib.id, failure: adminFailure(e, `start a scan of ${lib.name}`, { 409: `A scan of ${lib.name} is already running.`, 404: `${lib.name} is no longer on the server.` }) })
+                }
+              }}
+              className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
+            >Scan{' '}<span className="sr-only">{lib.name}</span></button>
+            <button
+              // While a delete is out, says so through the panel's line and
+              // asks nothing: a second question would name the wrong library.
+              {...del.openerProps}
+              onClick={e => {
+                // Not every browser focuses a button on a click, and the
+                // dialog gives focus back to what had it.
+                e.currentTarget.focus()
+                del.ask(lib)
+              }}
+              className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger"
+            >Delete{' '}<span className="sr-only">{lib.name}</span></button>
           </div>
+          {scanFailed?.id === lib.id && <FailureNote failure={scanFailed.failure} className="mt-2" />}
           {h?.warning && (
-            <p className="mt-2 text-amber-300/90 text-xs leading-relaxed">{h.warning}</p>
+            <p className="mt-2 text-warn text-xs leading-relaxed">{h.warning}</p>
           )}
-          <RetypeLibraryButton lib={lib} onDone={() => { void reload() }} />
+          <RetypeLibraryButton lib={lib} onDone={() => { void reload() }} say={say} />
           </div>
           )
         })}
       </div>
+      <ConfirmDialog
+        {...del.dialog}
+        error={del.dialog.error && <FailureText failure={del.dialog.error} />}
+        title={del.asked ? `Delete the library ${del.asked.name}?` : ''}
+        confirmLabel={del.busy ? 'Deleting…' : 'Delete library'}
+        destructive
+        safeFirst
+        onConfirm={() => { void confirmDelete() }}
+        // The row that asked goes with the library.
+        fallbackFocus={() => listHeadingRef.current}
+      >
+        Its titles leave Aurora, and with them everyone&rsquo;s watch history, lists and ratings for those
+        titles. The files on disk are not touched: adding the folders again brings the titles back, but not
+        that history. This cannot be undone.
+      </ConfirmDialog>
     </div>
+  )
+}
+
+// A row of the General settings: its words on the left and one control on
+// the right, the control named by the label and described by the line under
+// it.
+function NumberSetting({ label, desc, min, max, value, onChange }: {
+  label: string
+  desc: string
+  min: number
+  max: number
+  value: string
+  onChange: (value: string) => void
+}) {
+  const id = useId()
+  return (
+    <SettingRow label={label} desc={desc} htmlFor={id} descId={`${id}-desc`}>
+      <input
+        id={id}
+        type="number"
+        inputMode="numeric"
+        min={min}
+        max={max}
+        value={value}
+        aria-describedby={`${id}-desc`}
+        onChange={e => onChange(e.target.value)}
+        className="w-28 tabular-nums"
+      />
+    </SettingRow>
+  )
+}
+
+function SwitchSetting({ label, desc, checked, onChange }: {
+  label: string
+  desc: string
+  checked: boolean
+  onChange: (on: boolean) => void
+}) {
+  const id = useId()
+  return (
+    <SettingRow label={label} desc={desc} labelId={id} descId={`${id}-desc`}>
+      <SettingSwitch checked={checked} onChange={onChange} labelledBy={id} describedBy={`${id}-desc`} />
+    </SettingRow>
   )
 }
 
@@ -778,15 +982,35 @@ function AdminServerSettingsTab() {
   // The Invite UI now lives on the Users tab inside AdminView; that
   // component owns its own inviteCode state.
   const [arrTest, setArrTest] = useState<{ svc: string; msg: string } | null>(null)
+  // A read of the settings that failed (at the start, or after a save), and
+  // a save that failed, said under the Save button that was pressed.
+  const [loadFailed, setLoadFailed] = useState<Failure | null>(null)
+  const [saveFailed, setSaveFailed] = useState<{ from: 'general' | 'arr'; failure: Failure } | null>(null)
+  // The image cache: the question, what came of it, and the line that says so.
+  const purgeFlow = useConfirmedAction<true>(() => 'purging the image cache')
+  const [purgeSaid, sayPurge] = useSaid()
+  const purgeRef = useRef<HTMLButtonElement | null>(null)
+  const purge = () => purgeFlow.run(async () => {
+    try {
+      const r = await purgeImageCache()
+      sayPurge(`Purged ${r.files_purged ?? 0} files (${((r.bytes_freed ?? 0) / 1024 / 1024).toFixed(1)} MB freed).`)
+      return null
+    } catch (e) {
+      // A 5xx here is the server's set-up (no image proxy) or its disk, which
+      // trying again does not change: no promise that it will.
+      return adminFailure(e, 'purge the image cache', { otherwise: 'The server could not purge the image cache.' })
+    }
+  })
   const reload = useCallback(async () => {
-    try { setSettings(await getAllSettings()); setEdited({}) }
-    catch (e) { window.alert(e instanceof Error ? e.message : 'failed') }
+    try { setSettings(await getAllSettings()); setEdited({}); setLoadFailed(null) }
+    catch (e) { setLoadFailed(adminFailure(e, 'read the server settings', { read: true })) }
   }, [])
   useEffect(() => { void reload() }, [reload])
   const val = (k: string, dflt: string) => (k in edited ? edited[k] : settings?.[k] ?? dflt)
   const setVal = (k: string, v: string) => setEdited(prev => ({ ...prev, [k]: v }))
-  const save = async () => {
+  const save = async (from: 'general' | 'arr') => {
     if (Object.keys(edited).length === 0) return
+    setSaveFailed(null)
     setSaving(true)
     try {
       // Empty ARR API key means "keep existing"; never send '' or
@@ -799,84 +1023,32 @@ function AdminServerSettingsTab() {
       if (Object.keys(patch).length === 0) { setEdited({}); return }
       await updateSettings(patch); await reload()
     }
-    catch (e) { window.alert(e instanceof Error ? e.message : 'failed') }
+    catch (e) { setSaveFailed({ from, failure: adminFailure(e, 'save the settings', { 400: 'The server refused these settings.' }) }) }
     finally { setSaving(false) }
   }
 
   return (
     <div className="space-y-4">
-      <div className="glass-panel rounded-2xl p-5">
-        <h2 className="text-white font-semibold mb-3">Server Settings</h2>
-        {settings === null ? <p className="text-white/50 text-sm">Loading…</p> : (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-white/80 text-sm">Transcode max sessions</p>
-                <p className="text-white/50 text-xs">Concurrent FFmpeg processes; 0 = unlimited</p>
-              </div>
-              <input type="number" min={0} max={1000} value={val('transcode_max_sessions', '0')} onChange={e => setVal('transcode_max_sessions', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-white/80 text-sm">Transcode max sessions per user</p>
-                <p className="text-white/50 text-xs">Streams one account may hold; 0 = default (3)</p>
-              </div>
-              <input type="number" min={0} max={100} value={val('transcode_max_sessions_per_user', '0')} onChange={e => setVal('transcode_max_sessions_per_user', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-white/80 text-sm">Scan interval (seconds)</p>
-                <p className="text-white/50 text-xs">Default for new libraries; 0 = manual only</p>
-              </div>
-              <input type="number" min={0} max={86400} value={val('scan_interval_default', '0')} onChange={e => setVal('scan_interval_default', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-white/80 text-sm">Now Playing broadcast</p>
-                <p className="text-white/50 text-xs">Stream notifications to admin dashboard</p>
-              </div>
-              <input type="checkbox" checked={val('now_playing_enabled', 'true') === 'true'} onChange={e => setVal('now_playing_enabled', e.target.checked ? 'true' : 'false')} />
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-white/80 text-sm">Push notifications</p>
-                <p className="text-white/50 text-xs">Deliver via browser push services (Google/Apple/Mozilla); payloads are end-to-end encrypted</p>
-              </div>
-              <input type="checkbox" checked={val('push_enabled', 'true') === 'true'} onChange={e => setVal('push_enabled', e.target.checked ? 'true' : 'false')} />
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-white/80 text-sm">Filesystem watch</p>
-                <p className="text-white/50 text-xs">Auto-detect changes between scans</p>
-              </div>
-              <input type="checkbox" checked={val('filesystem_watch_enabled', 'true') === 'true'} onChange={e => setVal('filesystem_watch_enabled', e.target.checked ? 'true' : 'false')} />
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-white/80 text-sm">Requests enabled</p>
-                <p className="text-white/50 text-xs">Users can request titles via Radarr/Sonarr</p>
-              </div>
-              <input type="checkbox" checked={val('requests_enabled', 'false') === 'true'} onChange={e => setVal('requests_enabled', e.target.checked ? 'true' : 'false')} />
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-white/80 text-sm">Active request quota</p>
-                <p className="text-white/50 text-xs">Per user; requests over this are held for approval (default 10)</p>
-              </div>
-              <input type="number" min={1} max={10000} value={val('requests_quota_active', '10')} onChange={e => setVal('requests_quota_active', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-white/80 text-sm">Daily request quota</p>
-                <p className="text-white/50 text-xs">Per user, rolling 24h; requests over this are held for approval (default 25)</p>
-              </div>
-              <input type="number" min={1} max={10000} value={val('requests_quota_daily', '25')} onChange={e => setVal('requests_quota_daily', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
-            </div>
+      <div className="bg-surface-raised rounded-control p-5">
+        <h3 className="text-ink font-semibold mb-3">General</h3>
+        <FailureNote failure={loadFailed} className="mb-3" />
+        {settings === null ? (loadFailed ? null : <p className="text-ink-2 text-sm">Loading…</p>) : (
+          <div>
+            <NumberSetting label="Transcode max sessions" desc="Concurrent FFmpeg processes; 0 = unlimited" min={0} max={1000} value={val('transcode_max_sessions', '0')} onChange={v => setVal('transcode_max_sessions', v)} />
+            <NumberSetting label="Transcode max sessions per user" desc="Streams one account may hold; 0 = default (3)" min={0} max={100} value={val('transcode_max_sessions_per_user', '0')} onChange={v => setVal('transcode_max_sessions_per_user', v)} />
+            <NumberSetting label="Scan interval (seconds)" desc="Default for new libraries; 0 = manual only" min={0} max={86400} value={val('scan_interval_default', '0')} onChange={v => setVal('scan_interval_default', v)} />
+            <SwitchSetting label="Now playing broadcast" desc="Stream notifications to admin dashboard" checked={val('now_playing_enabled', 'true') === 'true'} onChange={on => setVal('now_playing_enabled', on ? 'true' : 'false')} />
+            <SwitchSetting label="Push notifications" desc="Deliver via browser push services (Google/Apple/Mozilla); payloads are end-to-end encrypted" checked={val('push_enabled', 'true') === 'true'} onChange={on => setVal('push_enabled', on ? 'true' : 'false')} />
+            <SwitchSetting label="Filesystem watch" desc="Auto-detect changes between scans" checked={val('filesystem_watch_enabled', 'true') === 'true'} onChange={on => setVal('filesystem_watch_enabled', on ? 'true' : 'false')} />
+            <SwitchSetting label="Requests enabled" desc="Users can request titles via Radarr/Sonarr" checked={val('requests_enabled', 'false') === 'true'} onChange={on => setVal('requests_enabled', on ? 'true' : 'false')} />
+            <NumberSetting label="Active request quota" desc="Per user; requests over this are held for approval (default 10)" min={1} max={10000} value={val('requests_quota_active', '10')} onChange={v => setVal('requests_quota_active', v)} />
+            <NumberSetting label="Daily request quota" desc="Per user, rolling 24h; requests over this are held for approval (default 25)" min={1} max={10000} value={val('requests_quota_daily', '25')} onChange={v => setVal('requests_quota_daily', v)} />
             <button
               disabled={saving || Object.keys(edited).length === 0}
-              onClick={save}
-              className="mt-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50"
+              onClick={() => void save('general')}
+              className="stage-btn stage-btn-primary mt-4"
             >{saving ? 'Saving…' : Object.keys(edited).length > 0 ? `Save ${Object.keys(edited).length} change${Object.keys(edited).length === 1 ? '' : 's'}` : 'No changes'}</button>
+            {saveFailed?.from === 'general' && <FailureNote failure={saveFailed.failure} className="mt-3" />}
           </div>
         )}
       </div>
@@ -884,30 +1056,42 @@ function AdminServerSettingsTab() {
       {/* Invite Codes section moved to Admin → Users tab (its natural home).
           See `tab === 'users'` block in AdminView. */}
 
-      <div className="glass-panel rounded-2xl p-5">
-        <h2 className="text-white font-semibold mb-3">Image Cache</h2>
-        <p className="text-white/50 text-xs mb-3">Delete cached TMDB poster/backdrop images. The cache repopulates on demand; useful after rescanning a large library or running out of disk.</p>
+      <div className="bg-surface-raised rounded-control p-5">
+        <h3 className="text-ink font-semibold mb-3">Image cache</h3>
+        <p className="text-ink-2 text-xs mb-3">Delete cached TMDB poster/backdrop images. The cache repopulates on demand; useful after rescanning a large library or running out of disk.</p>
         <button
-          onClick={async () => {
-            if (!window.confirm('Purge the image cache? Images will re-download on next view.')) return
-            try { const r = await purgeImageCache(); window.alert(`Purged ${r.files_purged ?? 0} files (${((r.bytes_freed ?? 0) / 1024 / 1024).toFixed(1)} MB freed).`) }
-            catch (e) { window.alert(e instanceof Error ? e.message : 'failed') }
-          }}
-          className="px-4 py-2 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-200 text-sm rounded-lg"
-        >Purge Image Cache</button>
+          ref={purgeRef}
+          {...purgeFlow.openerProps}
+          onClick={e => { e.currentTarget.focus(); purgeFlow.ask(true) }}
+          className="stage-btn stage-btn-ghost"
+        >Purge image cache</button>
+        <StatusLine said={purgeSaid} className="mt-3" />
+        <div className="mt-3 empty:hidden">{purgeFlow.panelNotes}</div>
+        <ConfirmDialog
+          {...purgeFlow.dialog}
+          error={purgeFlow.dialog.error && <FailureText failure={purgeFlow.dialog.error} />}
+          title="Purge the image cache?"
+          confirmLabel={purgeFlow.busy ? 'Purging…' : 'Purge image cache'}
+          onConfirm={() => { void purge() }}
+          fallbackFocus={() => purgeRef.current}
+        >
+          Every picture in the server&rsquo;s image cache is deleted from its disk: posters, backdrops, stills,
+          cast photos and the rest. Nothing else is: each image is fetched again the next time someone views it,
+          so pages show their images more slowly for a while.
+        </ConfirmDialog>
       </div>
 
-      <div className="glass-panel rounded-2xl p-5">
-        <h2 className="text-white font-semibold mb-3">Radarr / Sonarr (Requests)</h2>
+      <div className="bg-surface-raised rounded-control p-5">
+        <h3 className="text-ink font-semibold mb-3">Radarr and Sonarr (requests)</h3>
         {settings && (['radarr', 'radarr_4k', 'sonarr', 'sonarr_4k'] as const).map(svc => {
           const urlKey = `${svc}_url`, keyKey = `${svc}_api_key`
           const label = svc === 'radarr' ? 'Radarr' : svc === 'radarr_4k' ? 'Radarr 4K' : svc === 'sonarr' ? 'Sonarr' : 'Sonarr 4K'
           return (
-            <div key={svc} className="border-b border-white/[0.04] last:border-0 py-3">
-              <p className="text-white/80 text-sm mb-2">{label}</p>
+            <div key={svc} className="border-b border-line last:border-0 py-3">
+              <p className="text-ink text-sm mb-2">{label}</p>
               <div className="flex gap-2 flex-wrap">
-                <input value={val(urlKey, '')} onChange={e => setVal(urlKey, e.target.value)} placeholder="http://radarr:7878" className="flex-1 min-w-[200px] px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
-                <input type="password" data-screenshot-exclude="true" defaultValue="" onChange={e => setVal(keyKey, e.target.value)} placeholder={settings[keyKey] ? 'API Key (saved)' : 'API Key'} className="flex-1 min-w-[200px] px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+                <input aria-label={`${label} address`} value={val(urlKey, '')} onChange={e => setVal(urlKey, e.target.value)} placeholder={svc.startsWith('sonarr') ? 'http://sonarr:8989' : 'http://radarr:7878'} className="flex-1 min-w-[200px] px-3 py-1.5 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
+                <input type="password" aria-label={`${label} API key`} data-screenshot-exclude="true" defaultValue="" onChange={e => setVal(keyKey, e.target.value)} placeholder={settings[keyKey] ? 'API key (saved)' : 'API key'} className="flex-1 min-w-[200px] px-3 py-1.5 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
                 <button
                   onClick={async () => {
                     // The stored key comes back masked (****abcd);
@@ -925,10 +1109,10 @@ function AdminServerSettingsTab() {
                       setArrTest({ svc, msg: r.connected ? 'OK · connection succeeded' : `Failed: ${r.error ?? 'unknown'}` })
                     } catch (e) { setArrTest({ svc, msg: 'Failed: ' + (e instanceof Error ? e.message : 'unknown') }) }
                   }}
-                  className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-sm rounded"
-                >Test</button>
+                  className="stage-btn stage-btn-ghost"
+                >Test{' '}<span className="sr-only">{label}</span></button>
               </div>
-              {arrTest?.svc === svc && <p className={`text-xs mt-1 ${arrTest.msg.startsWith('OK') ? 'text-emerald-300' : 'text-red-300'}`}>{arrTest.msg}</p>}
+              <p role="status" className={arrTest?.svc === svc ? `text-xs mt-1 ${arrTest.msg.startsWith('OK') ? 'text-ok' : 'text-danger-ink'}` : 'sr-only'}>{arrTest?.svc === svc ? arrTest.msg : ''}</p>
             </div>
           )
         })}
@@ -936,17 +1120,18 @@ function AdminServerSettingsTab() {
             and save() with the top of the panel — operators typing in
             ARR fields shouldn't need to scroll back up. */}
         {settings && (
-          <div className="mt-3 pt-3 border-t border-white/[0.06] flex items-center gap-3">
+          <div className="mt-3 pt-3 border-t border-line flex items-center gap-3">
             <button
               disabled={saving || Object.keys(edited).length === 0}
-              onClick={save}
-              className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50"
+              onClick={() => void save('arr')}
+              className="stage-btn stage-btn-primary"
             >{saving ? 'Saving…' : Object.keys(edited).length > 0 ? `Save ${Object.keys(edited).length} change${Object.keys(edited).length === 1 ? '' : 's'}` : 'No changes'}</button>
-            <p className="text-white/50 text-xs">
+            <p className="text-ink-2 text-xs">
               Empty API key fields are ignored on save (so the stored key isn't wiped). Use Test first to verify before saving.
             </p>
           </div>
         )}
+        {saveFailed?.from === 'arr' && <FailureNote failure={saveFailed.failure} className="mt-3" />}
       </div>
     </div>
   )
@@ -957,6 +1142,27 @@ function AdminRoomsTab() {
   const [err, setErr] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
+  const [said, say] = useSaid()
+  const [makeFailed, setMakeFailed] = useState<Failure | null>(null)
+  const del = useConfirmedAction<Room>(room => `deleting the room ${room.name}`)
+  const listHeadingRef = useRef<HTMLHeadingElement | null>(null)
+  const confirmDelete = () => del.run(async room => {
+    try {
+      await deleteRoom(room.id)
+      say(`Deleted the room ${room.name}.`)
+      await reload()
+      return null
+    } catch (e) {
+      if (e instanceof APIError && e.status === 404) {
+        say(`${room.name} was already gone from the server.`)
+        await reload()
+        return null
+      }
+      // Rooms are not admin routes: a 403 here is the server's rule that only
+      // the room's owner deletes it.
+      return adminFailure(e, `delete ${room.name}`, { 403: 'Only the person who made this room can delete it.' })
+    }
+  })
   const reload = useCallback(async () => {
     try { setItems(await listRooms()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
@@ -964,39 +1170,42 @@ function AdminRoomsTab() {
   useEffect(() => { void reload() }, [reload])
   return (
     <div className="space-y-4">
-      <div className="glass-panel rounded-2xl p-5">
-        <h2 className="text-white font-semibold mb-3">Create Persistent Room</h2>
-        <p className="text-white/50 text-xs mb-3">Rooms have a stable code that survives across watch parties. Share the code once; friends can rejoin even after the host leaves.</p>
+      <div className="bg-surface-raised rounded-control p-5">
+        <h3 className="text-ink font-semibold mb-3">Make a room</h3>
+        <p className="text-ink-2 text-xs mb-3">Rooms have a stable code that survives across watch parties. Share the code once; friends can rejoin even after the host leaves.</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-          <input value={name} onChange={e => setName(e.target.value)} placeholder="Room name" className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
-          <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Description (optional)" className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          <input aria-label="Room name" value={name} onChange={e => setName(e.target.value)} placeholder="Room name" className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
+          <input aria-label="Description (optional)" value={desc} onChange={e => setDesc(e.target.value)} placeholder="Description (optional)" className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </div>
         <button
           disabled={!name.trim()}
-          onClick={async () => { try { await createRoom({ name: name.trim(), description: desc.trim() || undefined }); setName(''); setDesc(''); await reload() } catch (e) { window.alert(e instanceof Error ? e.message : 'failed') } }}
-          className="mt-3 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50"
-        >Create Room</button>
+          onClick={async () => { setMakeFailed(null); try { await createRoom({ name: name.trim(), description: desc.trim() || undefined }); setName(''); setDesc(''); await reload() } catch (e) { setMakeFailed(adminFailure(e, 'make the room', { 400: 'The server refused this room.' })) } }}
+          className="stage-btn stage-btn-primary mt-3"
+        >Make room</button>
+        <FailureNote failure={makeFailed} className="mt-3" />
       </div>
-      <div className="glass-panel rounded-2xl p-5">
-        <h2 className="text-white font-semibold mb-3">Existing Rooms</h2>
-        {err && <p className="text-red-300 text-sm">{err}</p>}
-        {items === null && <p className="text-white/50 text-sm">Loading…</p>}
-        {items && items.length === 0 && <p className="text-white/50 text-sm">No rooms yet.</p>}
+      <div className="bg-surface-raised rounded-control p-5">
+        <h3 ref={listHeadingRef} tabIndex={-1} className="text-ink font-semibold mb-3">Rooms on this server</h3>
+        <StatusLine said={said} className="mb-3" />
+        <div className="mb-3 empty:hidden">{del.panelNotes}</div>
+        {err && <p className="text-danger-ink text-sm">{err}</p>}
+        {items === null && <p className="text-ink-2 text-sm">Loading…</p>}
+        {items && items.length === 0 && <p className="text-ink-2 text-sm">No rooms yet.</p>}
         {items && items.map(r => (
-          <div key={r.id} className="flex items-center justify-between py-3 border-b border-white/[0.04] last:border-0 gap-3">
+          <div key={r.id} className="flex items-center justify-between py-3 border-b border-line last:border-0 gap-3">
             <div className="min-w-0 flex-1">
-              <p className="text-white/90 text-sm font-medium truncate">{r.name} <span className="text-purple-300 font-mono text-xs ml-2">{r.code}</span></p>
-              {r.description && <p className="text-white/50 text-xs truncate">{r.description}</p>}
+              <p className="text-ink text-sm font-medium truncate">{r.name} <span className="text-ink font-mono text-xs ml-2">{r.code}</span></p>
+              {r.description && <p className="text-ink-2 text-xs truncate">{r.description}</p>}
               {r.active_party_code && (
                 // Emit the working `{BASE}p/CODE` URL as an <a> so
                 // admins can right-click → copy. Pull the base from
                 // Vite's BASE_URL so this stays in lockstep if the
                 // SPA mount moves.
-                <p className="text-emerald-300 text-xs">
+                <p className="text-ok text-xs">
                   Live now — join via{' '}
                   <a
                     href={`${import.meta.env.BASE_URL}p/${r.active_party_code}`}
-                    className="underline hover:text-emerald-200"
+                    className="underline hover:text-ok"
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -1005,10 +1214,26 @@ function AdminRoomsTab() {
                 </p>
               )}
             </div>
-            <button onClick={async () => { if (!window.confirm(`Delete room "${r.name}"?`)) return; try { await deleteRoom(r.id); await reload() } catch (e) { window.alert(e instanceof Error ? e.message : 'failed') } }} className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Delete</button>
+            <button
+              {...del.openerProps}
+              onClick={e => { e.currentTarget.focus(); del.ask(r) }}
+              className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger"
+            >Delete{' '}<span className="sr-only">{r.name}</span></button>
           </div>
         ))}
       </div>
+      <ConfirmDialog
+        {...del.dialog}
+        error={del.dialog.error && <FailureText failure={del.dialog.error} />}
+        title={del.asked ? `Delete the room ${del.asked.name}?` : ''}
+        confirmLabel={del.busy ? 'Deleting…' : 'Delete room'}
+        destructive
+        safeFirst
+        onConfirm={() => { void confirmDelete() }}
+        fallbackFocus={() => listHeadingRef.current}
+      >
+        {del.asked && <>Its code, {del.asked.code}, stops working. If a watch party is on in it now, the party ends for everyone in it. This cannot be undone.</>}
+      </ConfirmDialog>
     </div>
   )
 }
@@ -1021,35 +1246,59 @@ function AdminRoomsTab() {
 function AdminRequestsTab() {
   const [items, setItems] = useState<MediaRequest[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  // Tracks the request id with an in-flight approve/deny so we can disable
-  // both buttons on that row and avoid double-submits.
-  const [busy, setBusy] = useState<number | null>(null)
+  // The requests with an approve or deny out, so that row's buttons do
+  // nothing until it ends. A set, each id removed only by its own request:
+  // one id for the list let row B's answer unlock row A while A's approve was
+  // still out, and the server's approve checks then writes the status with
+  // nothing between, so two could both pass and the title be sent twice.
+  const [busyIds, setBusyIds] = useState<ReadonlySet<number>>(() => new Set())
+  const busyRef = useRef<Set<number>>(new Set())
+  const isBusy = (id: number) => busyIds.has(id) || busyRef.current.has(id)
   const reload = useCallback(async () => {
     try { setItems(await listPendingApprovals()); setErr(null) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
   }, [])
   useEffect(() => { void reload() }, [reload])
 
-  const act = useCallback(async (id: number, fn: (id: number) => Promise<void>) => {
-    setBusy(id)
-    try { await fn(id); await reload() }
-    catch (e) { window.alert(e instanceof Error ? e.message : 'failed') }
-    finally { setBusy(null) }
+  // What came of an approve or a deny: null when it went through, 'gone'
+  // when the request was already gone (the list is read again), else the
+  // failure. A deny is answered in its dialog, an approve under its row.
+  const act = useCallback(async (id: number, fn: (id: number) => Promise<void>, doing: string): Promise<Failure | null | 'gone'> => {
+    busyRef.current.add(id)
+    setBusyIds(new Set(busyRef.current))
+    try { await fn(id); await reload(); return null }
+    catch (e) {
+      if (e instanceof APIError && e.status === 404) { await reload(); return 'gone' }
+      return adminFailure(e, doing, { 400: 'The server refused this: the request may no longer be waiting for approval.' })
+    }
+    finally {
+      busyRef.current.delete(id)
+      setBusyIds(new Set(busyRef.current))
+    }
   }, [reload])
+  const [said, say] = useSaid()
+  const [approveFailed, setApproveFailed] = useState<{ id: number; failure: Failure } | null>(null)
+  // The deny's dialog has its own busy flag, apart from the rows' marks:
+  // another row's answer must not unlock this dialog.
+  const deny = useConfirmedAction<MediaRequest>(req => `denying the request for ${req.title}`)
+  const headingRef = useRef<HTMLHeadingElement | null>(null)
 
   return (
     <div className="space-y-4">
-      <div className="glass-panel rounded-2xl p-5">
-        <h2 className="text-white font-semibold mb-1">Pending Approvals</h2>
-        <p className="text-white/50 text-xs mb-3">Requests that hit a user's quota are held here. Approve to dispatch to Radarr/Sonarr, or deny to reject.</p>
-        {err && <p className="text-red-300 text-sm">{err}</p>}
-        {items === null && <p className="text-white/50 text-sm">Loading…</p>}
-        {items && items.length === 0 && <p className="text-white/50 text-sm">No requests awaiting approval.</p>}
+      <div className="bg-surface-raised rounded-control p-5">
+        <h3 ref={headingRef} tabIndex={-1} className="text-ink font-semibold mb-1">Waiting for approval</h3>
+        <p className="text-ink-2 text-xs mb-3">Requests that hit a user's quota are held here. Approve to dispatch to Radarr/Sonarr, or deny to reject.</p>
+        <StatusLine said={said} className="mb-2" />
+        <div className="mb-2 empty:hidden">{deny.panelNotes}</div>
+        {err && <p className="text-danger-ink text-sm">{err}</p>}
+        {items === null && <p className="text-ink-2 text-sm">Loading…</p>}
+        {items && items.length === 0 && <p className="text-ink-2 text-sm">No requests awaiting approval.</p>}
         {items && items.map(req => {
           const poster = tmdbPosterURL(req.poster_path)
           return (
-            <div key={req.id} className="flex items-center gap-3 py-3 border-b border-white/[0.04] last:border-0">
-              <div className="w-[44px] h-[66px] rounded-md overflow-hidden flex-shrink-0 bg-white/5 flex items-center justify-center">
+            <div key={req.id} className="py-3 border-b border-line last:border-0">
+            <div className="flex items-center gap-3">
+              <div className="w-[44px] h-[66px] rounded-chip overflow-hidden flex-shrink-0 bg-surface-raised-2 flex items-center justify-center">
                 {poster ? (
                   <img
                     key={poster}
@@ -1069,40 +1318,78 @@ function AdminRequestsTab() {
                   style={{ display: poster ? 'none' : 'flex' }}
                   aria-hidden="true"
                 >
-                  <Icon name={req.media_type === 'tv' ? 'tv' : 'film'} size={16} className="text-white/25" />
+                  <Icon name={req.media_type === 'tv' ? 'tv' : 'film'} size={16} className="text-ink-3" />
                 </div>
               </div>
               <div className="min-w-0 flex-1">
-                <p className="text-white/90 text-sm font-medium truncate">{req.title}{req.year ? ` (${req.year})` : ''}</p>
+                <p className="text-ink text-sm font-medium truncate">{req.title}{req.year ? ` (${req.year})` : ''}</p>
                 <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                  <span className="text-white/50 text-xs uppercase">{req.media_type === 'tv' ? 'TV' : 'Movie'}</span>
-                  {req.quality_4k && <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20 text-[10px]">4K</span>}
-                  {req.quality_1080p && <span className="badge-glass bg-white/[0.04] text-white/60 border border-white/[0.06] text-[10px]">1080p</span>}
-                  {req.username && <span className="text-white/50 text-xs">by {req.username}</span>}
-                  <span className="text-white/50 text-xs">{formatRequestDate(req.requested_at)}</span>
+                  <span className="text-ink-2 text-xs uppercase">{req.media_type === 'tv' ? 'TV' : 'Movie'}</span>
+                  {req.quality_4k && <span className="badge-glass bg-surface-raised-2 text-ink border border-line text-xs">4K</span>}
+                  {req.quality_1080p && <span className="badge-glass bg-surface-raised-2 text-ink-2 border border-line text-xs">1080p</span>}
+                  {req.username && <span className="text-ink-2 text-xs">by {req.username}</span>}
+                  <span className="text-ink-2 text-xs">{formatRequestDate(req.requested_at)}</span>
                 </div>
               </div>
-              <div className="flex items-center gap-2 flex-shrink-0">
+              <div className="flex items-center gap-2.5 flex-shrink-0">
                 <button
-                  disabled={busy === req.id}
-                  onClick={() => act(req.id, approveRequest)}
-                  className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 text-xs rounded disabled:opacity-50"
-                >Approve</button>
+                  // Not `disabled` while out: a refusal is said beside this
+                  // button, and a disabled one drops the focus.
+                  aria-disabled={isBusy(req.id) || undefined}
+                  onClick={async () => {
+                    if (isBusy(req.id)) return
+                    setApproveFailed(null)
+                    const failure = await act(req.id, approveRequest, `approve the request for ${req.title}`)
+                    if (failure === 'gone') say(`The request for ${req.title} was already gone from the server.`)
+                    else if (failure) setApproveFailed({ id: req.id, failure })
+                    else say(`Approved the request for ${req.title}.`)
+                  }}
+                  className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
+                >Approve{' '}<span className="sr-only">{req.title}</span></button>
                 <button
-                  disabled={busy === req.id}
-                  onClick={() => { if (!window.confirm(`Deny request for "${req.title}"?`)) return; void act(req.id, denyRequest) }}
-                  className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded disabled:opacity-50"
-                >Deny</button>
+                  // Not `disabled` while its own deny is out: the dialog
+                  // gives the focus back to it if the deny is refused.
+                  {...deny.openerProps}
+                  aria-disabled={isBusy(req.id) || deny.busy || undefined}
+                  onClick={e => {
+                    if (isBusy(req.id)) return
+                    e.currentTarget.focus()
+                    deny.ask(req)
+                  }}
+                  className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger"
+                >Deny{' '}<span className="sr-only">{req.title}</span></button>
               </div>
+            </div>
+            {approveFailed?.id === req.id && <FailureNote failure={approveFailed.failure} className="mt-2" />}
             </div>
           )
         })}
       </div>
+      <ConfirmDialog
+        {...deny.dialog}
+        error={deny.dialog.error && <FailureText failure={deny.dialog.error} />}
+        title={deny.asked ? `Deny the request for ${deny.asked.title}?` : ''}
+        confirmLabel={deny.busy ? 'Denying…' : 'Deny request'}
+        cancelLabel="Keep it waiting"
+        destructive
+        onConfirm={() => {
+          void deny.run(async req => {
+            const failure = await act(req.id, denyRequest, `deny the request for ${req.title}`)
+            if (failure === 'gone') { say(`The request for ${req.title} was already gone from the server.`); return null }
+            if (!failure) say(`Denied the request for ${req.title}.`)
+            return failure
+          })
+        }}
+        // The row that asked leaves the list with the deny.
+        fallbackFocus={() => headingRef.current}
+      >
+        {deny.asked && <>The request{deny.asked.username ? ` from ${deny.asked.username}` : ''} is closed as denied, and it is not sent to Radarr or Sonarr.</>}
+      </ConfirmDialog>
     </div>
   )
 }
 
-// One row per SESSION — Diag and Kill act on a session, and an operator
+// One row per SESSION — Diagnose and Stop act on a session, and an operator
 // killing a cast needs to reach the receiver's clone and the local player's
 // session separately. Grouping only orders and indents them, and carries each
 // row's cast label along so the markup never re-derives one.
@@ -1125,49 +1412,87 @@ function sessionRows(items: ActiveStreamRow[]) {
 function AdminSessionsTab() {
   const [items, setItems] = useState<ActiveStreamRow[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  // Diagnose modal — populated when an admin clicks the "Diag"
-  // button on a transcode row. Surfaces FFmpeg stderr + per-variant
-  // state so operators can debug "variant start failed" 500s
-  // without grepping syslog.
+  // The diagnostic dialog, filled when Diagnose is pressed on a transcode
+  // row: FFmpeg's stderr and each variant's state, so a "variant start
+  // failed" can be read here and not in the syslog.
   const [diag, setDiag] = useState<SessionDiagnostic | null>(null)
   const [diagLoading, setDiagLoading] = useState(false)
   const [diagErr, setDiagErr] = useState<string | null>(null)
+  // Which request the dialog is waiting for. Closing it, or asking about
+  // another stream, moves this on, and an answer for an earlier one is
+  // dropped: it used to open the dialog again after it had been closed.
+  const diagAsked = useRef(0)
+  // Focus goes back to the Diagnose button that was pressed. The list is
+  // read again every five seconds, and a stream that ended meanwhile takes
+  // its row, and that button, away: Refresh is always there.
+  const refreshRef = useRef<HTMLButtonElement | null>(null)
+  const diagFocus = useReturnFocus(() => refreshRef.current)
+  const closeDiagnose = () => {
+    diagAsked.current++
+    setDiag(null); setDiagErr(null); setDiagLoading(false)
+  }
+  // The stream a stop is being asked about, and what came of the answer.
+  const stop = useConfirmedAction<ActiveStreamRow>(row => `stopping the stream of ${row.file_name}`)
+  const [said, say] = useSaid()
   const reload = useCallback(async () => {
     try { setItems(await listAdminSessions()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
   }, [])
   useEffect(() => { void reload(); const id = window.setInterval(() => void reload(), 5000); return () => window.clearInterval(id) }, [reload])
   const openDiagnose = useCallback(async (sessionID: string) => {
+    const asked = ++diagAsked.current
     setDiag(null); setDiagErr(null); setDiagLoading(true)
     try {
-      setDiag(await diagnoseSession(sessionID))
+      const answer = await diagnoseSession(sessionID)
+      if (diagAsked.current !== asked) return
+      setDiag(answer)
     } catch (e) {
+      if (diagAsked.current !== asked) return
       setDiagErr(e instanceof Error ? e.message : 'failed')
-    } finally {
-      setDiagLoading(false)
     }
+    setDiagLoading(false)
   }, [])
+  const confirmStop = () => stop.run(async s => {
+    try {
+      await deleteStreamSession(s.id)
+      say(`Stopped the stream of ${s.file_name}.`)
+      await reload()
+      return null
+    } catch (e) {
+      if (e instanceof APIError && e.status === 404) {
+        say(`The stream of ${s.file_name} had already ended.`)
+        await reload()
+        return null
+      }
+      return adminFailure(e, 'stop the stream')
+    }
+  })
   return (
-    <div className="glass-panel rounded-2xl p-5">
+    <div className="bg-surface-raised rounded-control p-5">
+      <StatusLine said={said} className="mb-3" />
+      <div className="mb-3 empty:hidden">{stop.panelNotes}</div>
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-white font-semibold">Active Streams</h2>
-        <button onClick={() => void reload()} className="text-white/60 hover:text-white text-xs">Refresh</button>
+        <p className="text-ink-2 text-sm">Everything playing right now, and how the server is delivering it.</p>
+        <button ref={refreshRef} type="button" onClick={() => void reload()} className="stage-btn stage-btn-sm stage-hit44 stage-btn-quiet flex-none">Refresh</button>
       </div>
       {/* Active streams now span BOTH kinds (transcode + direct-play).
           The Kind column tells operators which pipeline is serving
-          the stream; Kill is only available for transcode sessions
+          the stream; Stop is only available for transcode sessions
           (direct-play has no FFmpeg process to terminate — it
           expires from the registry after 60s of no byte-serves). */}
-      {err && <p className="text-red-300 text-sm">{err}</p>}
-      {items === null && <p className="text-white/50 text-sm">Loading…</p>}
-      {items && items.length === 0 && <p className="text-white/50 text-sm">No active streams.</p>}
+      {err && <p className="text-danger-ink text-sm">{err}</p>}
+      {items === null && <p className="text-ink-2 text-sm">Loading…</p>}
+      {items && items.length === 0 && <p className="text-ink-2 text-sm">No active streams.</p>}
       {items && items.length > 0 && (
-        <table className="data-table w-full">
+        // Seven columns do not fit a phone. The table scrolls sideways inside
+        // its panel; it used to push the whole page 950px wide.
+        <div className="overflow-x-auto">
+        <table className="data-table w-full min-w-[44rem]">
           <thead>
             <tr><th>Session</th><th>Kind</th><th>User</th><th>File</th><th>Detail</th><th>Started</th><th></th></tr>
           </thead>
           <tbody>
-            {/* One <tr> per SESSION — Diag and Kill act on a session, and an
+            {/* One <tr> per SESSION — Diagnose and Stop act on a session, and an
                 operator killing a cast needs to reach the receiver's clone
                 and the local player's session separately. Grouping only
                 orders and indents them: a receiver's clone sits directly
@@ -1183,15 +1508,15 @@ function AdminSessionsTab() {
                         second half a screen reader gets two adjacent,
                         unrelated-looking sessions — the same confusion this
                         grouping exists to end. */}
-                    {isCastRow && <span className="text-white/25 mr-1" aria-hidden="true">└</span>}
+                    {isCastRow && <span className="text-ink-3 mr-1" aria-hidden="true">└</span>}
                     {isCastRow && <span className="sr-only">Cast receiver for the session above: </span>}
                     {s.id.slice(0, 10)}
                   </td>
                   <td>
-                    <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                    <span className={`inline-block px-2 py-0.5 rounded-chip text-xs font-medium ${
                       isTranscode
-                        ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
-                        : 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                        ? 'bg-surface-raised-2 text-warn border border-line'
+                        : 'bg-surface-raised-2 text-ok border border-line'
                     }`}>
                       {isTranscode ? 'Transcode' : 'Direct'}
                     </span>
@@ -1212,10 +1537,10 @@ function AdminSessionsTab() {
                         which never reaches a keyboard or a screen reader on a
                         non-focusable span. */}
                     {label.badge && (
-                      <span className={`ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                      <span className={`ml-1 inline-block px-2 py-0.5 rounded-chip text-xs font-medium ${
                         label.badge === 'Cast'
-                          ? 'bg-purple-500/15 text-purple-300 border border-purple-500/30'
-                          : 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
+                          ? 'bg-surface-raised-2 text-ink border border-line'
+                          : 'bg-surface-raised-2 text-ink-2 border border-line'
                       }`}>
                         {label.badge}
                         <span className="sr-only"> {label.description}</span>
@@ -1227,10 +1552,10 @@ function AdminSessionsTab() {
                   <td>
                     {isTranscode ? (
                       <>
-                        {s.resolution && <span className="text-white/60 text-xs">{s.resolution}</span>}
-                        {s.remux && <span className="ml-1 text-white/50 text-xs">remux</span>}
+                        {s.resolution && <span className="text-ink-2 text-xs">{s.resolution}</span>}
+                        {s.remux && <span className="ml-1 text-ink-2 text-xs">remux</span>}
                         {s.active_variants && s.active_variants.length > 0 && (
-                          <span className="ml-1 text-white/50 text-xs">({s.active_variants.join(', ')})</span>
+                          <span className="ml-1 text-ink-2 text-xs">({s.active_variants.join(', ')})</span>
                         )}
                       </>
                     ) : (
@@ -1240,21 +1565,25 @@ function AdminSessionsTab() {
                       // dead code. If remux (direct_stream) ever
                       // wires through to the registry, restore the
                       // conditional here.
-                      <span className="text-white/60 text-xs">Direct Play</span>
+                      <span className="text-ink-2 text-xs">Direct play</span>
                     )}
                   </td>
-                  <td className="text-white/50 text-xs">{new Date(s.started_at).toLocaleTimeString()}</td>
+                  <td className="text-ink-2 text-xs">{new Date(s.started_at).toLocaleTimeString()}</td>
                   <td>
                     {isTranscode ? (
-                      <div className="flex items-center gap-1.5">
-                        <button onClick={() => void openDiagnose(s.id)} className="px-2 py-1 bg-white/[0.05] hover:bg-white/[0.10] text-white/70 text-xs rounded" title="Show FFmpeg stderr + variant state">Diag</button>
-                        <button onClick={async () => { if (!window.confirm('Terminate this stream?')) return; try { await deleteStreamSession(s.id); await reload() } catch (e) { window.alert('Failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Kill</button>
+                      <div className="flex items-center gap-2.5">
+                        <button onClick={() => void openDiagnose(s.id)} className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost" title="Show FFmpeg stderr and variant state">Diagnose</button>
+                        <button
+                          {...stop.openerProps}
+                          onClick={e => { e.currentTarget.focus(); stop.ask(s) }}
+                          className="stage-btn stage-btn-sm stage-hit44 stage-btn-danger"
+                        >Stop{' '}<span className="sr-only">the stream of {s.file_name}</span></button>
                       </div>
                     ) : (
                       // Direct-play has no FFmpeg lifecycle to terminate.
                       // The registry GCs after 60s of no byte-serves; an
-                      // explicit Kill button would mislead operators.
-                      <span className="text-white/50 text-xs" title="Direct-play sessions auto-expire when the client stops requesting bytes">—</span>
+                      // explicit Stop button would mislead operators.
+                      <span className="text-ink-2 text-xs" title="Direct-play sessions auto-expire when the client stops requesting bytes">—</span>
                     )}
                   </td>
                 </tr>
@@ -1262,66 +1591,83 @@ function AdminSessionsTab() {
             })}
           </tbody>
         </table>
+        </div>
       )}
 
-      {/* Diagnose modal — admin-only FFmpeg state view for a session. */}
-      {(diag || diagLoading || diagErr) && (
-        <div className="fixed inset-0 z-[80] flex items-start justify-center pt-24 px-4 stage-scrim-in" onClick={() => { setDiag(null); setDiagErr(null); setDiagLoading(false) }}>
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
-          <div className="relative w-full max-w-3xl bg-[color:var(--surface-1)] border border-white/[0.08] rounded-xl shadow-[shadow:var(--shadow-modal)] p-5 max-h-[80vh] overflow-y-auto overscroll-contain stage-dialog-in" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-white font-semibold">Session diagnostic</h2>
-              <button onClick={() => { setDiag(null); setDiagErr(null); setDiagLoading(false) }} className="text-white/40 hover:text-white" aria-label="Close">
-                <Icon name="x" size={16} />
-              </button>
-            </div>
-            {diagLoading && <p className="text-white/50 text-sm">Loading…</p>}
-            {diagErr && <p className="text-red-300 text-sm">{diagErr}</p>}
+      <ConfirmDialog
+        {...stop.dialog}
+        error={stop.dialog.error && <FailureText failure={stop.dialog.error} />}
+        title={stop.asked ? `Stop ${stop.asked.username || `user ${stop.asked.user_id}`}'s stream?` : ''}
+        confirmLabel={stop.busy ? 'Stopping…' : 'Stop stream'}
+        destructive
+        onConfirm={() => { void confirmStop() }}
+        // The row goes when the stream does.
+        fallbackFocus={() => refreshRef.current}
+      >
+        {stop.asked && <>The server stops transcoding {stop.asked.file_name} now. Whoever is watching it loses that stream; their player may start a new one.</>}
+      </ConfirmDialog>
+
+      {/* What FFmpeg is doing for one stream. The app's dialog: focus
+          stays inside, Escape and Close leave, and focus goes back to the
+          row's Diagnose button. */}
+      <Dialog
+        open={!!(diag || diagLoading || diagErr)}
+        onOpenChange={open => { if (!open) closeDiagnose() }}
+      >
+        <DialogContent
+          {...diagFocus}
+          overlayClassName="z-[80]"
+          className="z-[81] block max-h-[80vh] w-[calc(100%-2rem)] overflow-y-auto overscroll-contain border-0 p-5 sm:max-w-3xl"
+        >
+            <DialogTitle className="mb-3 pr-10 font-display text-[20px] font-semibold leading-tight text-ink">Session diagnostic</DialogTitle>
+            <DialogDescription className="sr-only">What the server is running for this stream.</DialogDescription>
+            {diagLoading && <p role="status" className="text-ink-2 text-sm">Loading…</p>}
+            {diagErr && <p role="alert" className="text-danger-ink text-sm">{diagErr}</p>}
             {diag && (
               <div className="space-y-3 font-mono text-xs">
                 <div>
-                  <div className="text-white/50">Session</div>
-                  <div className="text-white/80 break-all">{diag.session_id}</div>
+                  <div className="text-ink-2">Session</div>
+                  <div className="text-ink break-all">{diag.session_id}</div>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <div className="text-white/50">Source codec</div>
-                    <div className="text-white/80">{diag.source_video_codec || '—'}</div>
+                    <div className="text-ink-2">Source codec</div>
+                    <div className="text-ink">{diag.source_video_codec || '—'}</div>
                   </div>
                   <div>
-                    <div className="text-white/50">HW Accel</div>
-                    <div className="text-white/80">{diag.hw_accel}</div>
+                    <div className="text-ink-2">Hardware acceleration</div>
+                    <div className="text-ink">{diag.hw_accel}</div>
                   </div>
                   <div>
-                    <div className="text-white/50">Mode</div>
-                    <div className="text-white/80">{diag.remux ? 'remux' : 'transcode'}</div>
+                    <div className="text-ink-2">Mode</div>
+                    <div className="text-ink">{diag.remux ? 'remux' : 'transcode'}</div>
                   </div>
                   <div>
-                    <div className="text-white/50">File path</div>
-                    <div className="text-white/80 break-all">{diag.file_path}</div>
+                    <div className="text-ink-2">File path</div>
+                    <div className="text-ink break-all">{diag.file_path}</div>
                   </div>
                 </div>
                 <div>
-                  <div className="text-white/50 mb-1">Variants ({diag.variants?.length || 0})</div>
+                  <div className="text-ink-2 mb-1">Variants ({diag.variants?.length || 0})</div>
                   <div className="space-y-2">
                     {diag.variants?.map((v) => (
-                      <div key={v.profile} className="border border-white/[0.06] rounded-lg p-3">
+                      <div key={v.profile} className="border border-line rounded-control p-3">
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="text-white/90 font-medium">{v.profile}</span>
-                          {v.started && !v.exited && <span className="px-1.5 py-0.5 text-[10px] rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">running</span>}
-                          {v.exited && <span className="px-1.5 py-0.5 text-[10px] rounded bg-red-500/15 text-red-300 border border-red-500/30">exited</span>}
-                          {(v.restart_attempts ?? 0) > 0 && <span className="text-white/50">restarts={v.restart_attempts}</span>}
+                          <span className="text-ink font-medium">{v.profile}</span>
+                          {v.started && !v.exited && <span className="px-1.5 py-0.5 text-xs rounded-chip bg-surface-raised-2 text-ok border border-line">running</span>}
+                          {v.exited && <span className="px-1.5 py-0.5 text-xs rounded-chip bg-surface-raised-2 text-danger-ink border border-line">exited</span>}
+                          {(v.restart_attempts ?? 0) > 0 && <span className="text-ink-2">restarts={v.restart_attempts}</span>}
                         </div>
                         {v.error && (
                           <div className="mb-1">
-                            <div className="text-white/50">error</div>
-                            <div className="text-red-300/90 whitespace-pre-wrap break-words">{v.error}</div>
+                            <div className="text-ink-2">error</div>
+                            <div className="text-danger-ink whitespace-pre-wrap break-words">{v.error}</div>
                           </div>
                         )}
                         {v.stderr_tail && (
                           <div>
-                            <div className="text-white/50">ffmpeg stderr tail</div>
-                            <pre className="text-white/70 whitespace-pre-wrap break-words bg-black/40 rounded p-2 max-h-64 overflow-y-auto">{v.stderr_tail}</pre>
+                            <div className="text-ink-2">ffmpeg stderr tail</div>
+                            <pre className="text-ink-2 whitespace-pre-wrap break-words bg-surface-page rounded-chip p-2 max-h-64 overflow-y-auto">{v.stderr_tail}</pre>
                           </div>
                         )}
                       </div>
@@ -1330,18 +1676,60 @@ function AdminSessionsTab() {
                 </div>
               </div>
             )}
-          </div>
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
 
+/** How long after a dialog closed on a match in flight the list is read a
+ *  second time: long enough for a server that was a moment from done. */
+const REREAD_AFTER_MS = 4000
+
 function AdminFlaggedTab() {
   const [items, setItems] = useState<ServerMediaItem[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  // Phase 5.3 — manual-match modal state.
+  // The item whose match dialog is open.
   const [matchTarget, setMatchTarget] = useState<ServerMediaItem | null>(null)
+  // What the last match did, said in the list's status line. The dialog
+  // closes and the row leaves the list, so without it nothing says a match
+  // was saved.
+  // `sure` is a match the server confirmed. Anything else is said in plain
+  // ink: the colour of success on "may or may not have been saved" reads as
+  // success.
+  const [said, setSaid] = useState<{ text: string; sure: boolean }>({ text: '', sure: false })
+  // The same words twice in a row (two items with one title) are still two
+  // things said: a status line whose text does not change is not read out
+  // again, so the repeat differs by a trailing space.
+  const say = (text: string, sure: boolean) => setSaid(prev => ({ text: prev.text === text ? `${text}\u00a0` : text, sure }))
+  const listRef = useRef<HTMLDivElement | null>(null)
+  // After a read of the list that followed a match of `id`. Closing the
+  // dialog gives the focus back to that item's Match button; the read then
+  // takes the row away, and the list takes the focus when the row has gone
+  // and the focus with it. It is asked once per such read, when the read
+  // has landed and only if the focus was in that row at that moment, so
+  // nothing is left set to move the focus at some later reload, and the
+  // focus is not taken from someone who has put it elsewhere meanwhile (a
+  // click into the page to read, four seconds on). The page is not
+  // scrolled for it.
+  const [handBack, setHandBack] = useState<{ id: number } | null>(null)
+  const itemsRef = useRef(items)
+  useLayoutEffect(() => { itemsRef.current = items }, [items])
+  useEffect(() => {
+    if (!handBack) return
+    const now = itemsRef.current
+    if (!now || now.some(it => it.id === handBack.id)) return
+    if (!document.activeElement || document.activeElement === document.body) listRef.current?.focus({ preventScroll: true })
+  }, [handBack])
+  // Called when a read has landed and before it is drawn: the row is still
+  // in the page if it was.
+  const handBackIfInRow = (id: number) => {
+    const row = listRef.current?.querySelector(`[data-flagged="${id}"]`)
+    if (row?.contains(document.activeElement)) setHandBack({ id })
+  }
+  // The second read after the dialog was closed on a match in flight.
+  const rereadTimer = useRef<number | null>(null)
+  useEffect(() => () => { if (rereadTimer.current !== null) window.clearTimeout(rereadTimer.current) }, [])
   // 2026-05-26 — AI re-matcher job status. Polled while a job is
   // active so the operator sees live progress; falls back to
   // single-shot fetch when no job is running. acceptingId tracks the
@@ -1351,6 +1739,10 @@ function AdminFlaggedTab() {
   const [aiEnabled, setAiEnabled] = useState<boolean>(true)
   const [aiStarting, setAiStarting] = useState(false)
   const [acceptingId, setAcceptingId] = useState<number | null>(null)
+  // A sweep that did not start, said under its button; an accept that was
+  // refused, said under that item's suggestion.
+  const [startFailed, setStartFailed] = useState<Failure | null>(null)
+  const [acceptFailed, setAcceptFailed] = useState<{ id: number; failure: Failure } | null>(null)
 
   // 2026-05-27 (deep-debug Bug 1 fix) — polling refs lifted out of the
   // mount-only effect so startJob can restart the recursive chain.
@@ -1363,9 +1755,28 @@ function AdminFlaggedTab() {
   const pollTimerRef = useRef<number | null>(null)
   const pollCancelledRef = useRef(false)
 
+  // Reads are numbered as they start, and one that lands after a
+  // later-started read has landed is dropped: two can be out at once (the
+  // read after a dialog closed mid-match and the one four seconds on; the
+  // sweep's poll), and the older answer must not go up over the newer.
+  const readStarted = useRef(0)
+  const readLanded = useRef(0)
   const reload = useCallback(async () => {
-    try { setItems(await listFlaggedItems()) }
-    catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
+    const mine = ++readStarted.current
+    try {
+      const list = await listFlaggedItems()
+      if (mine < readLanded.current) return
+      readLanded.current = mine
+      setItems(list)
+      setErr(null)
+    }
+    catch (e) {
+      // A failure lands by the same rule as an answer: not over a newer
+      // read's list, and a newer read that succeeds takes it down.
+      if (mine < readLanded.current) return
+      readLanded.current = mine
+      setErr(e instanceof Error ? e.message : 'failed')
+    }
   }, [])
   useEffect(() => { void reload() }, [reload])
 
@@ -1404,6 +1815,7 @@ function AdminFlaggedTab() {
 
   const startJob = useCallback(async () => {
     setAiStarting(true)
+    setStartFailed(null)
     try {
       await startAIRematch()
       // Re-enter the poll chain so the progress card advances. Without
@@ -1411,7 +1823,7 @@ function AdminFlaggedTab() {
       // operator sees a frozen progress bar (deep-debug Bug 1).
       void pollOnce()
     } catch (e) {
-      window.alert('Failed to start AI rematch: ' + (e instanceof Error ? e.message : 'unknown'))
+      setStartFailed(adminFailure(e, 'start the AI re-match', { 409: 'A re-match is already running.', 503: 'AI matching is not turned on for this server.' }))
     } finally { setAiStarting(false) }
   }, [pollOnce])
 
@@ -1424,11 +1836,12 @@ function AdminFlaggedTab() {
   const acceptSuggestion = useCallback(async (item: ServerMediaItem) => {
     if (!item.ai_suggested_tmdb_id) return
     setAcceptingId(item.id)
+    setAcceptFailed(null)
     try {
       await manualMatch(item.id, { tmdb_id: item.ai_suggested_tmdb_id, type: item.type })
       setItems(prev => prev ? prev.filter(i => i.id !== item.id) : prev)
     } catch (e) {
-      window.alert('Accept failed: ' + (e instanceof Error ? e.message : 'unknown'))
+      setAcceptFailed({ id: item.id, failure: adminFailure(e, `accept the suggestion for ${item.title}`, { 404: `${item.title} is no longer on the server.` }) })
     } finally { setAcceptingId(null) }
   }, [])
 
@@ -1444,11 +1857,12 @@ function AdminFlaggedTab() {
   const inRetryPhase = jobActive && aiJob && aiJob.total > 0 && aiJob.processed >= aiJob.total
 
   return (
-    <div className="glass-panel rounded-2xl p-5">
-      <div className="flex items-start justify-between gap-4 mb-3">
+    <div className="bg-surface-raised rounded-control p-5">
+      {/* The words over the button on a phone: side by side there, the
+          words were a narrow column beside it. */}
+      <div className="mb-3 flex flex-col items-start gap-3 sm:flex-row sm:justify-between sm:gap-4">
         <div className="min-w-0">
-          <h2 className="text-white font-semibold">Flagged Items</h2>
-          <p className="text-white/50 text-xs mt-1">
+          <p className="text-ink-2 text-sm">
             Media files that the scanner couldn't auto-match against a TMDB/TVDB record.
             The AI matcher auto-promotes high-confidence picks and suggests sub-threshold
             ones for one-click approval below. Use "Match" to manually search if neither
@@ -1460,106 +1874,113 @@ function AdminFlaggedTab() {
             onClick={() => void startJob()}
             disabled={aiStarting || jobActive}
             title={jobActive ? 'A rematch job is already running' : 'Re-evaluate every flagged item with AI'}
-            className="px-3 py-1.5 rounded-md bg-purple-600/80 hover:bg-purple-500 text-white text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+            className="stage-btn stage-btn-sm stage-hit44 stage-btn-primary flex-shrink-0"
           >
             {aiStarting ? 'Starting…' : jobActive ? 'AI sweep running' : 'Re-match with AI'}
           </button>
         )}
       </div>
+      <FailureNote failure={startFailed} className="mb-3" />
 
       {/* AI job progress card — shown while a job is active OR for ~30s
           after completion so the operator sees the final result.
           Counts: processed/total + matched (auto-promoted) + suggested
           (sub-threshold, awaiting approval) + failed (LLM/parse errors). */}
       {aiJob && (
-        <div className="mb-4 p-3 rounded-lg bg-purple-500/[0.05] border border-purple-500/20">
+        <div className="mb-4 p-3 rounded-control bg-surface-raised-2 border border-line">
           <div className="flex items-center justify-between mb-1.5">
-            <p className="text-purple-200 text-xs font-medium">
+            <p className="text-ink text-xs font-medium">
               {jobActive
                 ? (inRetryPhase
                     ? `AI retry pass running… (${aiJob.retried ?? 0} re-attempted)`
                     : `AI re-matching… ${aiJob.processed}/${aiJob.total}`)
                 : `AI sweep complete (${aiJob.processed}/${aiJob.total})`}
             </p>
-            <p className="text-white/50 text-[10px]">
-              auto-matched <span className="text-emerald-300 font-mono">{aiJob.matched}</span>
+            <p className="text-ink-2 text-xs">
+              auto-matched <span className="text-ok font-mono">{aiJob.matched}</span>
               {' · '}
-              suggested <span className="text-purple-300 font-mono">{aiJob.suggested}</span>
-              {aiJob.failed > 0 && <>{' · '}failed <span className="text-amber-300 font-mono">{aiJob.failed}</span></>}
+              suggested <span className="text-ink font-mono">{aiJob.suggested}</span>
+              {aiJob.failed > 0 && <>{' · '}failed <span className="text-warn font-mono">{aiJob.failed}</span></>}
               {/* Retry pass: items where confidence ≥ threshold but
                   EnrichByTMDBID failed at eval time. Server tries
                   again with no new LLM call. Only render the counter
                   when the pass actually touched something so jobs
                   with no stuck items don't show a noisy "+0 retry". */}
               {(aiJob.retried ?? 0) > 0 && (
-                <>{' · '}retry-recovered <span className="text-emerald-300 font-mono">{aiJob.retry_matched ?? 0}</span><span className="text-white/50">/{aiJob.retried}</span></>
+                <>{' · '}retry-recovered <span className="text-ok font-mono">{aiJob.retry_matched ?? 0}</span><span className="text-ink-2">/{aiJob.retried}</span></>
               )}
             </p>
           </div>
-          <div className="h-1 rounded-full bg-white/[0.06] overflow-hidden">
+          <div className="h-1 rounded-full bg-[var(--track)] overflow-hidden">
             <div
-              className="h-full bg-gradient-to-r from-purple-500 to-purple-400 transition-[width]"
+              className="h-full bg-action transition-[width]"
               style={{ width: `${jobProgress}%` }}
             />
           </div>
         </div>
       )}
 
-      {err && <p className="text-red-300 text-sm">{err}</p>}
-      {items === null && <p className="text-white/50 text-sm">Loading…</p>}
-      {items && items.length === 0 && <p className="text-white/50 text-sm">Nothing flagged — your library is clean.</p>}
+      <p role="status" className={said.text ? `mb-2 text-sm leading-snug ${said.sure ? 'text-ok' : 'text-ink'}` : 'sr-only'}>{said.text}</p>
+      {err && <p className="text-danger-ink text-sm">{err}</p>}
+      {items === null && <p className="text-ink-2 text-sm">Loading…</p>}
+      {/* Takes the focus when the row that had it leaves the list. The
+          line for an empty list is inside it, so that focus never lands on
+          a group with nothing in it. */}
+      <div ref={listRef} tabIndex={-1} aria-label="Flagged items" role="group" className="rounded-control">
+      {items && items.length === 0 && <p className="text-ink-2 text-sm">Nothing flagged — your library is clean.</p>}
       {items && items.map(it => {
         const hasSuggestion = !!it.ai_suggested_tmdb_id
         const confidence = it.ai_match_confidence ?? 0
         const evaluated = !!it.ai_match_ran_at
         return (
-          <div key={it.id} className="py-3 border-b border-white/[0.04] last:border-0">
+          <div key={it.id} data-flagged={it.id} className="py-3 border-b border-line last:border-0">
             <div className="flex items-start gap-3">
-              <span className="text-amber-400 text-xs uppercase font-semibold flex-shrink-0">{it.match_status || 'flagged'}</span>
+              <span className="text-warn text-xs uppercase font-semibold flex-shrink-0">{(it.match_status || 'flagged').replace(/_/g, ' ')}</span>
               <div className="min-w-0 flex-1">
-                <p className="text-white/90 text-sm font-medium truncate">{it.title}{it.year ? ` (${it.year})` : ''}</p>
-                <p className="text-white/50 text-xs truncate">{it.file_path}</p>
+                <p className="text-ink text-sm font-medium truncate">{it.title}{it.year ? ` (${it.year})` : ''}</p>
+                <p className="text-ink-2 text-xs truncate">{it.file_path}</p>
               </div>
               <button
                 onClick={() => setMatchTarget(it)}
-                className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded flex-shrink-0"
+                className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost flex-shrink-0"
               >
-                Match
+                Match{' '}<span className="sr-only">{it.title}</span>
               </button>
             </div>
             {/* AI suggestion strip — only when the matcher has a real
                 pick to surface. Evaluated-with-no-suggestion items get
                 a quieter inline note further down. */}
             {hasSuggestion && (
-              <div className="ml-[88px] mt-2 p-2.5 rounded-md bg-purple-500/[0.07] border border-purple-500/20 flex items-start gap-3">
+              <div className="ml-[88px] mt-2 p-2.5 rounded-chip bg-surface-raised-2 border border-line flex items-start gap-3">
                 <div className="min-w-0 flex-1">
-                  <p className="text-purple-200/90 text-xs">
+                  <p className="text-ink text-xs">
                     <span className="font-semibold">AI suggests:</span>{' '}
-                    <span className="text-white/85">
+                    <span className="text-ink">
                       {it.ai_suggested_title || `TMDB ${it.ai_suggested_tmdb_id}`}
                       {it.ai_suggested_year ? ` (${it.ai_suggested_year})` : ''}
                     </span>
-                    <span className="ml-2 px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-200 text-[10px] font-mono">
+                    <span className="ml-2 px-1.5 py-0.5 rounded-chip bg-surface-raised-2 text-ink text-xs font-mono">
                       {confidence}% confident
                     </span>
                   </p>
                   {it.ai_match_reasoning && (
-                    <p className="text-white/55 text-[11px] mt-1 leading-snug">{it.ai_match_reasoning}</p>
+                    <p className="text-ink-2 text-xs mt-1 leading-snug">{it.ai_match_reasoning}</p>
                   )}
                 </div>
                 <button
                   disabled={acceptingId === it.id}
                   onClick={() => void acceptSuggestion(it)}
-                  className="px-3 py-1.5 rounded-md bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-100 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                  className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost flex-shrink-0"
                 >
                   {acceptingId === it.id ? 'Accepting…' : 'Accept'}
                 </button>
               </div>
             )}
+            {acceptFailed?.id === it.id && <FailureNote failure={acceptFailed.failure} className="ml-[88px] mt-2" />}
             {/* Evaluated but no pick — quieter inline note so the
                 operator knows AI tried and gave up (vs hasn't tried yet). */}
             {evaluated && !hasSuggestion && (
-              <p className="ml-[88px] mt-2 text-white/50 text-[11px] italic">
+              <p className="ml-[88px] mt-2 text-ink-2 text-xs italic">
                 AI evaluated — no candidate fit
                 {it.ai_match_reasoning ? `: ${it.ai_match_reasoning}` : '.'}
               </p>
@@ -1567,11 +1988,35 @@ function AdminFlaggedTab() {
           </div>
         )
       })}
+      </div>
       {matchTarget && (
         <ManualMatchModal
           target={matchTarget}
-          onClose={() => setMatchTarget(null)}
-          onMatched={() => { setMatchTarget(null); void reload() }}
+          // The row a match was made from leaves with the next read. If
+          // that read lands before the dialog has gone, the button it would
+          // give the focus back to is not there any more: the list is.
+          fallbackFocus={() => listRef.current}
+          onClose={matchInFlight => {
+            const { id, title } = matchTarget
+            setMatchTarget(null)
+            if (!matchInFlight) return
+            // Closed on a match that was still being sent: the server may
+            // have saved it or not, and may still be at it. Nothing is
+            // claimed. The list is read now, and again after a wait, since
+            // a read that comes before the server has finished shows the
+            // item still flagged.
+            say(`The dialog was closed while the match for ${title} was still being sent, so it may or may not have been saved. This list is read again now and once more in a few seconds: a match that was saved can take a moment to show.`, false)
+            const read = () => void reload().then(() => handBackIfInRow(id))
+            read()
+            if (rereadTimer.current !== null) window.clearTimeout(rereadTimer.current)
+            rereadTimer.current = window.setTimeout(read, REREAD_AFTER_MS)
+          }}
+          onMatched={() => {
+            const { id, title } = matchTarget
+            setMatchTarget(null)
+            say(`Matched ${title}.`, true)
+            void reload().then(() => handBackIfInRow(id))
+          }}
         />
       )}
     </div>
@@ -1581,8 +2026,17 @@ function AdminFlaggedTab() {
 const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434'
 const OLLAMA_CLOUD_DEFAULT = 'https://ollama.com'
 
-function AdminLLMTab() {
+function AdminLLMTab({ restartNeeded, onRestartNeeded, onDismissRestart }: {
+  /** Settings saved in this visit to the admin page need a restart to take
+   *  effect. Kept by the page, so it is still said when this section is
+   *  opened again. */
+  restartNeeded: boolean
+  onRestartNeeded: () => void
+  onDismissRestart: () => void
+}) {
   const [s, setS] = useState<LLMSettings | null>(null)
+  const [said, say] = useSaid()
+  const [saveFailed, setSaveFailed] = useState<Failure | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [apiKeyEdit, setApiKeyEdit] = useState('')
@@ -1599,8 +2053,8 @@ function AdminLLMTab() {
     getAdminLLM(ac.signal).then(next => { loadedRef.current = next; setS(next) }).catch(e => { if (e.name !== 'AbortError') setErr(e.message) })
     return () => ac.abort()
   }, [])
-  if (err) return <p className="text-red-300 text-sm">{err}</p>
-  if (!s) return <p className="text-white/50 text-sm">Loading…</p>
+  if (err) return <p className="text-danger-ink text-sm">{err}</p>
+  if (!s) return <p className="text-ink-2 text-sm">Loading…</p>
   const hostedChat = s.provider === 'anthropic' || s.provider === 'openai'
   const openaiEmbeds = s.embed_provider === 'openai'
   const showAnthropicKey = s.provider === 'anthropic'
@@ -1652,12 +2106,12 @@ function AdminLLMTab() {
   const chatAvailable = testResult?.endpoints.find(ep => ep.role === 'chat')?.available ?? []
   const embedAvailable = testResult?.endpoints.find(ep => ep.role === 'embed')?.available ?? []
   return (
-    <div className="glass-panel rounded-2xl p-5 space-y-3">
-      <h2 className="text-white font-semibold mb-2">LLM (Search + Recommendations)</h2>
-      <p className="text-white/50 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local runs chat on your own box; Ollama Cloud runs chat on ollama.com; Anthropic (Claude) and OpenAI (ChatGPT) run chat on their hosted APIs with your API key. Embeddings run on local Ollama by default, or on OpenAI — Anthropic has no embeddings API. Enable/disable the whole stack via LLM_ENABLED.</p>
+    <div className="bg-surface-raised rounded-control p-5 space-y-3">
+      <h3 className="text-ink font-semibold mb-2">Search and recommendations</h3>
+      <p className="text-ink-2 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local runs chat on your own box; Ollama Cloud runs chat on ollama.com; Anthropic (Claude) and OpenAI (ChatGPT) run chat on their hosted APIs with your API key. Embeddings run on local Ollama by default, or on OpenAI — Anthropic has no embeddings API. Enable/disable the whole stack via LLM_ENABLED.</p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Provider</span>
-          <select value={s.provider} onChange={e => changeProvider(e.target.value)} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Provider</span>
+          <select value={s.provider} onChange={e => changeProvider(e.target.value)} className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm">
             <option value="">Default (env config)</option>
             <option value="ollama_cloud">Ollama Cloud</option>
             <option value="local">Local (Ollama)</option>
@@ -1665,86 +2119,91 @@ function AdminLLMTab() {
             <option value="openai">OpenAI (ChatGPT)</option>
           </select>
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Embedding Provider</span>
-          <select value={s.embed_provider} onChange={e => changeEmbedProvider(e.target.value)} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Embedding provider</span>
+          <select value={s.embed_provider} onChange={e => changeEmbedProvider(e.target.value)} className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm">
             <option value="">Local (Ollama)</option>
             <option value="openai">OpenAI</option>
           </select>
-          <span className="block text-[10px] text-amber-300/80 mt-1">Changing the embedding provider or model clears stored vectors and re-embeds the whole library on restart{openaiEmbeds ? ' (OpenAI API cost applies)' : ''}.</span>
+          <span className="block text-xs text-warn mt-1">Changing the embedding provider or model clears stored vectors and re-embeds the whole library on restart{openaiEmbeds ? ' (OpenAI API cost applies)' : ''}.</span>
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Ollama URL{hostedChat ? ' (local embeds + reranker only)' : ''}</span>
-          <input value={s.ollama_url} onChange={e => setS({ ...s, ollama_url: e.target.value })} placeholder={s.provider === 'ollama_cloud' ? OLLAMA_CLOUD_DEFAULT : OLLAMA_LOCAL_DEFAULT} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
-          {s.provider === 'ollama_cloud' && <span className="block text-[10px] text-white/50 mt-1">Must be an https ollama.com URL — this is what actually distinguishes Ollama Cloud from Local.</span>}
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Ollama URL{hostedChat ? ' (local embeds + reranker only)' : ''}</span>
+          <input value={s.ollama_url} onChange={e => setS({ ...s, ollama_url: e.target.value })} placeholder={s.provider === 'ollama_cloud' ? OLLAMA_CLOUD_DEFAULT : OLLAMA_LOCAL_DEFAULT} className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
+          {s.provider === 'ollama_cloud' && <span className="block text-xs text-ink-2 mt-1">Must be an https ollama.com URL — this is what actually distinguishes Ollama Cloud from Local.</span>}
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Embed URL (optional)</span>
-          <input value={s.embed_url} onChange={e => setS({ ...s, embed_url: e.target.value })} placeholder="http://localhost:11434" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Embed URL (optional)</span>
+          <input value={s.embed_url} onChange={e => setS({ ...s, embed_url: e.target.value })} placeholder="http://localhost:11434" className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Chat Model</span>
-          <input value={s.chat_model} onChange={e => setS({ ...s, chat_model: e.target.value })} placeholder={chatPlaceholder} list="llm-chat-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Chat model</span>
+          <input value={s.chat_model} onChange={e => setS({ ...s, chat_model: e.target.value })} placeholder={chatPlaceholder} list="llm-chat-models" className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Embed Model</span>
-          <input value={s.embed_model} onChange={e => setS({ ...s, embed_model: e.target.value })} placeholder={embedPlaceholder} list="llm-embed-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Embed model</span>
+          <input value={s.embed_model} onChange={e => setS({ ...s, embed_model: e.target.value })} placeholder={embedPlaceholder} list="llm-embed-models" className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Fast Model (optional)</span>
-          <input value={s.chat_model_fast ?? ''} onChange={e => setS({ ...s, chat_model_fast: e.target.value })} placeholder="hero rerank + rail reasons · blank = Chat Model" list="llm-chat-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Fast Model (optional)</span>
+          <input value={s.chat_model_fast ?? ''} onChange={e => setS({ ...s, chat_model_fast: e.target.value })} placeholder="hero rerank + rail reasons · blank = Chat Model" list="llm-chat-models" className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Smart Model (optional)</span>
-          <input value={s.chat_model_smart ?? ''} onChange={e => setS({ ...s, chat_model_smart: e.target.value })} placeholder={smartPlaceholder} list="llm-chat-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Smart Model (optional)</span>
+          <input value={s.chat_model_smart ?? ''} onChange={e => setS({ ...s, chat_model_smart: e.target.value })} placeholder={smartPlaceholder} list="llm-chat-models" className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Ollama API Key {s.has_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
-          <input type="password" data-screenshot-exclude="true" value={apiKeyEdit} onChange={e => setApiKeyEdit(e.target.value)} placeholder={s.api_key_masked || 'leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Ollama API Key {s.has_api_key && <span className="text-ok text-xs">SET</span>}</span>
+          <input type="password" data-screenshot-exclude="true" value={apiKeyEdit} onChange={e => setApiKeyEdit(e.target.value)} placeholder={s.api_key_masked || 'leave empty to keep existing'} className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </label>
         {showAnthropicKey && (
-          <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Anthropic API Key {s.has_anthropic_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
-            <input type="password" data-screenshot-exclude="true" value={anthropicKeyEdit} onChange={e => setAnthropicKeyEdit(e.target.value)} placeholder={s.anthropic_api_key_masked || 'sk-ant-… · leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Anthropic API Key {s.has_anthropic_api_key && <span className="text-ok text-xs">SET</span>}</span>
+            <input type="password" data-screenshot-exclude="true" value={anthropicKeyEdit} onChange={e => setAnthropicKeyEdit(e.target.value)} placeholder={s.anthropic_api_key_masked || 'sk-ant-… · leave empty to keep existing'} className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
           </label>
         )}
         {showOpenAIKey && (
-          <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">OpenAI API Key {s.has_openai_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
-            <input type="password" data-screenshot-exclude="true" value={openaiKeyEdit} onChange={e => setOpenaiKeyEdit(e.target.value)} placeholder={s.openai_api_key_masked || 'sk-… · leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">OpenAI API Key {s.has_openai_api_key && <span className="text-ok text-xs">SET</span>}</span>
+            <input type="password" data-screenshot-exclude="true" value={openaiKeyEdit} onChange={e => setOpenaiKeyEdit(e.target.value)} placeholder={s.openai_api_key_masked || 'sk-… · leave empty to keep existing'} className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
           </label>
         )}
       </div>
       <datalist id="llm-chat-models">{chatAvailable.map(m => <option key={m} value={m} />)}</datalist>
       <datalist id="llm-embed-models">{embedAvailable.map(m => <option key={m} value={m} />)}</datalist>
-      <label className="flex items-center gap-2 mt-2 text-sm text-white/70">
+      <label className="flex flex-wrap items-center gap-2 mt-2 text-sm text-ink-2">
         <input type="checkbox" checked={s.debug_log} onChange={e => setS({ ...s, debug_log: e.target.checked })} />
-        Debug log <span className="text-white/50 text-xs">(verbose LLM call traces — adds disk I/O)</span>
+        Debug log <span className="text-ink-2 text-xs">(verbose LLM call traces — adds disk I/O)</span>
       </label>
-      <label className={`flex items-center gap-2 mt-2 text-sm ${hostedChat ? 'text-white/30' : 'text-white/70'}`} title={hostedChat ? 'Always on for Anthropic/OpenAI — they enforce schemas natively' : undefined}>
+      <label className={`flex items-center gap-2 mt-2 text-sm ${hostedChat ? 'text-ink-3' : 'text-ink-2'}`} title={hostedChat ? 'Always on for Anthropic/OpenAI — they enforce schemas natively' : undefined}>
         <input type="checkbox" disabled={hostedChat} checked={hostedChat ? true : (s.structured_outputs ?? false)} onChange={e => setS({ ...s, structured_outputs: e.target.checked })} />
-        Structured outputs <span className="text-white/50 text-xs">{hostedChat ? '(always on for Anthropic/OpenAI)' : '(OpenAI json_schema path for the hero rerank — restart required)'}</span>
+        Structured outputs <span className="text-ink-2 text-xs">{hostedChat ? '(always on for Anthropic/OpenAI)' : '(OpenAI json_schema path for the hero rerank — restart required)'}</span>
       </label>
-      <label className="flex items-center gap-2 mt-2 text-sm text-white/70">
+      <label className="flex flex-wrap items-center gap-2 mt-2 text-sm text-ink-2">
         Reasoning effort
-        <select value={s.reasoning_effort ?? ''} onChange={e => setS({ ...s, reasoning_effort: e.target.value })} className="px-2 py-1 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
+        <select value={s.reasoning_effort ?? ''} onChange={e => setS({ ...s, reasoning_effort: e.target.value })} className="max-w-full px-2 py-1 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm">
           <option value="">Default (model decides)</option>
           <option value="low">Low — fastest{hostedChat ? '' : ', recommended for gpt-oss'}</option>
           <option value="medium">Medium</option>
           <option value="high">High</option>
           <option value="none">None</option>
         </select>
-        <span className="text-white/50 text-xs">{s.provider === 'anthropic' ? 'maps to Claude output effort' : s.provider === 'openai' ? 'sent as reasoning_effort' : 'gpt-oss · structured /v1 path'} · restart required</span>
+        <span className="text-ink-2 text-xs">{s.provider === 'anthropic' ? 'maps to Claude output effort' : s.provider === 'openai' ? 'sent as reasoning_effort' : 'gpt-oss · structured /v1 path'} · restart required</span>
       </label>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Reranker Model (optional)</span>
-          <input value={s.rerank_model ?? ''} onChange={e => setS({ ...s, rerank_model: e.target.value })} placeholder="fast chat model · listwise rerank · e.g. gpt-oss:20b · blank = off" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Reranker Model (optional)</span>
+          <input value={s.rerank_model ?? ''} onChange={e => setS({ ...s, rerank_model: e.target.value })} placeholder="fast chat model · listwise rerank · e.g. gpt-oss:20b · blank = off" className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Reranker URL (optional)</span>
-          <input value={s.rerank_url ?? ''} onChange={e => setS({ ...s, rerank_url: e.target.value })} placeholder="blank = chat endpoint · set only to run rerank on a local box" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Reranker URL (optional)</span>
+          <input value={s.rerank_url ?? ''} onChange={e => setS({ ...s, rerank_url: e.target.value })} placeholder="blank = chat endpoint · set only to run rerank on a local box" className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Repeat window (hrs)</span>
-          <input type="number" min={0} value={s.repeat_window_hours ?? 72} onChange={e => setS({ ...s, repeat_window_hours: Math.max(0, parseInt(e.target.value || '0', 10) || 0) })} placeholder="anti-repetition · 0 = off" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Repeat window (hrs)</span>
+          <input type="number" min={0} value={s.repeat_window_hours ?? 72} onChange={e => setS({ ...s, repeat_window_hours: Math.max(0, parseInt(e.target.value || '0', 10) || 0) })} placeholder="anti-repetition · 0 = off" className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/50 mb-1">Taste modes (1–3)</span>
-          <input type="number" min={1} max={3} value={s.taste_centroids ?? 3} onChange={e => setS({ ...s, taste_centroids: Math.min(3, Math.max(1, parseInt(e.target.value || '1', 10) || 1)) })} placeholder="multi-centroid taste · 1 = off" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        <label className="text-sm text-ink-2"><span className="block text-xs text-ink-2 mb-1">Taste modes (1–3)</span>
+          <input type="number" min={1} max={3} value={s.taste_centroids ?? 3} onChange={e => setS({ ...s, taste_centroids: Math.min(3, Math.max(1, parseInt(e.target.value || '1', 10) || 1)) })} placeholder="multi-centroid taste · 1 = off" className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm" />
         </label>
       </div>
       <div className="flex items-center gap-2 mt-3">
         <button
-          disabled={saving}
+          // Not `disabled` while it saves: what came of it is said beside
+          // this button, and a disabled one drops the focus.
+          aria-disabled={saving || undefined}
           onClick={async () => {
+            if (saving) return
             setSaving(true)
+            setSaveFailed(null)
+            let saved: { restart_required?: boolean } | null = null
             try {
               const body: Record<string, unknown> = {
                 provider: s.provider, embed_provider: s.embed_provider,
@@ -1760,16 +2219,29 @@ function AdminLLMTab() {
               if (anthropicKeyEdit) body.anthropic_api_key = anthropicKeyEdit
               if (openaiKeyEdit) body.openai_api_key = openaiKeyEdit
               const ack = await updateAdminLLM(body as Parameters<typeof updateAdminLLM>[0])
+              saved = ack
               // The PUT returns an ack, not the settings — re-fetch so the
               // form reflects what was persisted (masked keys, SET badges).
               const next = await getAdminLLM()
               loadedRef.current = next
               setS(next); setApiKeyEdit(''); setAnthropicKeyEdit(''); setOpenaiKeyEdit('')
-              window.alert(ack.restart_required ? 'LLM settings saved. Restart Aurora to apply them.' : 'LLM settings saved.')
-            } catch (e) { window.alert('Save failed: ' + (e instanceof Error ? e.message : 'unknown')) }
+              // Said every time, also when the restart notice is already up:
+              // the notice is not read out by itself.
+              if (ack.restart_required) { onRestartNeeded(); say('Saved. Restart Aurora to apply these settings.') }
+              else say('AI provider settings saved.')
+            } catch (e) {
+              if (saved) {
+                // Saved; only the read back failed, whatever its kind. Not
+                // called a failed save.
+                if (saved.restart_required) { onRestartNeeded(); say('Saved. Restart Aurora to apply these settings.') }
+                setSaveFailed({ says: 'Saved. The settings could not be read back: reload to see them.', server: adminFailure(e, 'read the settings back').server })
+              } else {
+                setSaveFailed(adminFailure(e, 'save the AI provider settings', { 400: 'The server refused these settings.' }))
+              }
+            }
             finally { setSaving(false) }
           }}
-          className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+          className="stage-btn stage-btn-primary"
         >
           {saving ? 'Saving…' : 'Save'}
         </button>
@@ -1791,25 +2263,32 @@ function AdminLLMTab() {
             } catch (e) { setTestError(e instanceof Error ? e.message : 'test failed') }
             finally { setTesting(false) }
           }}
-          className="px-4 py-2 bg-white/[0.06] hover:bg-white/[0.1] text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+          className="stage-btn stage-btn-ghost"
         >
           {testing ? 'Testing…' : 'Test connection'}
         </button>
       </div>
-      {testError && <p className="text-red-300 text-xs mt-2">{testError}</p>}
+      <FailureNote failure={saveFailed} />
+      <StatusLine said={said} />
+      {restartNeeded && (
+        <StandingNotice title="Restart Aurora to use the new AI settings" onDismiss={onDismissRestart}>
+          The AI provider settings are saved. Aurora goes on using the ones it started with until it is restarted.
+        </StandingNotice>
+      )}
+      {testError && <p className="text-danger-ink text-xs mt-2">{testError}</p>}
       {testResult && (
         <div className="mt-2 space-y-1 text-xs">
           {testResult.endpoints.map(ep => (
-            <div key={ep.role + (ep.provider ?? '') + ep.url} className="text-white/70">
-              <span className="uppercase text-white/50 mr-1">{ep.role}{ep.provider ? ` · ${ep.provider}` : ''}</span>
+            <div key={ep.role + (ep.provider ?? '') + ep.url} className="text-ink-2">
+              <span className="uppercase text-ink-2 mr-1">{ep.role}{ep.provider ? ` · ${ep.provider}` : ''}</span>
               <span className="mr-2">{ep.url}</span>
               {ep.reachable ? (
-                <span className="text-emerald-300">reachable</span>
+                <span className="text-ok">reachable</span>
               ) : (
-                <span className="text-red-300">unreachable{ep.error ? ` — ${ep.error}` : ''}</span>
+                <span className="text-danger-ink">unreachable{ep.error ? ` — ${ep.error}` : ''}</span>
               )}
               {ep.models && Object.entries(ep.models).map(([m, ok]) => (
-                <span key={m} className={ok ? 'ml-2 text-emerald-300' : 'ml-2 text-amber-300'}>
+                <span key={m} className={ok ? 'ml-2 text-ok' : 'ml-2 text-warn'}>
                   {m}: {ok ? 'found' : ep.provider ? 'not available to this API key' : 'missing — ollama pull ' + m}
                 </span>
               ))}
@@ -1834,8 +2313,8 @@ function AdminOAuthTab() {
     getAdminOAuth(ac.signal).then(setS).catch(e => { if (e.name !== 'AbortError') setErr(e.message) })
     return () => ac.abort()
   }, [])
-  if (err) return <p className="text-red-300 text-sm">{err}</p>
-  if (!s) return <p className="text-white/50 text-sm">Loading…</p>
+  if (err) return <p className="text-danger-ink text-sm">{err}</p>
+  if (!s) return <p className="text-ink-2 text-sm">Loading…</p>
   return (
     <div className="space-y-4">
       {/* Above the provider cards because it spans them: the prompt exists to
@@ -1965,18 +2444,18 @@ function ReferralPromptSection() {
     }
   }
 
-  if (loading) return <p className="text-white/50 text-sm">Loading…</p>
+  if (loading) return <p className="text-ink-2 text-sm">Loading…</p>
 
   return (
-    <div className="glass-panel rounded-2xl p-5 space-y-3">
-      <h2 className="text-white font-semibold mb-1">Referral prompt</h2>
-      <p className="text-white/55 text-xs">
+    <div className="bg-surface-raised rounded-control p-5 space-y-3">
+      <h3 className="text-ink font-semibold mb-1">Referral prompt</h3>
+      <p className="text-ink-2 text-xs">
         Asked once, of accounts created through a provider whose invite bypass is on below.
         Everyone else is never asked. Leave blank to use the defaults.
       </p>
 
       <div>
-        <label htmlFor="referral-question" className="block text-white/80 text-sm mb-1.5">Question</label>
+        <label htmlFor="referral-question" className="block text-ink text-sm mb-1.5">Question</label>
         <input
           id="referral-question"
           type="text"
@@ -1985,14 +2464,14 @@ function ReferralPromptSection() {
           aria-invalid={!!questionIssue || undefined}
           aria-describedby={questionIssue ? 'referral-question-err' : undefined}
           placeholder="How did you hear about Aurora?"
-          className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
+          className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm"
         />
-        {questionIssue && <p id="referral-question-err" className="text-red-300 text-xs mt-1">{questionIssue}</p>}
+        {questionIssue && <p id="referral-question-err" className="text-danger-ink text-xs mt-1">{questionIssue}</p>}
       </div>
 
       <div>
-        <p className="text-white/80 text-sm mb-1.5">Options</p>
-        {listIssue && <p className="text-red-300 text-xs mb-2">{listIssue}</p>}
+        <p className="text-ink text-sm mb-1.5">Options</p>
+        {listIssue && <p className="text-danger-ink text-xs mb-2">{listIssue}</p>}
         <div className="space-y-2">
           {rows.map((row, i) => {
             const locked = lockedKeys.has(row.key.trim())
@@ -2011,13 +2490,13 @@ function ReferralPromptSection() {
                     onChange={e => { setRows(p => p.map((r, j) => j === i ? { ...r, key: e.target.value } : r)); setSaved(false) }}
                     placeholder="key"
                     title={locked ? 'Answers are stored by this key, so it cannot be renamed.' : undefined}
-                    className={'w-40 px-3 py-2 rounded text-sm font-mono border '
+                    className={'w-40 px-3 py-2 rounded-chip text-sm font-mono border '
                       + (locked
                         // Dashed and dimmer, with no text cursor: a field that
                         // takes focus and then discards what you type has to
                         // look like one that will.
-                        ? 'bg-white/[0.02] border-dashed border-white/[0.10] text-white/50 cursor-not-allowed'
-                        : 'bg-white/[0.04] border-white/[0.06] text-white')}
+                        ? 'bg-surface-raised border-dashed border-line text-ink-2 cursor-not-allowed'
+                        : 'bg-surface-raised-2 border-line text-ink')}
                   />
                   <input
                     type="text"
@@ -2027,21 +2506,21 @@ function ReferralPromptSection() {
                     aria-describedby={issue ? errId : undefined}
                     onChange={e => { setRows(p => p.map((r, j) => j === i ? { ...r, label: e.target.value } : r)); setSaved(false) }}
                     placeholder="Label shown to the user"
-                    className="flex-1 px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
+                    className="flex-1 px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm"
                   />
                   <button
                     type="button"
                     onClick={() => { setRows(p => p.filter((_, j) => j !== i)); setSaved(false) }}
                     aria-label={`Remove option ${row.label || row.key || i + 1}`}
                     aria-describedby={issue ? errId : undefined}
-                    className="px-3 py-2 text-white/50 hover:text-red-300 text-sm rounded"
+                    className="stage-btn stage-btn-quiet"
                   >
                     Remove
                   </button>
                 </div>
-                {issue && <p id={errId} className="text-red-300 text-xs mt-1">{issue}</p>}
+                {issue && <p id={errId} className="text-danger-ink text-xs mt-1">{issue}</p>}
                 {locked && !issue && (
-                  <p className="text-white/50 text-xs mt-1">
+                  <p className="text-ink-2 text-xs mt-1">
                     Key locked — answers are stored by it. Rename the label instead.
                   </p>
                 )}
@@ -2054,11 +2533,11 @@ function ReferralPromptSection() {
             type="button"
             onClick={() => { setRows(p => [...p, { key: '', label: '', rowId: nextRowId.current++ }]); setSaved(false) }}
             disabled={rows.length >= 12}
-            className="px-3 py-1.5 bg-white/[0.06] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-40"
+            className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
           >
             + Add option
           </button>
-          <span className="text-white/50 text-xs">
+          <span className="text-ink-2 text-xs">
             “{REFERRAL_OTHER_LABEL}” with a free-text box is always offered last. It is not
             listed here because it cannot be edited or turned off.
           </span>
@@ -2069,7 +2548,7 @@ function ReferralPromptSection() {
           a live region created at the same moment as its text is not announced,
           which would leave a screen-reader admin with no feedback at all on
           either success or failure. */}
-      <p role="alert" className="text-red-300 text-sm empty:hidden">{err}</p>
+      <p role="alert" className="text-danger-ink text-sm empty:hidden">{err}</p>
       <div className="flex items-center gap-3">
         {/* aria-disabled, not the native attribute. `disabled` removes the
             button from the tab order, so an admin who cannot see it finds no
@@ -2081,15 +2560,14 @@ function ReferralPromptSection() {
           onClick={() => { if (!blocked) void save() }}
           aria-disabled={blocked || undefined}
           aria-describedby={blockedReason ? 'referral-save-blocked' : undefined}
-          className={'px-4 py-2 bg-purple-600 text-white text-sm rounded-lg '
-            + (blocked ? 'opacity-50 cursor-not-allowed' : 'hover:bg-purple-500')}
+          className="stage-btn stage-btn-primary"
         >
           {saving ? 'Saving…' : 'Save prompt'}
         </button>
         {blockedReason && (
-          <span id="referral-save-blocked" className="text-white/50 text-xs">{blockedReason}</span>
+          <span id="referral-save-blocked" className="text-ink-2 text-xs">{blockedReason}</span>
         )}
-        <span role="status" className="text-white/55 text-xs">{saved ? 'Saved.' : ''}</span>
+        <span role="status" className="text-ink-2 text-xs">{saved ? 'Saved.' : ''}</span>
       </div>
     </div>
   )
@@ -2114,15 +2592,15 @@ function ReferralSummarySection() {
 
   const top = data && data.by_source.length ? data.by_source[0].count : 0
   return (
-    <div className="glass-panel rounded-2xl p-5 space-y-3">
+    <div className="bg-surface-raised rounded-control p-5 space-y-3">
       <div className="flex items-center justify-between">
-        <h2 className="text-white font-semibold">Where sign-ups came from</h2>
-        <label className="text-white/55 text-xs">
+        <h3 className="text-ink font-semibold">Where sign-ups came from</h3>
+        <label className="text-ink-2 text-xs">
           <span className="sr-only">Time window</span>
           <select
             value={days}
             onChange={e => setDays(Number(e.target.value))}
-            className="px-2 py-1 bg-white/[0.04] border border-white/[0.06] rounded text-white text-xs"
+            className="px-2 py-1 bg-surface-raised-2 border border-line rounded-chip text-ink text-xs"
           >
             <option value={0}>All time</option>
             <option value={7}>Last 7 days</option>
@@ -2132,22 +2610,22 @@ function ReferralSummarySection() {
         </label>
       </div>
 
-      <p role="alert" className="text-red-300 text-sm empty:hidden">{err}</p>
-      {!data && !err && <p className="text-white/50 text-sm">Loading…</p>}
+      <p role="alert" className="text-danger-ink text-sm empty:hidden">{err}</p>
+      {!data && !err && <p className="text-ink-2 text-sm">Loading…</p>}
       {data && (
         <>
           <div className="flex gap-6 text-sm">
-            <span className="text-white/80">{data.answered.toLocaleString()} <span className="text-white/50">answered</span></span>
-            <span className="text-white/80">{data.skipped.toLocaleString()} <span className="text-white/50">skipped</span></span>
-            <span className="text-white/80">{data.pending.toLocaleString()} <span className="text-white/50">not yet asked</span></span>
+            <span className="text-ink">{data.answered.toLocaleString()} <span className="text-ink-2">answered</span></span>
+            <span className="text-ink">{data.skipped.toLocaleString()} <span className="text-ink-2">skipped</span></span>
+            <span className="text-ink">{data.pending.toLocaleString()} <span className="text-ink-2">not yet asked</span></span>
           </div>
           {data.total === 0 ? (
-            <p className="text-white/50 text-sm">
+            <p className="text-ink-2 text-sm">
               No one has been asked yet. Accounts become eligible when they sign up through a
               provider with its invite bypass turned on.
             </p>
           ) : data.by_source.length === 0 ? (
-            <p className="text-white/50 text-sm">No answers yet.</p>
+            <p className="text-ink-2 text-sm">No answers yet.</p>
           ) : (
             <div className="space-y-1.5">
               {data.by_source.map(row => {
@@ -2159,16 +2637,16 @@ function ReferralSummarySection() {
                         tidies the list. A null label does NOT mean removed:
                         the implicit "other" never has a stored option, so the
                         key decides the styling, not the label's presence. */}
-                    <span className={`w-48 shrink-0 text-sm ${isRemovedSummaryRow(row) ? 'text-white/50 italic' : 'text-white/80'}`}>
+                    <span className={`w-48 shrink-0 text-sm ${isRemovedSummaryRow(row) ? 'text-ink-2 italic' : 'text-ink'}`}>
                       {row.label ?? referralSourceLabel(row.key, [])}
                     </span>
-                    <div className="flex-1 h-2 rounded-full bg-white/[0.06] overflow-hidden" aria-hidden="true">
+                    <div className="flex-1 h-2 rounded-full bg-surface-raised-2 overflow-hidden" aria-hidden="true">
                       <div
-                        className="h-full rounded-full bg-gradient-to-r from-purple-500 to-purple-400"
+                        className="h-full rounded-full bg-action"
                         style={{ width: `${top > 0 ? (row.count / top) * 100 : 0}%` }}
                       />
                     </div>
-                    <span className="w-24 shrink-0 text-right text-white/60 text-sm tabular-nums">
+                    <span className="w-24 shrink-0 text-right text-ink-2 text-sm tabular-nums">
                       {row.count.toLocaleString()} · {pct}%
                     </span>
                   </div>
@@ -2194,20 +2672,20 @@ function ReferralCell({ user, options, answeredAt }: {
   if (!user.referral_status) {
     // Never eligible — a password signup, an invited user, or a provider with
     // no bypass. Not "we forgot to ask".
-    return <span className="text-white/50" title="Not eligible — signed up with an invite or a password">—</span>
+    return <span className="text-ink-2" title="Not eligible — signed up with an invite or a password">—</span>
   }
   if (user.referral_status === 'pending') {
-    return <span className="text-white/50 text-sm">Pending</span>
+    return <span className="text-ink-2 text-sm">Pending</span>
   }
   if (user.referral_status === 'skipped') {
-    return <span className="text-white/50 text-sm">— (skipped)</span>
+    return <span className="text-ink-2 text-sm">— (skipped)</span>
   }
   const label = referralSourceLabel(user.referral_source ?? '', options)
   return (
-    <span className="text-white/70 text-sm" title={answeredAt ? `Answered ${answeredAt}` : undefined}>
+    <span className="text-ink-2 text-sm" title={answeredAt ? `Answered ${answeredAt}` : undefined}>
       {label}
       {user.referral_detail && (
-        <span className="text-white/50"> — “{truncateChars(user.referral_detail, 60)}”</span>
+        <span className="text-ink-2"> — “{truncateChars(user.referral_detail, 60)}”</span>
       )}
     </span>
   )
@@ -2226,10 +2704,12 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
   // register a new OAuth app.
   consoleURL: string
   settings: OAuthSettings
-  onUpdate: (s: OAuthSettings) => void
+  onUpdate: React.Dispatch<React.SetStateAction<OAuthSettings | null>>
 }) {
   const [secretEdit, setSecretEdit] = useState('')
   const [saving, setSaving] = useState(false)
+  const [said, say] = useSaid()
+  const [saveFailed, setSaveFailed] = useState<Failure | null>(null)
 
   // Field accessors keyed by provider prefix. Avoids three near-
   // identical copies of the same JSX.
@@ -2248,28 +2728,28 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
   const maskedSecret = settings[maskedKey] as string
 
   const setField = (key: keyof OAuthSettings, val: string | boolean) => {
-    onUpdate({ ...settings, [key]: val })
+    onUpdate(prev => prev && { ...prev, [key]: val })
   }
 
   const callbackHint = `https://your-aurora/api/auth/oauth/${provider}/callback`
 
   return (
-    <div className="glass-panel rounded-2xl p-5 space-y-3">
+    <div className="bg-surface-raised rounded-control p-5 space-y-3">
       <div className="flex items-center justify-between mb-2">
-        <h2 className="text-white font-semibold">
+        <h3 className="text-ink font-semibold">
           {label} OAuth (Sign-in)
-          {enabled && <span className="ml-2 text-emerald-300 text-[10px] uppercase tracking-wider">Enabled</span>}
-        </h2>
+          {enabled && <span className="ml-2 text-ok text-xs uppercase tracking-wider">Enabled</span>}
+        </h3>
         <a
           href={consoleURL}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-purple-300 hover:text-purple-200 text-xs underline-offset-4 hover:underline"
+          className="text-ink hover:text-ink text-xs underline-offset-4 hover:underline"
         >
           Open {label} developer console ↗
         </a>
       </div>
-      <label className="flex items-center gap-2 text-sm text-white/70">
+      <label className="flex items-center gap-2 text-sm text-ink-2">
         <input
           type="checkbox"
           checked={enabled}
@@ -2278,17 +2758,17 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
         Enable {label} Sign-In
       </label>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="text-sm text-white/70">
-          <span className="block text-xs text-white/50 mb-1">Client ID</span>
+        <label className="text-sm text-ink-2">
+          <span className="block text-xs text-ink-2 mb-1">Client ID</span>
           <input
             value={clientID}
             onChange={e => setField(clientIDKey, e.target.value)}
-            className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
+            className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm"
           />
         </label>
-        <label className="text-sm text-white/70">
-          <span className="block text-xs text-white/50 mb-1">
-            Client Secret {hasSecret && <span className="text-emerald-300 text-[10px]">SET</span>}
+        <label className="text-sm text-ink-2">
+          <span className="block text-xs text-ink-2 mb-1">
+            Client Secret {hasSecret && <span className="text-ok text-xs">SET</span>}
           </span>
           <input
             type="password"
@@ -2296,22 +2776,22 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
             value={secretEdit}
             onChange={e => setSecretEdit(e.target.value)}
             placeholder={maskedSecret || 'leave empty to keep existing'}
-            className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
+            className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm"
           />
         </label>
-        <label className="md:col-span-2 text-sm text-white/70">
-          <span className="block text-xs text-white/50 mb-1">
-            Redirect URL <span className="text-white/50">(must match {label} Console verbatim)</span>
+        <label className="md:col-span-2 text-sm text-ink-2">
+          <span className="block text-xs text-ink-2 mb-1">
+            Redirect URL <span className="text-ink-2">(must match {label} Console verbatim)</span>
           </span>
           <input
             value={redirectURL}
             onChange={e => setField(redirectKey, e.target.value)}
             placeholder={callbackHint}
-            className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
+            className="w-full px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm"
           />
         </label>
       </div>
-      <label className="flex items-center gap-2 text-sm text-white/70">
+      <label className="flex items-center gap-2 text-sm text-ink-2">
         <input
           type="checkbox"
           checked={bypassInvite}
@@ -2320,9 +2800,14 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
         Bypass invite-code requirement for {label} sign-up
       </label>
       <button
-        disabled={saving}
+        // Not `disabled` while it saves: what came of it is said beside this
+        // button, and a disabled one drops the focus.
+        aria-disabled={saving || undefined}
         onClick={async () => {
+          if (saving) return
           setSaving(true)
+          setSaveFailed(null)
+          let saved = false
           try {
             // Build a per-provider patch — only this provider's
             // fields. The admin endpoint accepts the full union
@@ -2335,20 +2820,34 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
               [bypassKey]: bypassInvite,
             }
             if (secretEdit) body[`${provider}_client_secret`] = secretEdit
-            const next = await updateAdminOAuth(body as Parameters<typeof updateAdminOAuth>[0])
-            onUpdate(next)
+            await updateAdminOAuth(body as Parameters<typeof updateAdminOAuth>[0])
+            saved = true
             setSecretEdit('')
-            window.alert(`${label} OAuth settings saved.`)
+            // The PUT answers an acknowledgement, not the settings: read them
+            // again, and take this provider's fields from what was stored
+            // (another provider's card keeps what is being typed in it).
+            const next = await getAdminOAuth()
+            onUpdate(prev => {
+              if (!prev) return next
+              const mine = Object.fromEntries(Object.entries(next).filter(([k]) => k.startsWith(`${provider}_`)))
+              return { ...prev, ...mine } as OAuthSettings
+            })
+            // Sign-in reads these on every request: nothing waits on a restart.
+            say(`${label} sign-in settings saved.`)
           } catch (e) {
-            window.alert('Save failed: ' + (e instanceof Error ? e.message : 'unknown'))
+            setSaveFailed(saved
+              ? { says: 'Saved. The settings could not be read back: reload to see them.', server: adminFailure(e, 'read the settings back').server }
+              : adminFailure(e, `save the ${label} sign-in settings`, { 400: 'The server refused these settings.' }))
           } finally {
             setSaving(false)
           }
         }}
-        className="mt-3 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+        className="stage-btn stage-btn-primary mt-3"
       >
         {saving ? 'Saving…' : `Save ${label} settings`}
       </button>
+      <FailureNote failure={saveFailed} />
+      <StatusLine said={said} />
     </div>
   )
 }
@@ -2358,24 +2857,44 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
 // Replaces the bare "Delete" button so role changes get a home too.
 //
 // The menu renders into a document.body portal with fixed positioning anchored
-// to the trigger's bounding rect. That's deliberate: the Users table lives in a
-// .glass-panel with `overflow-hidden` (clips an absolutely-positioned child)
-// AND a backdrop-filter (which makes `position: fixed` resolve against the
-// panel, not the viewport). A body portal escapes both traps so the menu is
-// never clipped, including on the last row. Closes on outside click, Escape,
-// and scroll/resize (the anchor would otherwise drift).
+// to the trigger's bounding rect. That's deliberate: the Users table scrolls
+// sideways inside its panel, and a scroller clips an absolutely positioned
+// child. A body portal escapes that, so the menu is never clipped, including
+// on the last row. Closes on outside click, Escape, and scroll/resize (the
+// anchor would otherwise drift).
 function UserRowMenu({
   user,
   onRoleChanged,
   onDeleted,
+  reloadUsers,
+  say,
 }: {
   user: AdminUser
   onRoleChanged: (role: 'admin' | 'user') => void
+  /** The row goes, and this menu and its dialog with it: the caller puts the
+   *  focus somewhere that stays. */
   onDeleted: () => void
+  /** Reads the users again in place; true when the read succeeded. Used
+   *  after a role change that failed (the server may have made it anyway: a
+   *  demotion answers 500 when only the sign-out that follows failed) and
+   *  after one that found the user gone. */
+  reloadUsers: () => Promise<boolean>
+  say: (text: string) => void
 }) {
   const [open, setOpen] = useState(false)
-  const [busy, setBusy] = useState(false)
   const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
+  // The question a menu item asked, and its one request.
+  // A role question carries the role it was asked about, fixed when it is
+  // asked: the row can change under an open question (a re-read after a
+  // change that may have happened), and a retry of "Remove admin" must never
+  // become "Make admin".
+  type Asked = { what: 'role'; from: 'admin' | 'user' } | { what: 'delete' }
+  const flow = useConfirmedAction<Asked>(a => a.what === 'role' ? `changing ${user.username}'s role` : `deleting ${user.username}`)
+  const asking = flow.asked
+  const busy = flow.busy
+  // What came of a change the dialog was closed on (it may have happened),
+  // said beside the menu's button.
+  const [rowNote, setRowNote] = useState<Failure | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
@@ -2416,48 +2935,88 @@ function UserRowMenu({
 
   const isAdmin = user.role === 'admin'
 
-  const handleRole = async () => {
-    const nextRole: 'admin' | 'user' = isAdmin ? 'user' : 'admin'
-    const verb = isAdmin ? 'Remove admin from' : 'Make'
-    if (!window.confirm(`${verb} "${user.username}"${isAdmin ? '' : ' an admin'}?`)) return
-    setBusy(true)
+  // A menu item asks its question in the app's dialog; the menu closes, and
+  // the dialog gives the focus back to the menu's button.
+  const ask = (what: 'role' | 'delete') => {
+    if (busy) return
+    setOpen(false)
+    triggerRef.current?.focus()
+    setRowNote(null)
+    flow.ask(what === 'role' ? { what, from: isAdmin ? 'admin' : 'user' } : { what })
+  }
+
+  const handleRole = () => flow.run(async asked => {
+    if (asked.what !== 'role') return null
+    // The row no longer has the role the question was about: nothing is
+    // sent, and the question is put down.
+    if (user.role !== asked.from) {
+      say(`${user.username}'s role has changed since you asked, so nothing was sent. Check it and ask again.`)
+      return null
+    }
+    const nextRole: 'admin' | 'user' = asked.from === 'admin' ? 'user' : 'admin'
     try {
       await updateUserRole(user.id, nextRole)
       onRoleChanged(nextRole)
       setOpen(false)
+      say(nextRole === 'admin' ? `${user.username} is now an admin.` : `${user.username} is no longer an admin.`)
+      return null
     } catch (err) {
-      window.alert('Role change failed: ' + (err instanceof Error ? err.message : 'unknown'))
-    } finally {
-      setBusy(false)
+      const read = await reloadUsers()
+      if (err instanceof APIError && err.status === 404) {
+        say(`${user.username} was already gone from the server.`)
+        return null
+      }
+      // A refusal (the last admin) changed nothing: it is said in the
+      // dialog, whose question stays what it was.
+      if (err instanceof APIError && err.status < 500) return adminFailure(err, `change ${user.username}'s role`)
+      // Anything else may have changed the role. The question is put down
+      // (its words could be the wrong way round by now) and the list read
+      // again says what is so.
+      setRowNote({
+        says: read
+          ? `Could not confirm the change. The list has been read again: check ${user.username}'s role.`
+          : `Could not confirm the change, and the list could not be read again. Reload this page to check ${user.username}'s role.`,
+        server: adminFailure(err, `change ${user.username}'s role`).server,
+      })
+      return null
     }
-  }
+  })
 
-  const handleDelete = async () => {
-    if (!window.confirm(`Delete user "${user.username}"? This cannot be undone.`)) return
-    setBusy(true)
+  const handleDelete = () => flow.run(async () => {
     try {
       await deleteUser(user.id)
-      // onDeleted() removes this row, unmounting the component — so close first
-      // and let it be the last statement on the success path. No setState runs
-      // after the unmount (unlike a finally{} block would).
+      // onDeleted() removes this row, unmounting the component (and this
+      // dialog): say it first.
       setOpen(false)
+      say(`Deleted ${user.username}.`)
       onDeleted()
+      return null
     } catch (err) {
-      window.alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'))
-      setBusy(false) // only reset on the error path, where the row stays mounted
+      if (err instanceof APIError && err.status === 404) {
+        say(`${user.username} was already gone from the server.`)
+        // The read takes the row away, this dialog with it: the page hands
+        // the focus on as it does for a delete that went through.
+        await reloadUsers()
+        onDeleted()
+        return null
+      }
+      return adminFailure(err, `delete ${user.username}`)
     }
-  }
+  })
+  const roleFrom = asking?.what === 'role' ? asking.from : (isAdmin ? 'admin' : 'user')
 
   return (
     <>
       <button
         ref={triggerRef}
-        onClick={() => setOpen(o => !o)}
-        disabled={busy}
+        onClick={() => { if (!busy) setOpen(o => !o) }}
+        // Not `disabled` while a change is out: the dialog gives the focus
+        // back to this button, and a disabled one cannot take it.
+        aria-disabled={busy || undefined}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Actions for ${user.username}`}
-        className="p-1.5 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/[0.06] disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-400/60"
+        className="grid h-11 w-11 place-items-center rounded-control text-ink-2 hover:text-ink hover:bg-action-soft aria-disabled:opacity-50"
       >
         <Icon name="moreVertical" size={16} />
       </button>
@@ -2466,30 +3025,59 @@ function UserRowMenu({
           ref={menuRef}
           role="menu"
           style={{ position: 'fixed', top: pos.top, right: pos.right }}
-          className="w-48 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-2xl z-[60] overflow-hidden animate-fade-in"
+          className="w-48 rounded-control bg-surface-raised-2 shadow-[shadow:var(--shadow-modal)] z-[60] overflow-hidden animate-fade-in"
         >
           <button
             role="menuitem"
-            onClick={handleRole}
+            onClick={() => ask('role')}
             disabled={busy}
-            className="w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] disabled:opacity-50 flex items-center gap-2.5"
+            className="w-full min-h-[44px] text-left px-4 py-2.5 text-sm text-ink hover:bg-action-soft disabled:opacity-50 flex items-center gap-2.5"
           >
-            <Icon name="shield" size={14} className="text-purple-300/70" />
+            <Icon name="shield" size={14} className="text-ink-2" />
             {isAdmin ? 'Remove admin' : 'Make admin'}
           </button>
-          <div className="border-t border-white/[0.06]" />
+          <div className="border-t border-line" />
           <button
             role="menuitem"
-            onClick={handleDelete}
+            onClick={() => ask('delete')}
             disabled={busy}
-            className="w-full text-left px-4 py-2.5 text-sm text-red-300/85 hover:bg-red-500/10 disabled:opacity-50 flex items-center gap-2.5"
+            className="w-full min-h-[44px] text-left px-4 py-2.5 text-sm text-danger-ink hover:bg-action-soft disabled:opacity-50 flex items-center gap-2.5"
           >
-            <Icon name="trash" size={14} className="text-red-400/60" />
+            <Icon name="trash" size={14} className="text-danger-ink" />
             Delete user
           </button>
         </div>,
         document.body,
       )}
+      <ConfirmDialog
+        {...flow.dialog}
+        open={asking?.what === 'role'}
+        error={flow.dialog.error && <FailureText failure={flow.dialog.error} />}
+        title={roleFrom === 'admin' ? `Remove admin from ${user.username}?` : `Make ${user.username} an admin?`}
+        confirmLabel={busy ? 'Changing…' : roleFrom === 'admin' ? 'Remove admin' : 'Make admin'}
+        safeFirst={roleFrom !== 'admin'}
+        onConfirm={() => { void handleRole() }}
+        fallbackFocus={() => triggerRef.current}
+      >
+        {roleFrom === 'admin'
+          ? `${user.username} loses the admin pages and every admin power. They stay signed in.`
+          : `${user.username} gets the admin pages and every admin power: users, libraries, settings, backups and restores.`}
+      </ConfirmDialog>
+      <ConfirmDialog
+        {...flow.dialog}
+        open={asking?.what === 'delete'}
+        error={flow.dialog.error && <FailureText failure={flow.dialog.error} />}
+        title={`Delete ${user.username}?`}
+        confirmLabel={busy ? 'Deleting…' : 'Delete user'}
+        destructive
+        safeFirst
+        onConfirm={() => { void handleDelete() }}
+        fallbackFocus={() => triggerRef.current}
+      >
+        Their profiles, watch history, lists, collections, requests and rooms are deleted with them, and every
+        device they are signed in on is signed out. This cannot be undone.
+      </ConfirmDialog>
+      <div className="mt-1 max-w-[16rem] text-left empty:hidden">{flow.panelNotes}<FailureNote failure={rowNote} /></div>
     </>
   )
 }
@@ -2521,64 +3109,46 @@ export type StatTileProps = {
 
 function StatTile({ label, value, icon, color, hint, sub }: StatTileProps) {
   return (
-    <div className="glass-panel rounded-2xl px-[18px] py-4">
+    <div className="bg-surface-raised rounded-control px-[18px] py-4">
       {/* tabular-nums so a row of tiles does not jitter its digits as the
           numbers tick — several of these poll. */}
-      <p className="text-white font-display font-extrabold text-[26px] leading-none tracking-tight tabular-nums">
+      <p className="text-ink font-display font-extrabold text-[26px] leading-none tracking-tight tabular-nums">
         {value}
       </p>
       <div
-        className={`text-white/60 text-[11px] mt-1.5 flex items-center gap-[7px] ${hint ? 'cursor-help' : ''}`}
+        className={`text-ink-2 text-xs mt-1.5 flex items-center gap-[7px] ${hint ? 'cursor-help' : ''}`}
         title={hint}
       >
         <Icon name={icon} size={13} className={color} />
         {label}
-        {hint && <span className="text-white/35">ⓘ</span>}
+        {hint && <span className="text-ink-3">ⓘ</span>}
       </div>
-      {sub && <p className="text-white/50 text-[10px] mt-1 tabular-nums">{sub}</p>}
+      {sub && <p className="text-ink-2 text-xs mt-1 tabular-nums">{sub}</p>}
     </div>
   )
 }
 
-// The thirteen admin sections, in strip order. Hoisted out of the component
-// (Aurora Stage Phase 7a) so the arrow-key handler, the label map and the type
-// can all be derived from ONE list — the type and the array were previously two
-// hand-maintained copies of the same thirteen strings, which is the kind of
-// pair that drifts when a tab is added.
-export const ADMIN_TABS = [
-  'dashboard', 'users', 'libraries', 'rooms', 'requests', 'activity',
-  'sessions', 'flagged', 'logs', 'server', 'llm', 'oauth', 'backup',
-] as const
-export type AdminTab = typeof ADMIN_TABS[number]
+// The sections, their names and their grouping live in AdminShell. `AdminTab`
+// is the name this file has always used for one.
+type AdminTab = AdminSection
 
-// Tab labels that `capitalize` gets wrong, or that read better renamed.
-// Module scope: this is a constant, and it used to be rebuilt inside the
-// tabs.map callback — thirteen object literals per render.
-//
-// QA BUG-010 follow-up — the Transcodes tab heading inside reads "Active
-// Transcode Streams" but the nav label was just "Sessions", which read as
-// generic and made direct-play streams' absence more confusing.
-const ADMIN_TAB_LABELS: Partial<Record<AdminTab, string>> = {
-  llm: 'LLM',
-  oauth: 'OAuth',
-  sessions: 'Transcodes',
-}
-
-export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
+export default function AdminView({ currentAdminId, catalogVersion = 0, initialSection, sectionAsk = 0 }: {
   currentAdminId: number
   /** App's live catalog version (hooks/useCatalogVersion); a change means a
    *  scan added titles, so the dashboard's counts refresh. */
   catalogVersion?: number
+  /** The section the page opens on (the scan bar's "Open Libraries"); the
+   *  overview when none is asked for. */
+  initialSection?: AdminSection
+  /** Counts the asks for `initialSection`. A new one while the page is up
+   *  opens that section again, in place: the page is not remounted (which
+   *  fetched the dashboard again and dropped what the open section held). */
+  sectionAsk?: number
 }) {
-  const [tab, setTab] = useState<AdminTab>('dashboard')
-  // Where the roving tabIndex sits. Distinct from `tab` because the strip uses
-  // MANUAL activation: arrows move focus without switching panels, so the
-  // focused tab and the selected tab diverge until Enter/Space.
-  const [focusedTab, setFocusedTab] = useState<AdminTab>('dashboard')
-  const tabs = ADMIN_TABS
-  // Per-tab refs so arrow-key navigation can move real focus with the roving
-  // index (ARIA tabs pattern — the set is one tab stop).
-  const tabRefs = useRef<Partial<Record<AdminTab, HTMLButtonElement | null>>>({})
+  const [tab, setTab] = useState<AdminTab>(initialSection ?? 'dashboard')
+  useEffect(() => {
+    if (initialSection) setTab(initialSection)
+  }, [sectionAsk, initialSection])
 
   // /api/admin/backup streams a pg_dump archive. We fetch with the
   // Authorization header (rather than a tokenized anchor) so the
@@ -2586,12 +3156,22 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
   // Blob for download. Trade-off: whole-archive buffering, but
   // pg_dump custom-format is self-compressed so even multi-GB DBs
   // fit comfortably.
-  const downloadBackup = useCallback(async () => {
+  // Answers what came of it, said beside the button by the backup panel.
+  const downloadBackup = useCallback(async (): Promise<Failure | null> => {
     try {
       const res = await apiFetchResponse('/api/admin/backup')
       if (!res.ok) {
         const body = await res.text().catch(() => '')
-        throw new Error(`HTTP ${res.status}${body ? ': ' + body.slice(0, 200) : ''}`)
+        // The server's sentence from its error shape ({error: {message}} or
+        // {error: "…"}), else the text as sent.
+        let said = body.slice(0, 200)
+        try {
+          const err = (JSON.parse(body) as { error?: unknown }).error
+          if (typeof err === 'string') said = err
+          else if (err && typeof err === 'object' && typeof (err as { message?: unknown }).message === 'string') said = (err as { message: string }).message
+        } catch { /* not JSON: the text as it came */ }
+        // An APIError, so the status reaches the words the panel says.
+        throw new APIError(res.status, said || `HTTP ${res.status}`, body)
       }
       // Derive a filename from Content-Disposition; fall back to a
       // timestamp-based default.
@@ -2611,11 +3191,29 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
       // Release the blob URL on the next tick so the browser has
       // finished kicking off the save dialog.
       setTimeout(() => URL.revokeObjectURL(url), 1000)
+      return null
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'unknown error'
-      window.alert('Backup download failed: ' + msg)
+      return adminFailure(e, 'download a backup', { 409: 'A backup or restore is already running. Try again when it has finished.' })
     }
   }, [])
+  // What the admin still has to do, kept while the page is up so that it is
+  // said again when its section is opened again.
+  const [llmRestart, setLLMRestart] = useState(false)
+  const [usersSaid, sayUsers] = useSaid()
+  const [inviteFailed, setInviteFailed] = useState<Failure | null>(null)
+  // The users read again in place (a role change that may or may not have
+  // been made): the list stays up meanwhile, and a failed read keeps it.
+  const reloadUsers = useCallback(async () => {
+    try { setUsers(await listAdminUsers()); return true } catch { /* the list on screen stays */ return false }
+  }, [])
+  // A deleted user's row takes its menu, and the focus in it, away: the
+  // users table takes it instead, once the row has gone.
+  const usersTableRef = useRef<HTMLDivElement | null>(null)
+  const [userGone, setUserGone] = useState(0)
+  useEffect(() => {
+    if (userGone === 0) return
+    if (!document.activeElement || document.activeElement === document.body) usersTableRef.current?.focus({ preventScroll: true })
+  }, [userGone])
 
   const [stats, setStats] = useState<ServerStats | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
@@ -2847,150 +3445,28 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
   }
 
   return (
-    <div className="animate-fade-in">
-      <PageHeader title="Administration" sub="Server management dashboard" />
-
-      {/* Tab strip — a REAL tablist, sticky under the chrome.
-          .stage-toolbar + .stage-tabstrip + .stage-tab, all three already
-          existing primitives, rather than a new .stage-admintabs:
-            - .stage-toolbar is exactly this job (sticky at the MEASURED
-              --chrome-h so it tracks the admin scan bar appearing above the
-              nav, blurred fill, bottom border, and static below md where
-              pinning a wrapped strip would eat a third of the viewport).
-              BrowseView's filter bar is the same pattern.
-            - .stage-tabstrip is the horizontally-scrolling strip TopNav uses,
-              with the padding/margin trick that stops the active tab's
-              underline glow and focus ring being clipped by the scroll box.
-              Thirteen tabs overflow at every width, so this matters more here
-              than in the nav.
-          The old strip was a non-scrolling `flex` of thirteen buttons, which
-          simply overflowed its container.
-
-          role="tablist" + arrow-key navigation, not aria-current: these switch
-          a panel in place, so they are tabs, and ARIA's tabs pattern requires
-          the whole set to be ONE tab stop with Left/Right (plus Home/End)
-          moving between them. Phase 6 rejected role="tab" for the filter pills
-          precisely because that keyboard contract was not implemented; here it
-          is, so the role is honest.
-
-          QA BUG-006 — `capitalize` only uppercases the first letter
-          per word, so "llm" → "Llm" and "oauth" → "Oauth". Override
-          for the acronyms; everything else still falls through to
-          the existing capitalize rule. */}
-      {/* The negative margin cancels .stage-page's side padding so the sticky
-          strip's fill reaches the VIEWPORT edges at every width, and its own
-          padding-inline puts the content back in line with every other page
-          system. `.stage-gutter` is NOT on this element any more — `.stage-bleed`
-          set the same property later in the file and shadowed it, so it was dead
-          and one source-order flip away from reinstating the bug this phase
-          started from.
-          Corrected three times in six commits, twice wrongly: it claimed the
-          viewport edge, then "one gutter outside the capped content above 2016px",
-          then still named a class that had just been removed. It also recorded the
-          BrowseView inconsistency as unresolved after it was settled — measured at
-          HEAD, the two bands are byte-identical at every width. */}
-      <div className="stage-toolbar stage-bleed mb-6">
-        {/* MANUAL activation: arrows move focus, Enter/Space (native on a
-            <button>) selects. Not the automatic variant this started as.
-            APG recommends manual "when the tab panel's content is loaded
-            asynchronously", and every panel here is exactly that — switching
-            tabs fires listAdminUsers / listAdminActivity / listAdminLogs, and
-            the Transcodes and Now-Playing panels each start a 5-second polling
-            interval on mount. With automatic activation, holding ArrowRight
-            from `dashboard` to `backup` mounted and unmounted eleven panels,
-            firing their fetches and spinning two intervals up and down. That
-            cost was paid only by keyboard users. */}
-        <div
-          role="tablist"
-          aria-label="Administration sections"
-          className="stage-tabstrip flex"
-          onKeyDown={e => {
-            // Arrows walk `focusedTab`, which is where the roving tabIndex sits;
-            // `tab` (the selected panel) only moves on click or Enter/Space.
-            const i = tabs.indexOf(focusedTab)
-            let next = -1
-            if (e.key === 'ArrowRight') next = (i + 1) % tabs.length
-            else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length
-            else if (e.key === 'Home') next = 0
-            else if (e.key === 'End') next = tabs.length - 1
-            if (next < 0) return
-            e.preventDefault()
-            setFocusedTab(tabs[next])
-            // focus() scrolls the tab into view inside .stage-tabstrip by
-            // default (preventScroll is false), so no explicit scrollIntoView.
-            tabRefs.current[tabs[next]]?.focus()
-          }}
-        >
-          {tabs.map(t => {
-            const display = ADMIN_TAB_LABELS[t]
-            const selected = tab === t
-            return (
-              <button
-                key={t}
-                ref={el => { tabRefs.current[t] = el }}
-                type="button"
-                role="tab"
-                id={`admin-tab-${t}`}
-                aria-selected={selected}
-                // Only the SELECTED tab's panel exists in the DOM, so pointing
-                // the other twelve at `admin-panel-<t>` was a dangling IDREF.
-                // ARIA requires IDREFs to resolve; omit rather than dangle.
-                aria-controls={selected ? `admin-panel-${t}` : undefined}
-                // Roving tabIndex on the FOCUSED tab, which under manual
-                // activation is not always the selected one. One tab stop for
-                // the set either way.
-                tabIndex={focusedTab === t ? 0 : -1}
-                onClick={() => { setTab(t); setFocusedTab(t) }}
-                // Keeps the roving index honest when focus arrives by click or
-                // by Tab rather than by arrow key.
-                onFocus={() => setFocusedTab(t)}
-                className={`stage-tab ${display ? '' : 'capitalize'}`}
-              >
-                {display ?? t}
-              </button>
-            )
-          })}
-        </div>
-      </div>
-
-      {/* One tabpanel wrapper, not thirteen. Only one section is mounted at a
-          time, so a single element whose id and aria-labelledby track the active
-          tab is both correct and the only version that cannot drift out of sync
-          with the strip above.
-          NO tabIndex and NO focus-visible:outline-none. The first version had
-          both, and the comment justifying them had the behaviour backwards: APG
-          gives a tabpanel tabindex="0" only when it holds NOTHING focusable, and
-          all thirteen of these are full of buttons and inputs — so it ADDED a
-          stop before the content rather than skipping to it. Worse,
-          `focus-visible:outline-none` then hid that stop: Tailwind 3 emits
-          `outline: 2px solid transparent`, and at (0,2,0) it beat index.css's
-          (0,1,0) `:focus-visible` outline floor on both specificity and source
-          order. Focus landed on an invisible full-height container — the third
-          time this exact cascade has shipped here, and index.css documents it
-          twice. */}
-      <div
-        role="tabpanel"
-        id={`admin-panel-${tab}`}
-        aria-labelledby={`admin-tab-${tab}`}
-      >
+    // A section opens when its name is pressed, and only then loads what it
+    // shows (the effects above key on `tab`): two of them poll, so nothing is
+    // mounted that is not on screen.
+    <AdminShell current={tab} onSection={setTab}>
       {tab === 'dashboard' && (
         <div>
           {statsErr && (
-            <div className="mb-6 px-5 py-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm">{statsErr}</div>
+            <div className="mb-6 px-5 py-3 rounded-control bg-surface-raised-2 border border-line text-danger-ink text-sm">{statsErr}</div>
           )}
           {statsLoading && !stats && (
-            <div className="mb-6 text-white/50 text-sm">Loading stats…</div>
+            <div className="mb-6 text-ink-2 text-sm">Loading stats…</div>
           )}
           {(skipStatus?.enabled || embStatus?.enabled) && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4 mb-6">
               {([
                 ...(embStatus && embStatus.enabled
                   ? [{
-                      label: 'Titles Embedded',
+                      label: 'Titles embedded',
                       value: `${embStatus.embedded.toLocaleString()} / ${embStatus.total.toLocaleString()}`,
                       icon: 'cpu',
-                      color: embStatus.pending > 0 ? 'text-amber-400' : 'text-emerald-400',
-                      hint: 'Media items with a semantic-search embedding — one per title (movie or show), not one per file. Shares its denominator with the Movies + Shows tile, not with Skip Analysis.',
+                      color: embStatus.pending > 0 ? 'text-warn' : 'text-ok',
+                      hint: 'Media items with a semantic-search embedding — one per title (movie or show), not one per file. Shares its denominator with the Movies and shows tile, not with Skip analysis.',
                     }]
                   : []),
                 ...(skipStatus && skipStatus.enabled
@@ -3007,11 +3483,11 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
                         // through, and a file it found nothing in still
                         // counts. The marker counts the endpoint already
                         // returns now ride the sub-line.
-                        label: 'Skip Analysis',
+                        label: 'Skip analysis',
                         value: `${analyzed.toLocaleString()} / ${total.toLocaleString()}`,
                         icon: 'film',
-                        color: empty ? 'text-white/40' : behind ? 'text-amber-400' : 'text-emerald-400',
-                        hint: 'Video files scanned for intro/recap/credits: every episode file plus every movie file. A file the detector found nothing in still counts as analyzed, so this is coverage, not markers found. Both figures cover the CURRENT detector version, plus hand-edited markers, which survive a bump. So after a detector bump coverage drops to zero while the marker counts fall only to the hand-edited remainder, and players keep using markers from the previous version until each file is re-swept. Counts FILES — the Movies + Shows tile counts titles, and the Server card below counts episode rows, so neither will reconcile against this exactly (a dual-version episode is two files, one row).',
+                        color: empty ? 'text-ink-3' : behind ? 'text-warn' : 'text-ok',
+                        hint: 'Video files scanned for intro/recap/credits: every episode file plus every movie file. A file the detector found nothing in still counts as analyzed, so this is coverage, not markers found. Both figures cover the CURRENT detector version, plus hand-edited markers, which survive a bump. So after a detector bump coverage drops to zero while the marker counts fall only to the hand-edited remainder, and players keep using markers from the previous version until each file is re-swept. Counts FILES — the Movies and shows tile counts titles, and the Server card below counts episode rows, so neither will reconcile against this exactly (a dual-version episode is two files, one row).',
                         sub: formatSkipMarkers(skipMarkerTotals(skipStatus)),
                       }]
                     })()
@@ -3036,60 +3512,60 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
                   // dashboard look broken. Name the rows it counts, and
                   // send episodes to the Server card below.
                   {
-                    label: 'Movies + Shows',
+                    label: 'Movies and shows',
                     value: (stats.movie_count + stats.show_count).toLocaleString(),
                     icon: 'film',
-                    color: 'text-purple-400',
+                    color: 'text-ink-2',
                     hint: 'Title rows: movies plus series. Episodes are NOT included — the Server card below counts those separately. Raw COUNT, so cross-library duplicates are counted twice and this can exceed the deduped total on browse pages.',
                   },
-                  { label: 'Users', value: stats.user_count.toLocaleString(), icon: 'users', color: 'text-blue-400' },
+                  { label: 'Users', value: stats.user_count.toLocaleString(), icon: 'users', color: 'text-ink-2' },
                   {
-                    label: 'Active Streams',
+                    label: 'Active streams',
                     value: String(stats.active_streams),
                     icon: 'monitor',
-                    color: 'text-emerald-400',
-                    hint: 'Streams being watched — transcode plus direct play. A Chromecast holds two server sessions for one viewer (the paused browser session and the cast-safe clone the TV pulls); they count once here and are nested together under Now Playing.',
+                    color: 'text-ink-2',
+                    hint: 'Streams being watched — transcode plus direct play. A Chromecast holds two server sessions for one viewer (the paused browser session and the cast-safe clone the TV pulls); they count once here and are nested together under Now playing.',
                   },
-                  { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', color: 'text-amber-400' },
+                  { label: 'Disk free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', color: 'text-ink-2' },
                 ] satisfies StatTileProps[]).map(s => (
                   <StatTile key={s.label} {...s} />
                 ))}
               </div>
 
-              <div className="glass-panel rounded-2xl p-6 mb-6">
-                <h2 className="text-white font-semibold mb-4">Server</h2>
+              <div className="bg-surface-raised rounded-control p-6 mb-6">
+                <h3 className="text-ink font-semibold mb-4">Server</h3>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                   <div>
-                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Version</p>
-                    <p className="text-white/90">{stats.version}</p>
+                    <p className="text-ink-2 text-xs uppercase tracking-wide mb-1">Version</p>
+                    <p className="text-ink">{stats.version}</p>
                   </div>
                   <div>
-                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Uptime</p>
-                    <p className="text-white/90">{stats.uptime}</p>
+                    <p className="text-ink-2 text-xs uppercase tracking-wide mb-1">Uptime</p>
+                    <p className="text-ink">{stats.uptime}</p>
                   </div>
                   <div title="Aurora's Go process RSS after the last GC. FFmpeg transcoders run as separate subprocesses and aren't counted here. PostgreSQL runs in its own container with its own memory budget.">
-                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1 cursor-help">Memory <span className="text-white/35">ⓘ</span></p>
-                    <p className="text-white/90">{stats.memory_alloc_mb} MB</p>
+                    <p className="text-ink-2 text-xs uppercase tracking-wide mb-1 cursor-help">Memory <span className="text-ink-3">ⓘ</span></p>
+                    <p className="text-ink">{stats.memory_alloc_mb} MB</p>
                   </div>
                   <div>
-                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Goroutines</p>
-                    <p className="text-white/90">{stats.goroutines}</p>
+                    <p className="text-ink-2 text-xs uppercase tracking-wide mb-1">Goroutines</p>
+                    <p className="text-ink">{stats.goroutines}</p>
                   </div>
                   <div>
-                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Libraries</p>
-                    <p className="text-white/90">{stats.library_count}</p>
+                    <p className="text-ink-2 text-xs uppercase tracking-wide mb-1">Libraries</p>
+                    <p className="text-ink">{stats.library_count}</p>
                   </div>
                   <div>
-                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Episodes</p>
-                    <p className="text-white/90">{stats.episode_count.toLocaleString()}</p>
+                    <p className="text-ink-2 text-xs uppercase tracking-wide mb-1">Episodes</p>
+                    <p className="text-ink">{stats.episode_count.toLocaleString()}</p>
                   </div>
                   <div>
-                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Library Size</p>
-                    <p className="text-white/90">{fmtBytes(stats.total_file_size_bytes)}</p>
+                    <p className="text-ink-2 text-xs uppercase tracking-wide mb-1">Library size</p>
+                    <p className="text-ink">{fmtBytes(stats.total_file_size_bytes)}</p>
                   </div>
                   <div>
-                    <p className="text-white/50 text-xs uppercase tracking-wide mb-1">Active Parties</p>
-                    <p className="text-white/90">{stats.active_parties}</p>
+                    <p className="text-ink-2 text-xs uppercase tracking-wide mb-1">Active parties</p>
+                    <p className="text-ink">{stats.active_parties}</p>
                   </div>
                 </div>
               </div>
@@ -3120,46 +3596,50 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
           {/* Invite section — primary entry point for adding new users.
               Lives here (next to the user list) rather than under
               Server settings because that's where admins look. */}
-          <div className="glass-panel rounded-2xl p-5">
+          <div className="bg-surface-raised rounded-control p-5">
             <div className="flex items-start justify-between gap-4 flex-wrap">
               <div>
-                <h2 className="text-white font-semibold mb-1">Invite a user</h2>
-                <p className="text-white/50 text-xs">Generate a one-time code. Share it with the person you want to invite — they'll enter it on the Register screen.</p>
+                <h3 className="text-ink font-semibold mb-1">Invite a user</h3>
+                <p className="text-ink-2 text-xs">Generate a one-time code. Share it with the person you want to invite — they'll enter it on the Register screen.</p>
               </div>
               <button
                 disabled={inviteBusy}
                 onClick={async () => {
-                  setInviteBusy(true); setInviteCopied(false)
-                  try { const r = await createInvite(); setInviteCode(r.code) }
-                  catch (e) { window.alert(e instanceof Error ? e.message : 'failed to generate invite') }
+                  setInviteBusy(true); setInviteCopied(false); setInviteFailed(null)
+                  try { const r = await createInvite(); setInviteCode(r.code); sayUsers('A new invite code is ready below.') }
+                  catch (e) { setInviteFailed(adminFailure(e, 'make an invite code')) }
                   finally { setInviteBusy(false) }
                 }}
-                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-sm rounded-lg whitespace-nowrap"
-              >{inviteBusy ? 'Generating…' : 'Generate Invite Code'}</button>
+                className="stage-btn stage-btn-primary"
+              >{inviteBusy ? 'Generating…' : 'Generate invite code'}</button>
             </div>
+            <FailureNote failure={inviteFailed} className="mt-3" />
+            <StatusLine said={usersSaid} className="mt-3" />
             {/* data-screenshot-exclude — a live invite code is a one-time
                 credential; blank the whole reveal block from bug-report
                 screenshots (the capture path drops tagged subtrees). */}
             {inviteCode && (
-              <div data-screenshot-exclude="true" className="mt-4 p-4 bg-white/[0.04] border border-white/[0.06] rounded flex items-center justify-between gap-4 flex-wrap">
+              <div data-screenshot-exclude="true" className="mt-4 p-4 bg-surface-raised-2 border border-line rounded-chip flex items-center justify-between gap-4 flex-wrap">
                 <div className="min-w-0">
-                  <p className="text-white/60 text-xs mb-1">Share this code:</p>
-                  <p className="font-mono text-lg text-purple-300 tracking-wider break-all">{inviteCode}</p>
+                  <p className="text-ink-2 text-xs mb-1">Share this code:</p>
+                  <p className="font-mono text-lg text-ink tracking-wider break-all">{inviteCode}</p>
                 </div>
                 <button
                   onClick={async () => {
                     try { await navigator.clipboard.writeText(inviteCode); setInviteCopied(true); setTimeout(() => setInviteCopied(false), 2000) }
                     catch { /* clipboard API may be unavailable on http:// — silently no-op */ }
                   }}
-                  className="px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white/80 text-xs rounded whitespace-nowrap"
+                  className="stage-btn stage-btn-sm stage-hit44 stage-btn-ghost"
                 >{inviteCopied ? '✓ Copied' : 'Copy'}</button>
               </div>
             )}
           </div>
 
-          <div className="glass-panel rounded-2xl overflow-hidden">
-          {usersLoading && !users && <p className="p-6 text-white/50 text-sm">Loading users…</p>}
-          {usersErr && <p className="p-6 text-red-300 text-sm">{usersErr}</p>}
+          {/* Scrolls sideways on a phone. It was `overflow-hidden`, which cut
+              the last columns off, the row's menu with them. */}
+          <div ref={usersTableRef} tabIndex={-1} role="region" aria-label="Users on this server" className="bg-surface-raised rounded-control overflow-x-auto">
+          {usersLoading && !users && <p className="p-6 text-ink-2 text-sm">Loading users…</p>}
+          {usersErr && <p className="p-6 text-danger-ink text-sm">{usersErr}</p>}
           {users && (
             <table className="data-table w-full">
               <thead>
@@ -3178,22 +3658,20 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
                   <tr key={u.id}>
                     <td>
                       <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white text-xs font-bold">
-                          {u.username[0]?.toUpperCase() || '?'}
-                        </div>
+                        <ProfileAvatar avatarUrl={u.avatar_url} name={u.username} memberKey={u.id} size={32} />
                         <div>
-                          <p className="text-white/90 text-sm font-medium">{u.username}</p>
-                          <p className="text-white/50 text-xs">{u.email || '—'}</p>
+                          <p className="text-ink text-sm font-medium">{u.username}</p>
+                          <p className="text-ink-2 text-xs">{u.email || '—'}</p>
                         </div>
                       </div>
                     </td>
                     <td>
-                      <span className={`badge-glass text-xs ${u.role === 'admin' ? 'bg-purple-500/10 text-purple-300 border-purple-500/20' : 'bg-white/5 text-white/50 border-white/10'}`}>
+                      <span className={`badge-glass text-xs ${u.role === 'admin' ? 'bg-surface-raised-2 text-ink border-line' : 'bg-surface-raised-2 text-ink-2 border-line'}`}>
                         {u.role}
                       </span>
                     </td>
                     <td>
-                      <span className="text-white/60 text-sm">{u.oauth_provider ? u.oauth_provider : 'password'}</span>
+                      <span className="text-ink-2 text-sm">{u.oauth_provider ? u.oauth_provider : 'password'}</span>
                     </td>
                     <td>
                       <ReferralCell
@@ -3202,19 +3680,21 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
                         answeredAt={u.referral_answered_at ? fmtRelative(u.referral_answered_at) : undefined}
                       />
                     </td>
-                    <td className="text-white/50">{fmtRelative(u.created_at)}</td>
-                    <td className="text-white/50">{u.last_login_at ? fmtRelative(u.last_login_at) : 'Never'}</td>
+                    <td className="text-ink-2">{fmtRelative(u.created_at)}</td>
+                    <td className="text-ink-2">{u.last_login_at ? fmtRelative(u.last_login_at) : 'Never'}</td>
                     <td className="text-right">
                       {/* 3-dot actions: promote/demote + delete. Hidden on the
                           current admin's own row — the server refuses both
                           self-delete and self-role-change with a 4xx, so this
                           just spares them a menu of dead options. */}
                       {currentAdminId !== u.id && (
-                        <div className="flex justify-end">
+                        <div className="flex flex-col items-end">
                           <UserRowMenu
                             user={u}
                             onRoleChanged={(role) => setUsers(prev => prev ? prev.map(x => x.id === u.id ? { ...x, role } : x) : prev)}
-                            onDeleted={() => setUsers(prev => prev ? prev.filter(x => x.id !== u.id) : prev)}
+                            onDeleted={() => { setUsers(prev => prev ? prev.filter(x => x.id !== u.id) : prev); setUserGone(n => n + 1) }}
+                            reloadUsers={reloadUsers}
+                            say={sayUsers}
                           />
                         </div>
                       )}
@@ -3222,7 +3702,7 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
                   </tr>
                 ))}
                 {users.length === 0 && (
-                  <tr><td colSpan={7} className="text-white/50 text-sm text-center py-6">No users found.</td></tr>
+                  <tr><td colSpan={7} className="text-ink-2 text-sm text-center py-6">No users found.</td></tr>
                 )}
               </tbody>
             </table>
@@ -3232,14 +3712,14 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
       )}
 
       {tab === 'activity' && (
-        <div className="glass-panel rounded-2xl p-6">
+        <div className="bg-surface-raised rounded-control p-6">
           <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
-            <h2 className="text-white font-semibold">Recent Activity</h2>
+            <p className="text-ink-2 font-sans text-sm">What people did on this server, newest first.</p>
             {/* Server-side filter (?type=). The option list comes from the
                 server's distinct event types, so it can't drift from the
                 types handlers actually write, and only lists what this
                 instance has recorded. */}
-            <label className="flex items-center gap-2 text-xs text-white/50">
+            <label className="flex items-center gap-2 text-xs text-ink-2">
               <span>Filter</span>
               <select
                 value={activityType}
@@ -3249,7 +3729,7 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
                   // against the new filter, exactly like the log-level toggle.
                   setActivity(null)
                 }}
-                className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
+                className="px-3 py-2 bg-surface-raised-2 border border-line rounded-chip text-ink text-sm"
               >
                 <option value="">All activity</option>
                 {(activityTypes ?? []).map(t => (
@@ -3260,27 +3740,27 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
               </select>
             </label>
           </div>
-          {activityLoading && !activity && <p className="text-white/50 text-sm">Loading activity…</p>}
-          {activityErr && <p className="text-red-300 text-sm">{activityErr}</p>}
+          {activityLoading && !activity && <p className="text-ink-2 text-sm">Loading activity…</p>}
+          {activityErr && <p className="text-danger-ink text-sm">{activityErr}</p>}
           {activity && (
             <div className="space-y-3">
               {activity.length === 0 && (
-                <p className="text-white/50 text-sm">
+                <p className="text-ink-2 text-sm">
                   {activityType
                     ? `No "${activityType.replace(/_/g, ' ')}" activity recorded.`
                     : 'No recent activity.'}
                 </p>
               )}
               {activity.map((e) => (
-                <div key={e.id} className="flex items-center gap-4 py-2 border-b border-white/[0.03] last:border-0">
-                  <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center flex-shrink-0">
-                    <Icon name="activity" size={14} className="text-purple-400" />
+                <div key={e.id} className="flex items-center gap-4 py-2 border-b border-line last:border-0">
+                  <div className="w-8 h-8 rounded-full bg-surface-raised-2 flex items-center justify-center flex-shrink-0">
+                    <Icon name="activity" size={14} className="text-ink" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <span className="text-white/70 text-sm">{e.event_type.replace(/_/g, ' ')}</span>
+                    <span className="text-ink-2 text-sm">{e.event_type.replace(/_/g, ' ')}</span>
                   </div>
-                  {e.username && <span className="text-white/50 text-xs">{e.username}</span>}
-                  <span className="text-white/50 text-xs whitespace-nowrap">{fmtRelative(e.created_at)}</span>
+                  {e.username && <span className="text-ink-2 text-xs">{e.username}</span>}
+                  <span className="text-ink-2 text-xs whitespace-nowrap">{fmtRelative(e.created_at)}</span>
                 </div>
               ))}
             </div>
@@ -3289,15 +3769,15 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
       )}
 
       {tab === 'logs' && (
-        <div className="glass-panel rounded-2xl p-6 font-mono text-xs">
+        <div className="bg-surface-raised rounded-control p-6 font-mono text-xs">
           <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
-            <h2 className="text-white font-semibold font-sans">System Logs</h2>
+            <p className="text-ink-2 font-sans text-sm">The server’s own log, newest first.</p>
             {/* Level filter. 'Problems' reads a SEPARATE server-side ring for
                 WARN+ERROR rather than filtering what's already loaded: the
                 main ring holds ~1000 entries, which is minutes of history at
                 Aurora's request volume, so a client-side filter would show
                 nothing for an incident twenty minutes old. */}
-            <div className="flex items-center gap-1 rounded-lg bg-white/5 p-1 font-sans" role="group" aria-label="Log level filter">
+            <div className="flex items-center gap-1 rounded-control bg-surface-raised-2 p-1 font-sans" role="group" aria-label="Log level filter">
               {([
                 { key: 'all' as const, label: 'All' },
                 { key: 'problems' as const, label: 'Warnings & errors' },
@@ -3313,10 +3793,8 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
                     // it re-run against the other ring.
                     setLogs(null)
                   }}
-                  className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                    logLevel === opt.key
-                      ? 'bg-white/15 text-white'
-                      : 'text-white/50 hover:text-white/80'
+                  className={`h-11 rounded-art px-3.5 text-[13px] font-semibold transition-colors ${
+                    logLevel === opt.key ? 'bg-action text-action-on' : 'text-ink-2 hover:text-ink'
                   }`}
                 >
                   {opt.label}
@@ -3325,17 +3803,17 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
             </div>
           </div>
           {logLevel === 'problems' && (
-            <p className="text-white/50 text-[11px] font-sans mb-3">
+            <p className="text-ink-2 text-xs font-sans mb-3">
               Warnings and errors are kept in a dedicated buffer, so these reach
               much further back than the full log.
             </p>
           )}
-          {logsLoading && !logs && <p className="text-white/50 text-sm font-sans">Loading logs…</p>}
-          {logsErr && <p className="text-red-300 text-sm font-sans">{logsErr}</p>}
+          {logsLoading && !logs && <p className="text-ink-2 text-sm font-sans">Loading logs…</p>}
+          {logsErr && <p className="text-danger-ink text-sm font-sans">{logsErr}</p>}
           {logs && (
             <div className="space-y-1 max-h-[500px] overflow-y-auto">
               {logs.length === 0 && (
-                <p className="text-white/50 text-sm font-sans">
+                <p className="text-ink-2 text-sm font-sans">
                   {logLevel === 'problems'
                     ? 'No warnings or errors recorded.'
                     : 'No log entries.'}
@@ -3380,15 +3858,15 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
                 }
                 return (
                   <div key={i} className="flex gap-3">
-                    <span className="text-white/50 flex-shrink-0">{new Date(entry.time).toLocaleString()}</span>
+                    <span className="text-ink-2 flex-shrink-0">{new Date(entry.time).toLocaleString()}</span>
                     <span className={`flex-shrink-0 ${
-                      entry.level === 'ERROR' || entry.level === 'error' ? 'text-red-400' :
-                      entry.level === 'WARN' || entry.level === 'warn' ? 'text-amber-400' :
-                      'text-purple-400'
+                      entry.level === 'ERROR' || entry.level === 'error' ? 'text-danger-ink' :
+                      entry.level === 'WARN' || entry.level === 'warn' ? 'text-warn' :
+                      'text-ink'
                     }`}>
                       [{entry.level.toUpperCase()}]
                     </span>
-                    <span className="text-white/60 break-words">{summary}</span>
+                    <span className="text-ink-2 break-words">{summary}</span>
                   </div>
                 )
               })}
@@ -3403,10 +3881,10 @@ export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
       {tab === 'server' && <AdminServerSettingsTab />}
       {tab === 'sessions' && <AdminSessionsTab />}
       {tab === 'flagged' && <AdminFlaggedTab />}
-      {tab === 'llm' && <AdminLLMTab />}
+      {tab === 'llm' && <AdminLLMTab restartNeeded={llmRestart} onRestartNeeded={() => setLLMRestart(true)} onDismissRestart={() => setLLMRestart(false)} />}
       {tab === 'oauth' && <AdminOAuthTab />}
-      {tab === 'backup' && <AdminBackupRestore downloadBackup={downloadBackup} />}
-      </div>
-    </div>
+      {tab === 'backup' && <AdminBackupRestore downloadBackup={downloadBackup} accountId={currentAdminId} />}
+      {tab === 'health' && <PlaybackHealth />}
+    </AdminShell>
   )
 }

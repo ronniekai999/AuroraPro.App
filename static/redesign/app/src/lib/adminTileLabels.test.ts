@@ -80,6 +80,6 @@ describe('admin stat tile labels', () => {
     const line = text.split('\n').find((l: string) => l.includes('skipCoverage(skipStatus)'))
     expect(line, 'skip tile no longer derives from skipCoverage').toBeDefined()
     const tile = text.slice(text.indexOf(line!), text.indexOf(line!) + 1200)
-    expect(tile).toMatch(/label:\s*'Skip Analysis'/)
+    expect(tile).toMatch(/label:\s*'Skip analysis'/)
   })
 })

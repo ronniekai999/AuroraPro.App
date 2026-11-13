@@ -32,6 +32,7 @@ import {
 } from '@/lib/partyInvites'
 import { PartyShareCardModal } from './PartyShareCardModal'
 import { ProfileAvatar } from './ProfileAvatar'
+import { failureWords } from '@/lib/failureWords'
 
 export interface PartyComposerLaunch {
   // null ⇒ "right now"; otherwise an RFC 3339 instant in the future.
@@ -118,7 +119,7 @@ export function PartyComposerModal({
       })
       .catch((err: unknown) => {
         if (err instanceof Error && err.name === 'AbortError') return
-        setMembersError(err instanceof Error ? err.message : 'Failed to load members')
+        setMembersError(failureWords(err, 'load the members') ?? 'Could not load the members.')
         setMembers([])
       })
     return () => ac.abort()
@@ -277,7 +278,7 @@ export function PartyComposerModal({
     return (
       <PartyShareCardModal
         code={booked.code}
-        title="Party booked 🎉"
+        title="Party booked"
         subtitle={`${formatPartyTime(booked.iso, new Date())}${invited}`}
         onClose={onClose}
       />
@@ -286,7 +287,7 @@ export function PartyComposerModal({
 
   return (
     <div
-      className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-[rgba(6,7,8,0.72)] p-4 animate-fade-in"
       onClick={onClose}
       role="presentation"
     >
@@ -294,29 +295,27 @@ export function PartyComposerModal({
         role="dialog"
         aria-modal="true"
         aria-label="Plan a watch party"
-        className="w-full max-w-md bg-[color:var(--surface-1)] border border-white/[0.06] rounded-2xl p-6 max-h-[90vh] overflow-y-auto"
+        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-sheet bg-surface-raised-2 p-6 shadow-[0_24px_64px_rgba(0,0,0,0.6)]"
         onClick={e => e.stopPropagation()}
       >
-        <h2 className="text-white text-lg font-semibold mb-1">Plan a Watch Party</h2>
-        <p className="text-white/50 text-xs mb-4">
+        <h2 className="mb-1 font-display text-[22px] font-semibold text-ink">Plan a watch party</h2>
+        <p className="mb-4 text-[13px] leading-snug text-ink-2">
           {mediaTitle}
-          {mediaType === 'show' ? ' — starts with the next-up episode' : ''}
-          . Invites land in members' notifications.
+          {mediaType === 'show' ? ', starting with the next episode up' : ''}
+          . Invitations arrive in members&rsquo; notifications.
         </p>
 
         {/* ─── When ──────────────────────────────────────────────── */}
-        <p className="text-white/50 text-[10px] uppercase tracking-wider mb-2">When</p>
-        <div className="grid grid-cols-2 gap-1.5 p-1.5 rounded-xl bg-white/[0.03] border border-white/[0.06]">
+        <p className="mb-2 text-xs font-semibold text-ink-2">When</p>
+        <div className="grid grid-cols-2 gap-1 rounded-control bg-surface-raised p-1">
           {(['now', 'schedule'] as const).map(m => (
             <button
               key={m}
               type="button"
               onClick={() => setMode(m)}
               aria-pressed={mode === m}
-              className={`px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
-                mode === m
-                  ? 'bg-purple-600/25 border border-purple-500/50 text-white'
-                  : 'text-white/55 hover:text-white/80'
+              className={`h-11 rounded-art text-[15px] font-semibold transition-colors ${
+                mode === m ? 'bg-action text-action-on' : 'text-ink-2 hover:text-ink'
               }`}
             >
               {m === 'now' ? 'Right now' : 'Schedule'}
@@ -325,9 +324,9 @@ export function PartyComposerModal({
         </div>
 
         {mode === 'now' ? (
-          <p className="text-white/50 text-xs mt-2.5 leading-relaxed">
-            The party starts as soon as you hit the button. Anyone you invite
-            gets a notification with a one-tap join.
+          <p className="mt-2.5 text-[13px] leading-relaxed text-ink-2">
+            The party starts as soon as you press the button. Anyone you invite
+            gets a notification they can join from.
           </p>
         ) : (
           <div className="mt-2.5">
@@ -338,10 +337,8 @@ export function PartyComposerModal({
                   type="button"
                   onClick={() => { setCustomOpen(false); setSelectedIso(c.iso) }}
                   aria-pressed={!customOpen && selectedIso === c.iso}
-                  className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-                    !customOpen && selectedIso === c.iso
-                      ? 'bg-purple-600/25 border-purple-500/55 text-white'
-                      : 'bg-white/[0.04] border-white/[0.09] text-white/75 hover:border-white/[0.2]'
+                  className={`min-h-11 rounded-full border-2 bg-surface-raised px-4 text-[13px] font-semibold transition-colors ${
+                    !customOpen && selectedIso === c.iso ? 'border-ink text-ink' : 'border-transparent text-ink-2 hover:text-ink'
                   }`}
                 >
                   {c.label}
@@ -351,13 +348,11 @@ export function PartyComposerModal({
                 type="button"
                 onClick={() => setCustomOpen(o => !o)}
                 aria-pressed={customOpen}
-                className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-                  customOpen
-                    ? 'bg-purple-600/25 border-purple-500/55 text-white'
-                    : 'bg-white/[0.04] border-white/[0.09] text-white/75 hover:border-white/[0.2]'
+                className={`min-h-11 rounded-full border-2 bg-surface-raised px-4 text-[13px] font-semibold transition-colors ${
+                  customOpen ? 'border-ink text-ink' : 'border-transparent text-ink-2 hover:text-ink'
                 }`}
               >
-                Pick date &amp; time…
+                Pick a date and time…
               </button>
             </div>
             {customOpen && (
@@ -366,28 +361,28 @@ export function PartyComposerModal({
                 value={customValue}
                 onChange={e => setCustomValue(e.target.value)}
                 aria-label="Party date and time"
-                className="mt-2.5 w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white text-sm focus:bg-white/[0.06] focus:outline-none [color-scheme:dark]"
+                className="mt-2.5 h-11 w-full py-0 [color-scheme:dark]"
               />
             )}
-            <p className="text-white/50 text-[11px] mt-2 leading-relaxed">
+            <p className="mt-2 text-[13px] leading-relaxed text-ink-2">
               {effectiveIso && !scheduleInPast
-                ? `Everyone's invited now, reminded 10 minutes before showtime, and the party starts itself — ${formatPartyTime(effectiveIso, new Date())}.`
-                : 'Times are in your timezone. Invites go out immediately; the party starts itself at showtime.'}
+                ? `Everyone is invited now and reminded 10 minutes before. The party starts by itself: ${formatPartyTime(effectiveIso, new Date())}.`
+                : 'Times are in your time zone. Invitations go out at once; the party starts by itself at the time you pick.'}
             </p>
             {scheduleInPast && (
-              <p className="text-amber-300/90 text-xs mt-1.5">That time has already passed — pick a future time.</p>
+              <p className="mt-1.5 text-[13px] text-warn">That time has already passed. Pick one that is still ahead.</p>
             )}
           </div>
         )}
 
         {/* ─── Who ───────────────────────────────────────────────── */}
         <div className="flex items-center justify-between mt-5 mb-2">
-          <p className="text-white/50 text-[10px] uppercase tracking-wider">
+          <p className="text-xs font-semibold text-ink-2">
             Who
-            <span className="ml-2 normal-case tracking-normal text-white/50">optional — you can share the code later too</span>
+            <span className="ml-2 font-normal">optional: you can share the code later too</span>
           </p>
           {selected.size > 0 && (
-            <span className="text-purple-300 text-xs font-medium">{selected.size} invited</span>
+            <span className="text-[13px] font-semibold tabular-nums text-ink">{selected.size} invited</span>
           )}
         </div>
 
@@ -414,9 +409,9 @@ export function PartyComposerModal({
                     // "at" regardless, and keeping it off the chips leaves
                     // "@handle" unique to the result rows.
                     aria-label={`Remove ${shownName} (${m.username}) from the invite list`}
-                    className="flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-full bg-purple-600/20 border border-purple-500/40 text-white/90 text-xs hover:bg-purple-600/30 transition-colors"
+                    className="flex min-h-11 items-center gap-1.5 rounded-full bg-surface-raised pl-1.5 pr-3 text-[13px] font-semibold text-ink transition-colors hover:bg-action-soft"
                   >
-                    <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={18} />
+                    <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} memberKey={m.user_id} size={28} />
                     <span className="max-w-[9rem] truncate">{shownName}</span>
                     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" className="w-3 h-3 flex-none">
                       <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
@@ -433,22 +428,22 @@ export function PartyComposerModal({
           type="text"
           value={search}
           onChange={e => setSearch(e.target.value)}
-          placeholder={`Type a name — ${MIN_MEMBER_QUERY_CHARS} letters minimum`}
+          placeholder={`Type a name, ${MIN_MEMBER_QUERY_CHARS} letters or more`}
           aria-label="Search members by name"
           autoComplete="off"
-          className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm placeholder:text-white/50 focus:bg-white/[0.06] focus:outline-none"
+          className="h-11 w-full py-0"
         />
 
         {/* Results. Nothing is listed until the query is long enough, so the
             bordered box only exists when there is something in it — an empty
             frame under the input reads as "broken", not as "keep typing". */}
         {membersError ? (
-          <p className="text-amber-300/80 text-xs mt-2">
-            Couldn't load members: {membersError}{' '}
+          <p className="mt-2 text-[13px] text-warn">
+            {membersError}{' '}
             <button
               type="button"
               onClick={() => { setMembers(null); setRosterAttempt(n => n + 1) }}
-              className="underline underline-offset-2 hover:text-amber-200"
+              className="rounded-chip text-ink underline underline-offset-2"
             >
               Try again
             </button>
@@ -459,24 +454,24 @@ export function PartyComposerModal({
           // at least 3 letters" — advice that is actively wrong for the
           // short-name members the threshold rule exists to keep reachable,
           // since their whole name IS the query.
-          <p className="text-white/50 text-xs mt-2">Loading members…</p>
+          <p className="mt-2 text-[13px] text-ink-2">Loading members…</p>
         ) : rosterEmpty ? (
-          <p className="text-white/50 text-xs mt-2">Nobody else here yet.</p>
+          <p className="mt-2 text-[13px] text-ink-2">Nobody else here yet.</p>
         ) : matches.length === 0 ? (
           searching
             ? (
-              <p className="text-white/50 text-xs mt-2">
+              <p className="mt-2 text-[13px] text-ink-2">
                 No members match “{search.trim()}”.
                 {rosterTruncated && ' Only the first ' + members!.length + ' members were loaded, so someone further down the list may be missing — you can still invite them with the party code.'}
               </p>
             )
             : (
-              <p className="text-white/50 text-[11px] mt-2">
-                Type at least {MIN_MEMBER_QUERY_CHARS} letters of someone's name to find them.
+              <p className="mt-2 text-[13px] text-ink-2">
+                Type at least {MIN_MEMBER_QUERY_CHARS} letters of someone&rsquo;s name to find them.
               </p>
             )
         ) : (
-          <ul className="mt-2 max-h-52 overflow-y-auto rounded-lg border border-white/[0.06] divide-y divide-white/[0.05]">
+          <ul className="mt-2 max-h-56 overflow-y-auto rounded-control bg-surface-raised">
             {matches.map(m => {
               const shownName = m.display_name || m.username
               const on = selected.has(m.username)
@@ -486,24 +481,26 @@ export function PartyComposerModal({
                     type="button"
                     onClick={() => pick(m.username, shownName)}
                     aria-pressed={on}
-                    className="w-full flex items-center gap-3 p-2.5 text-left hover:bg-white/[0.04] transition-colors"
+                    className="flex min-h-[52px] w-full items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-action-soft"
                   >
-                    <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={32} />
+                    <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} memberKey={m.user_id} size={32} />
                     <span className="min-w-0 flex-1">
-                      <span className="block text-white/90 text-sm truncate">{shownName}</span>
-                      <span className="block text-white/50 text-[11px] truncate">
+                      <span className="block truncate text-[15px] font-semibold text-ink">{shownName}</span>
+                      <span className="block truncate text-xs text-ink-2">
                         @{m.username}{m.is_following ? ' · you follow them' : ''}
                       </span>
                     </span>
                     <span
                       aria-hidden="true"
-                      className={`w-5 h-5 rounded-md border flex items-center justify-center flex-none transition-colors ${
-                        on ? 'bg-purple-600 border-purple-500' : 'border-white/25'
+                      // The box's edge is its sign when empty, so it is a
+                      // colour that can be seen on the row.
+                      className={`flex h-5 w-5 flex-none items-center justify-center rounded-chip border-2 transition-colors ${
+                        on ? 'border-ink bg-action text-action-on' : 'border-ink-3'
                       }`}
                     >
                       {on && (
-                        <svg viewBox="0 0 24 24" fill="none" className="w-3 h-3">
-                          <path d="M5 13l4 4L19 7" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                        <svg viewBox="0 0 24 24" fill="none" className="h-3 w-3">
+                          <path d="M5 13l4 4L19 7" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
                         </svg>
                       )}
                     </span>
@@ -519,13 +516,13 @@ export function PartyComposerModal({
             — and the announcement below would otherwise state the rendered
             count as if it were the match count. */}
         {hiddenMatches > 0 && (
-          <p className="text-white/50 text-[11px] mt-1.5">
+          <p className="mt-1.5 text-[13px] text-ink-2">
             Showing {matches.length} of {totalMatches}
             {/* "Keep typing" is only true above the threshold. Below it,
                 matches are whole-name equality, so another character can
                 only take the count to zero — advice that walks the host into
                 a dead end. */}
-            {searching ? ' — keep typing to narrow it down.' : '.'}
+            {searching ? '. Keep typing to narrow it down.' : '.'}
           </p>
         )}
 
@@ -566,34 +563,30 @@ export function PartyComposerModal({
         <p className="sr-only" role="status" aria-live="polite" aria-label="Guest list updates">{pickAnnouncement}</p>
 
         {/* ─── Note ──────────────────────────────────────────────── */}
-        <p className="text-white/50 text-[10px] uppercase tracking-wider mt-4 mb-2">
-          Note <span className="normal-case tracking-normal text-white/50">optional</span>
+        <p className="mb-2 mt-4 text-xs font-semibold text-ink-2">
+          Note <span className="font-normal">optional</span>
         </p>
         <input
           type="text"
           value={note}
           maxLength={280}
           onChange={e => setNote(e.target.value)}
-          placeholder="Costumes optional. Popcorn mandatory. 🍿"
+          placeholder="Costumes optional. Popcorn mandatory."
           aria-label="Invite note"
-          className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm placeholder:text-white/50 focus:bg-white/[0.06] focus:outline-none"
+          className="h-11 w-full py-0"
         />
 
-        {error && <p className="text-red-400 text-sm mt-3">{error}</p>}
+        {error && <p role="alert" className="mt-3 text-[14px] text-danger-ink">{error}</p>}
 
         <div className="mt-5 flex gap-2 justify-end items-center">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 text-white/70 hover:text-white text-sm transition-colors"
-          >
+          <button type="button" onClick={onClose} className="stage-btn stage-btn-quiet">
             Cancel
           </button>
           <button
             type="button"
             disabled={busy || scheduleMissing || scheduleInPast}
             onClick={() => void submit()}
-            className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="stage-btn stage-btn-primary"
           >
             {ctaLabel}
           </button>

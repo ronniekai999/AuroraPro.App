@@ -8,6 +8,7 @@
 // Admins additionally see an "Make public" toggle (admin-only;
 // server enforces).
 
+import { failureWords } from '@/lib/failureWords'
 import { useState } from 'react'
 import { createCollection, type Collection } from '@/lib/api'
 
@@ -49,7 +50,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
       onCreated(c)
       onClose()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Create failed')
+      setError(failureWords(err, 'make the collection'))
     } finally {
       setSubmitting(false)
     }
@@ -57,7 +58,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 stage-scrim-in"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-[var(--scrim)] p-4 stage-scrim-in"
       onClick={onClose}
     >
       <div
@@ -66,8 +67,8 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
       >
         {/* Header */}
         <div className="px-6 pt-6 pb-4 border-b border-white/[0.04]">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 mb-3">
-            <span className="text-purple-200 text-xs font-medium uppercase tracking-wider">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-line mb-3">
+            <span className="text-ink text-xs font-medium uppercase tracking-wider">
               New Collection
             </span>
           </div>
@@ -86,7 +87,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
             onClick={() => setMode('manual')}
             className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
               mode === 'manual'
-                ? 'text-purple-300 border-b-2 border-purple-500'
+                ? 'text-ink border-b-2 border-ink'
                 : 'text-white/50 hover:text-white/80'
             }`}
           >
@@ -97,7 +98,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
             onClick={() => setMode('ai')}
             className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
               mode === 'ai'
-                ? 'text-purple-300 border-b-2 border-purple-500'
+                ? 'text-ink border-b-2 border-ink'
                 : 'text-white/50 hover:text-white/80'
             }`}
           >
@@ -148,7 +149,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
                 placeholder="e.g. moody A24 thrillers, feel-good 90s sci-fi, dark comedy with great soundtracks..."
                 disabled={submitting}
                 rows={3}
-                className="w-full px-3 py-2 bg-white/[0.04] border border-purple-500/30 rounded text-white text-sm resize-none focus:border-purple-500/60"
+                className="w-full px-3 py-2 bg-white/[0.04] border border-line rounded text-white text-sm resize-none focus:border-white/70"
               />
               <p className="text-white/50 text-xs mt-2">
                 Aurora's AI will scan your library and pick 10–12 titles that
@@ -176,7 +177,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
           )}
 
           {error && (
-            <div className="px-3 py-2 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
+            <div role="alert" className="px-3 py-2 rounded bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
               {error}
             </div>
           )}
@@ -193,7 +194,7 @@ export function CollectionsModal({ isAdmin, onClose, onCreated }: Props) {
             <button
               type="submit"
               disabled={submitting}
-              className="px-5 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium rounded-lg transition-ui disabled:opacity-50 disabled:cursor-not-allowed glow-purple"
+              className="px-5 py-2 bg-action hover:bg-white/90 text-action-on text-sm font-medium rounded-lg transition-ui disabled:opacity-50 disabled:cursor-not-allowed glow-purple"
             >
               {submitting
                 ? mode === 'ai'

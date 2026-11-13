@@ -8,10 +8,10 @@
 // SettingsView doesn't own routing either).
 
 import { useEffect, useState } from 'react'
-import { Icon } from '@/components/Icon'
 import { PageHeader } from '@/components/PageHeader'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { followMember, listMembers, unfollowMember, type MemberSummary } from '@/lib/api'
+import { failureWords } from '@/lib/failureWords'
 
 export default function MembersView({ onOpenMember, currentUsername, onToast }: {
   onOpenMember: (username: string) => void
@@ -30,7 +30,7 @@ export default function MembersView({ onOpenMember, currentUsername, onToast }: 
     listMembers()
       .then(m => { if (!cancelled) setMembers(m) })
       .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load members')
+        if (!cancelled) setError(failureWords(e, 'load the members') ?? 'Could not load the members.')
       })
     return () => { cancelled = true }
   }, [])
@@ -45,7 +45,7 @@ export default function MembersView({ onOpenMember, currentUsername, onToast }: 
       await (next ? followMember(m.username) : unfollowMember(m.username))
     } catch (e) {
       setMembers(list => list?.map(x => x.username === m.username ? { ...x, is_following: !next } : x) ?? null)
-      onToast?.(e instanceof Error ? e.message : 'Failed to update follow', 'error')
+      onToast?.(failureWords(e, next ? `follow ${m.username}` : `unfollow ${m.username}`) ?? 'The follow could not be changed.', 'error')
     } finally {
       setBusy(prev => {
         const s = new Set(prev)
@@ -57,53 +57,45 @@ export default function MembersView({ onOpenMember, currentUsername, onToast }: 
 
   return (
     <div className="animate-fade-in">
-      <PageHeader title="Members" sub="Everyone on this server — follow someone to see what they watch on your home screen" />
+      <PageHeader title="Members" sub="Everyone on this server. Follow someone to see what they finish." />
 
-      {error && (
-        <div className="glass-panel rounded-2xl p-8 text-center">
-          <Icon name="users" size={28} className="text-white/25 mx-auto" />
-          <p className="text-white/80 text-sm font-medium mt-3">{error}</p>
-        </div>
-      )}
-      {!error && !members && <p className="text-white/50 text-sm py-16 text-center">Loading members…</p>}
-      {!error && members && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {error && <p role="alert" className="rounded-control bg-surface-raised p-6 text-[15px] text-ink">{error}</p>}
+      {!error && !members && <p className="py-16 text-center text-sm text-ink-2">Loading members…</p>}
+      {!error && members && members.length === 0 && <p className="py-16 text-center text-sm text-ink-2">Nobody else is on this server yet.</p>}
+      {!error && members && members.length > 0 && (
+        <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {members.map(m => {
             const isMe = !!currentUsername && m.username.toLowerCase() === currentUsername.toLowerCase()
             const shownName = m.display_name || m.username
             return (
-              <div key={m.user_id} className="glass-panel rounded-2xl p-4 flex items-center gap-3">
+              <li key={m.user_id} className="flex min-h-[76px] items-center gap-3 rounded-control bg-surface-raised p-3.5">
                 <button
                   type="button"
                   onClick={() => onOpenMember(m.username)}
-                  className="flex items-center gap-3 min-w-0 flex-1 text-left rounded-lg"
+                  className="flex min-w-0 flex-1 items-center gap-3 rounded-control text-left"
                 >
-                  <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={48} />
+                  <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} memberKey={m.user_id} size={48} />
                   <span className="min-w-0">
-                    <span className="block text-white text-sm font-medium truncate">{shownName}{isMe && <span className="text-white/50 font-normal"> (you)</span>}</span>
-                    <span className="block text-white/50 text-xs truncate">@{m.username}</span>
+                    <span className="block truncate text-[15px] font-semibold text-ink">{shownName}{isMe && <span className="font-normal text-ink-2"> (you)</span>}</span>
+                    <span className="block truncate text-[13px] text-ink-2">@{m.username}</span>
                   </span>
                 </button>
                 {!isMe && (
-                  // No aria-pressed — the label itself carries the state
-                  // (see the profile page's follow button).
+                  // No aria-pressed: the label itself carries the state
+                  // (see the member page's follow button).
                   <button
                     type="button"
                     onClick={() => toggleFollow(m)}
                     disabled={busy.has(m.username)}
-                    className={`flex-none px-3 py-1.5 rounded-lg text-xs border transition-colors disabled:opacity-50 ${
-                      m.is_following
-                        ? 'bg-purple-500/15 hover:bg-purple-500/25 border-purple-500/40 text-purple-200'
-                        : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.08] text-white/70'
-                    }`}
+                    className={`stage-btn flex-none px-4 ${m.is_following ? 'stage-btn-ghost is-on' : 'stage-btn-outline'}`}
                   >
                     {m.is_following ? 'Following' : 'Follow'}
                   </button>
                 )}
-              </div>
+              </li>
             )
           })}
-        </div>
+        </ul>
       )}
     </div>
   )

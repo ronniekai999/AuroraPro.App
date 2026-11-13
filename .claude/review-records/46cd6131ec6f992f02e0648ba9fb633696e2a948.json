@@ -1,0 +1,10 @@
+{
+  "sha": "46cd6131ec6f992f02e0648ba9fb633696e2a948",
+  "verdict": "lows-only",
+  "summary": "Three commits read together by Library's reviewer. Library follow-ups (a list row with nothing interactive nested in a button: the title is the row's button and Play, Add and More are beside it; focus handed on when the A to Z strip goes while a letter has it; the sort select and Back to collections at 44px on a tablet's coarse pointer; Load More's drop after a switch that ended on the same profile pinned on both grids): every item resolved, every route into a row still reaches its handler once, no probe weakened. Navigation (the top bar leaves the search field room from 768px: the wordmark and the name give way below lg, the pill's title below xl, the shortcut hint drawn by a container query; a top-bar pass in the layout audit at eight widths): order and non-overlap hold by arithmetic, and the audit would have failed before the fix. CSS (the dead sticky-toolbar rules removed): clean. Open lows: between 1024 and 1279px the presence pill's accessible name loses the party's title; on desktop a list row's tab stop announces only the title; the coarse-pointer select height applies app-wide (harmless).",
+  "reviewer": "fresh-context-agent-a32af72b",
+  "findings": "3",
+  "diff_digest": "e3db1008ccff7115cd4e490227bf1633192716a2345b605050153cfa5d14d37e",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T20:30:15Z"
+}

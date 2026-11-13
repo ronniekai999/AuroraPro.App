@@ -52,9 +52,10 @@ import {
   type ReceivedSeekPayload,
   type TickPayload,
 } from '@/lib/party'
-import { apiFetch, getStoredUser, refreshAccessToken } from '@/lib/api'
+import { APIError, NetworkError, apiFetch, getStoredUser, refreshAccessToken } from '@/lib/api'
 import { cacheLastParty } from '@/lib/lastParty'
 import { createVoiceController, type VoiceController, type VoiceState } from '@/lib/voice'
+import { failureReason, failureWords } from '@/lib/failureWords'
 
 // 2026-05-25 — room-socket keepalive cadence. Server's gorilla/websocket
 // already does protocol-level PING/PONG every 60s, but some upstream
@@ -159,6 +160,28 @@ const INITIAL_STATE: PartyState = {
 const MAX_CHAT = 200
 const MAX_REACTIONS = 100
 
+/** What a join came to. `error` is the app's own sentence, for a person.
+ *  `reason`, beside it, is for code to branch on, never words:
+ *  'invalid_code' for a code that is not six letters or digits;
+ *  'signed_out' with nobody signed in; 'offline_room' for a code that names
+ *  a room with no party running; when the code's lookup failed, the
+ *  server's `error.reason` if it sent one, else `http_<status>` for a
+ *  refusal ('http_404': no party holds that code now), or 'network' when no
+ *  answer came. A failure after the lookup carries none. */
+export interface JoinResult {
+  ok: boolean
+  error?: string
+  reason?: string
+}
+
+function joinFailureReason(err: unknown): string | undefined {
+  const fromServer = failureReason(err)
+  if (fromServer) return fromServer
+  if (err instanceof APIError) return `http_${err.status}`
+  if (err instanceof NetworkError) return 'network'
+  return undefined
+}
+
 export interface UseParty {
   state: PartyState
   // Phase 4.6 — voice mesh state + actions. Voice rides the room
@@ -199,7 +222,7 @@ export interface UseParty {
   // (orphan party row, no UI feedback). When we JUST created the
   // party, we know it's active — preflight is redundant + the source
   // of the silent failure.
-  join: (code: string, opts?: { skipPreflight?: boolean }) => Promise<{ ok: boolean; error?: string }>
+  join: (code: string, opts?: { skipPreflight?: boolean }) => Promise<JoinResult>
   // Tear down both sockets and clear state.
   leave: () => void
   sendChat: (message: string) => void
@@ -246,13 +269,26 @@ export interface UseParty {
 // signed-in user. Optional — when undefined, caching is skipped and the
 // modal's "Recently in" pill simply won't render. Callers that already
 // have user.id should pass it (App.tsx does).
-export function useParty(currentUserId?: number): UseParty {
+export function useParty(currentUserId?: number, actingProfileId: number | null = null): UseParty {
   const [state, setState] = useState<PartyState>(INITIAL_STATE)
   // Track the latest userId in a ref so the leave callback's stable
   // identity doesn't capture a stale id when the user logs in/out
   // mid-session. Also avoids re-creating callbacks every render.
   const currentUserIdRef = useRef<number | undefined>(currentUserId)
   currentUserIdRef.current = currentUserId
+  // The profile the session acts as, the same way: "you were just in" is
+  // filed under it, and read back under it by the page that shows it. Null
+  // is an account with no profile, or a session whose profile is not known
+  // yet; the reader uses null for those too.
+  const actingProfileIdRef = useRef<number | null>(actingProfileId)
+  actingProfileIdRef.current = actingProfileId
+  // The profile a party was joined as, kept with the party. The session can
+  // move to another profile while the room socket stays open; the record of
+  // that party still belongs to the profile that was in it, or the other
+  // profile would be offered a party it never joined.
+  const joinedAsRef = useRef<{ code: string; profileId: number | null } | null>(null)
+  const profileOfParty = (code: string) =>
+    joinedAsRef.current?.code === code ? joinedAsRef.current.profileId : actingProfileIdRef.current
   const roomWsRef = useRef<WebSocket | null>(null)
   const syncWsRef = useRef<WebSocket | null>(null)
   const tickRef = useRef<TickPayload | null>(null)
@@ -459,7 +495,7 @@ export function useParty(currentUserId?: number): UseParty {
         partyName: state.partyName,
         mediaTitle: state.mediaTitle,
         wasHost: state.hostUserId === userId,
-      })
+      }, profileOfParty(state.code))
     }
     // Mark this as user-initiated FIRST so any pending close handlers
     // know not to attempt reconnect. Without this flag, calling leave()
@@ -583,7 +619,7 @@ export function useParty(currentUserId?: number): UseParty {
               partyName: inner.party_name,
               mediaTitle: inner.media_title,
               wasHost: inner.host_user_id === userId,
-            })
+            }, profileOfParty(inner.code))
           }
         }
         // First party-state arrival is the cue to open the sync
@@ -1178,17 +1214,18 @@ export function useParty(currentUserId?: number): UseParty {
   // recurse without stale-closure shenanigans (mirrors openRoomSocketRef).
   openSyncSocketRef.current = openSyncSocket
 
-  const join = useCallback(async (rawCode: string, opts?: { skipPreflight?: boolean }): Promise<{ ok: boolean; error?: string }> => {
+  const join = useCallback(async (rawCode: string, opts?: { skipPreflight?: boolean }): Promise<JoinResult> => {
     const code = rawCode.trim().toUpperCase()
     if (!/^[A-Z0-9]{6}$/.test(code)) {
       const error = 'Party code must be 6 letters or digits.'
       setStatePatch({ error })
-      return { ok: false, error }
+      return { ok: false, error, reason: 'invalid_code' }
     }
     // Tear down anything prior.
     activeCodeRef.current = null
     closeSockets()
     setState({ ...INITIAL_STATE, joining: true })
+    joinedAsRef.current = { code, profileId: actingProfileIdRef.current }
     tickRef.current = null
     seekRef.current = null
     latestAcceptedRevRef.current = 0
@@ -1210,25 +1247,26 @@ export function useParty(currentUserId?: number): UseParty {
       try {
         const info = await apiFetch<CodeInfo>(`/api/code/${encodeURIComponent(code)}/info`)
         // Backend distinguishes "active" (live party) from "offline_room"
-        // (persistent room with no live session). Only "active" is
-        // joinable — for "offline_room" surface a friendly message so
-        // the user knows to start the party from the room first.
+        // (a room with no party running). Only "active" is joinable. A
+        // room's party is started by the room's owner only
+        // (RoomHandler.StartParty), so that is who the person is sent to.
         if (info.type !== 'active') {
-          const error = 'That code is a persistent room; no live session right now.'
+          const error = 'Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.'
           setStatePatch({ joining: false, error })
-          return { ok: false, error }
+          return { ok: false, error, reason: 'offline_room' }
         }
       } catch (err) {
-        const error = err instanceof Error ? err.message : 'Invalid party code.'
+        // The code's lookup answers 404 for a code no party holds now.
+        const error = failureWords(err, 'check that code', { status: { 404: 'No party is using that code right now.' } }) ?? 'Could not check that code.'
         setStatePatch({ joining: false, error })
-        return { ok: false, error }
+        return { ok: false, error, reason: joinFailureReason(err) }
       }
     }
 
     if (!getStoredUser()) {
       const error = 'You must be signed in to join a party.'
       setStatePatch({ joining: false, error })
-      return { ok: false, error }
+      return { ok: false, error, reason: 'signed_out' }
     }
     activeCodeRef.current = code
     userInitiatedLeaveRef.current = false
@@ -1389,7 +1427,7 @@ export function useParty(currentUserId?: number): UseParty {
     } catch (err) {
       userInitiatedLeaveRef.current = false
       setStatePatch({
-        error: err instanceof Error ? err.message : 'Failed to end the party.',
+        error: failureWords(err, 'end the party') ?? 'Could not end the party.',
       })
       return false
     }

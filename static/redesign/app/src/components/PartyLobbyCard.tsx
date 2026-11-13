@@ -11,7 +11,7 @@
 // panel out of lobby mode regardless of what this label reads, so a few
 // hundred ms of client skew can't strand the UI.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { getPartyInviteRoster, type PartyInviteRosterEntry } from '@/lib/api'
 import { countdownLabel, formatPartyTime } from '@/lib/partyInvites'
 import { PartyShareCardModal } from './PartyShareCardModal'
@@ -30,6 +30,7 @@ export interface PartyLobbyCardProps {
 }
 
 export function PartyLobbyCard({ code, scheduledStartAt, isHost, onStartNow, onReschedule }: PartyLobbyCardProps) {
+  const ids = useId()
   const targetMs = useMemo(() => new Date(scheduledStartAt).getTime(), [scheduledStartAt])
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
@@ -81,82 +82,67 @@ export function PartyLobbyCard({ code, scheduledStartAt, isHost, onStartNow, onR
   const overdue = msLeft <= 0
 
   return (
-    <div className="mx-4 mt-3 rounded-xl bg-purple-600/[0.08] border border-purple-500/30 p-4">
-      <p className="text-purple-300/90 text-[10px] uppercase tracking-wider font-semibold">Scheduled party</p>
+    // On the rail, which is one surface step down.
+    <div className="mx-4 mt-3 rounded-control bg-surface-raised-2 p-4">
+      <p className="text-xs font-semibold text-ink-2">Scheduled party</p>
       <div className="mt-1.5 text-center">
-        <p className="text-white font-bold text-3xl tabular-nums" aria-live="off">
+        <p className="font-display text-[32px] font-bold leading-tight tabular-nums text-ink" aria-live="off">
           {overdue ? 'Starting…' : countdownLabel(msLeft)}
         </p>
-        <p className="text-white/50 text-xs mt-1">
+        <p className="mt-1 text-[13px] text-ink-2">
           {overdue
             ? 'The server is starting the party.'
-            : `Starts itself — ${formatPartyTime(scheduledStartAt, new Date(nowMs))}`}
+            : `Starts by itself · ${formatPartyTime(scheduledStartAt, new Date(nowMs))}`}
         </p>
       </div>
 
-      {/* RSVP roster. Sections render only when non-empty so a codes-only
-          party (nobody formally invited) shows nothing extra. */}
+      {/* The replies. A group shows only when someone is in it, so a party
+          nobody was formally invited to shows nothing extra. */}
       {(groups.going.length > 0 || groups.maybe.length > 0 || groups.pending.length > 0) && (
         <div className="mt-3 space-y-1.5">
-          {([['Going', groups.going, 'text-emerald-300'],
-             ['Maybe', groups.maybe, 'text-amber-300'],
-             ['No reply yet', groups.pending, 'text-white/50']] as const).map(([label, names, cls]) =>
+          {([['Going', groups.going, 'text-ok'],
+             ['Maybe', groups.maybe, 'text-warn'],
+             ['No reply yet', groups.pending, 'text-ink-2']] as const).map(([label, names, cls]) =>
             names.length > 0 && (
-              <p key={label} className="text-xs leading-relaxed">
+              <p key={label} className="text-[13px] leading-relaxed">
                 <span className={`font-semibold ${cls}`}>{label} ({names.length})</span>
-                <span className="text-white/60"> — {names.join(', ')}</span>
+                <span className="text-ink-2">: {names.join(', ')}</span>
               </p>
             ))}
         </div>
       )}
 
       {isHost ? (
-        <div className="mt-3 flex gap-2 flex-wrap">
+        <div className="mt-4 flex flex-wrap gap-2">
           {onStartNow && (
-            <button
-              type="button"
-              onClick={onStartNow}
-              className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium transition-colors"
-            >
-              Start now
-            </button>
+            <button type="button" onClick={onStartNow} className="stage-btn stage-btn-primary px-4">Start now</button>
           )}
           {onReschedule && (
-            <button
-              type="button"
-              onClick={() => setRescheduleOpen(o => !o)}
-              className="px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.1] text-white/75 text-xs font-medium transition-colors"
-            >
+            <button type="button" aria-expanded={rescheduleOpen} onClick={() => setRescheduleOpen(o => !o)} className="stage-btn stage-btn-ghost px-4">
               {rescheduleOpen ? 'Keep current time' : 'Change time'}
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => setShareOpen(true)}
-            className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-purple-500/20 to-cyan-400/[0.18] border border-purple-300/45 text-white text-xs font-semibold transition-colors hover:from-purple-500/30 hover:to-cyan-400/25"
-          >
-            Share card
-          </button>
+          <button type="button" onClick={() => setShareOpen(true)} className="stage-btn stage-btn-ghost px-4">Share card</button>
         </div>
       ) : (
-        <p className="mt-3 text-white/50 text-[11px] leading-relaxed">
-          Hang out in chat — playback starts for everyone at once.
+        <p className="mt-3 text-[13px] leading-relaxed text-ink-2">
+          Hang out in the chat. Playback starts for everyone at once.
         </p>
       )}
 
       {isHost && onReschedule && rescheduleOpen && (
-        <div className="mt-2.5">
+        <div className="mt-3">
           <input
             type="datetime-local"
             value={rescheduleValue}
             onChange={e => setRescheduleValue(e.target.value)}
             aria-label="New party time"
-            className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white text-xs focus:bg-white/[0.06] focus:outline-none [color-scheme:dark]"
+            aria-invalid={reschedulePast}
+            aria-describedby={reschedulePast ? `${ids}-past` : undefined}
+            className="h-11 w-full py-0 [color-scheme:dark]"
           />
-          {reschedulePast && (
-            <p className="text-amber-300/90 text-[11px] mt-1">Pick a future time.</p>
-          )}
-          <div className="flex justify-end mt-2">
+          {reschedulePast && <p id={`${ids}-past`} className="mt-1.5 text-[13px] text-warn">Pick a time that is still ahead.</p>}
+          <div className="mt-2 flex justify-end">
             <button
               type="button"
               disabled={!rescheduleIso || reschedulePast}
@@ -166,7 +152,7 @@ export function PartyLobbyCard({ code, scheduledStartAt, isHost, onStartNow, onR
                 setRescheduleOpen(false)
                 setRescheduleValue('')
               }}
-              className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="stage-btn stage-btn-primary px-4"
             >
               Update time
             </button>

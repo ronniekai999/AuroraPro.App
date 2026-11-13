@@ -1,0 +1,10 @@
+{
+  "sha": "d667e5b85665c07703591099997f77bc9ec0bde6",
+  "verdict": "lows-only",
+  "summary": "Independent read-only review of the navigation change, two rounds, by a reviewer separate from the implementer. Reviewed as commits 8d08b70 and 956f6c1 on a working branch that also carried the unfinished player redesign; applied here by cherry-pick WITHOUT the player, and this tree was checked to differ from the reviewed tip only in the player's files. Round 1 (8d08b70) was FIX-FIRST: the My Library scope button did not navigate (id collision with the Library destination), phones could not reach search results, a false 'Sign out of this device' label (logout ends every session), and a restricted profile could still open Collections, My Library and Upcoming; plus hidden pages rendering before the profile binding was known, a duplicate party poll, and accessible-name regressions on the identity control. Round 2 (956f6c1): all highs and mediums resolved; the hidden-page guard was traced for every session state with no leaking commit and no lock-out; admin entries gated only by the existing rule; socket, feed and notification wiring untouched; profile-switch and live-catalog tests not weakened; both audit scripts equal or stricter. Remaining lows: 'Pick something to watch together' opens My Library instead of the catalog, the requests fetch is not gated for a restricted session before its redirect, the phone search field autofocuses on every mount (all three fixed in a later commit not yet on this branch), Manage profiles lands at the top of Settings until the Settings panes exist, and placeholder Your profile and Together pages. Reviewer ran nothing; the foundations already on the branch were reviewed and recorded separately. Go suite, tsc, 1706 unit tests and the full audit were run green on this commit.",
+  "reviewer": "fresh-context-agent-a58efc70",
+  "findings": "6",
+  "diff_digest": "c3bcb6dbe869d341ab137cd9b77e33361bd3231e8c7613501169525906c4a4b5",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-11T17:18:51Z"
+}

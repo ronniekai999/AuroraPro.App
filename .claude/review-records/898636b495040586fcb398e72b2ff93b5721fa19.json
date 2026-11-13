@@ -1,0 +1,10 @@
+{
+  "sha": "898636b495040586fcb398e72b2ff93b5721fa19",
+  "verdict": "lows-only",
+  "summary": "Onboarding rebuilt as three steps (you, titles, one question) and the build. First pass fix-first: a content limit promised at step one that three exits left unset without saying so; a failed build after the limit was written saying nothing was saved, with a retry that could not succeed; blank tiles when a poster failed; focus dropped; focus taken from the profile picker. All fixed with no change to what is written or when; re-check lows-only. Queued: the recovery read outside the watchdog, the question's wording after a timeout, a way back to the details after a refused profile write.",
+  "reviewer": "fresh-context-agent-a02fa659",
+  "findings": "4",
+  "diff_digest": "49473265eb04c47089c3179b4c5402fc477dd85107fcac20ee086cb58689cd01",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T03:07:51Z"
+}

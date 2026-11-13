@@ -12,7 +12,8 @@
 // Alpha compositing happens in sRGB space, THEN luminance is taken — doing it in
 // the other order is the classic way to get a plausible wrong answer.
 
-// Reproduce every contrast figure asserted in the Phase 7b CSS comments.
+// Reproduces every contrast figure quoted in the player's CSS comments.
+import fs from 'node:fs'
 const lin = c => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
 const Y = ([r, g, b]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
 const over = (fg, a, bg) => fg.map((c, i) => a * c + (1 - a) * bg[i])
@@ -32,50 +33,93 @@ const rampAlpha = (stops, t) => {
   return stops[stops.length - 1][1]
 }
 
-console.log('=== .stage-controls-scrim : scrub row sits 62% up the 150.75px band ===')
-// to top: 0%=0.94, 55%=0.86, 80%=0.62, 100%=0
-const scrimA = rampAlpha([[0, 0.94], [0.55, 0.86], [0.80, 0.62], [1, 0]], 0.62)
-console.log('  effective alpha at scrub row:', f(scrimA))
-for (const [name, frame] of [['black frame', K], ['white frame', W]]) {
-  const bg = over(K, scrimA, frame)
-  console.log(`  ${name}: backdrop Y=${Y(bg).toFixed(4)}`)
-  console.log(`     elapsed readout text-white/85 12.5px : ${f(ratio(over(W, 0.85, bg), bg))}:1  (need 4.5)`)
-  console.log(`     remaining readout text-white/70 12.5px: ${f(ratio(over(W, 0.70, bg), bg))}:1  (need 4.5)`)
-  const track = over(W, 0.36, bg)
-  const buf = over(W, 0.75, track)
-  const purple = [168 / 255, 85 / 255, 247 / 255]
-  console.log(`     track 0.36 vs backdrop  : ${f(ratio(track, bg))}:1  (need 3.0)`)
-  console.log(`     buffered 0.75 vs track  : ${f(ratio(buf, track))}:1  (need 3.0)`)
-  console.log(`     played purple vs buffered: ${f(ratio(purple, buf))}:1  (stated as short of 3.0)`)
+const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255)
+const INK = hex('#f4f4f5'), INK2 = hex('#b4b6bc'), ON_ACTION = hex('#0e0f11')
+
+// The player's control band (index.css .stage-controls-scrim, .player-band).
+// The scrim runs `to bottom` with its fade in a FIXED zone at the top of the
+// band (0 at the edge, 0.5 at 26px, 0.86 at 60px) and 0.94 at the bottom, so
+// the alpha behind the timeline does not depend on how many transport rows
+// the band has: the timeline's row starts where the band's top padding ends
+// (56px on a phone, 64px from sm), below the fade, in every band.
+// Heights below are px UP from the band's bottom edge, to a thing's centre.
+const scrimAt = (fromTop, h) =>
+  fromTop <= 0 ? 0
+    : fromTop <= 26 ? 0.5 * (fromTop / 26)
+      : fromTop <= 60 ? 0.5 + 0.36 * ((fromTop - 26) / 34)
+        : 0.86 + 0.08 * ((fromTop - 60) / (h - 60))
+const bands = {
+  'md and up, one transport row (192px band)': { h: 192, timeline: 118, labels: 96, readout: 52 },
+  'phone, two transport rows (204px band)': { h: 204, timeline: 138, labels: null, readout: 40 },
+  // The tallest: the party rail narrows the band until the transport wraps to
+  // three rows. The readout is on the top row, the worst of the three.
+  'beside the party rail, three transport rows (296px band)': { h: 296, timeline: 222, labels: 200, readout: 156 },
+}
+for (const [name, b] of Object.entries(bands)) {
+  console.log(`=== .stage-controls-scrim : ${name} ===`)
+  const at = px => scrimAt(b.h - px, b.h)
+  console.log(`  alpha at the timeline ${f(at(b.timeline))}, at the readout ${f(at(b.readout))}${b.labels ? `, at the range names ${f(at(b.labels))}` : ''}`)
+  for (const [frameName, frame] of [['black frame', K], ['white frame', W]]) {
+    const bg = over(K, at(b.timeline), frame)
+    const track = over(W, 0.36, bg)
+    const buf = over(W, 0.6, track)
+    console.log(`  ${frameName}:`)
+    console.log(`     track 0.36 vs backdrop        : ${f(ratio(track, bg))}:1  (need 3.0)`)
+    console.log(`     played (white) vs track       : ${f(ratio(W, track))}:1  (need 3.0)`)
+    console.log(`     buffered 0.6 vs track         : ${f(ratio(buf, track))}:1  (a secondary cue; stated as short of 3.0)`)
+    const rbg = over(K, at(b.readout), frame)
+    console.log(`     time readout --ink 15px       : ${f(ratio(INK, rbg))}:1  (need 4.5)`)
+    console.log(`     total duration --ink-2 15px   : ${f(ratio(INK2, rbg))}:1  (need 4.5)`)
+    if (b.labels) {
+      const lbg = over(K, at(b.labels), frame)
+      console.log(`     range names --ink-2 12px      : ${f(ratio(INK2, lbg))}:1  (need 4.5)`)
+    }
+  }
 }
 
-console.log('\n=== .stage-player-topbar : 68.75px bar, subtitle ~70% down ===')
-// to bottom: 0%=0.92, 70%=0.72, 100%=0
-const barA = rampAlpha([[0, 0.92], [0.70, 0.72], [1, 0]], 0.70)
-console.log('  effective alpha at the text:', f(barA))
+console.log('\n=== .stage-player-topbar : text ends 70% down the bar (92px of 132px) ===')
+// `to bottom`: 0%=0.88, 70%=0.72, 100%=0. The last line of text is the worst
+// case; the lines above it sit higher on the same ramp.
+const barA = rampAlpha([[0, 0.88], [0.70, 0.72], [1, 0]], 0.70)
+console.log('  effective alpha at the last line of text:', f(barA))
 for (const [name, frame] of [['black frame', K], ['white frame', W]]) {
   const bg = over(K, barA, frame)
-  console.log(`  ${name}: title text-white 17px/700 : ${f(ratio(over(W, 1, bg), bg))}:1  (need 4.5 — 17px is NOT large text)`)
-  console.log(`             subtitle text-white/60 11.5px: ${f(ratio(over(W, 0.60, bg), bg))}:1  (need 4.5)`)
-}
-
-console.log('\n=== the OLD values, for the record ===')
-const oldScrim = rampAlpha([[0, 1], [0.5, 0.70], [1, 0]], 0.62)
-const oldBar = rampAlpha([[0, 0.80], [1, 0]], 0.70)
-console.log('  old scrim alpha at scrub row:', f(oldScrim), ' old topbar alpha at text:', f(oldBar))
-{
-  const bg = over(K, oldScrim, W)
-  console.log(`  old: elapsed readout on a white frame: ${f(ratio(over(W, 0.85, bg), bg))}:1`)
-  console.log(`  old: remaining readout on white frame: ${f(ratio(over(W, 0.70, bg), bg))}:1`)
-  const bg2 = over(K, oldBar, W)
-  console.log(`  old: title on a white frame          : ${f(ratio(over(W, 1, bg2), bg2))}:1`)
-  console.log(`  old: subtitle on a white frame       : ${f(ratio(over(W, 0.60, bg2), bg2))}:1`)
-  console.log(`  old: white subtitle ceiling          : ${f(ratio(W, bg2))}:1`)
+  console.log(`  ${name}: title white 22px/600 : ${f(ratio(W, bg))}:1  (need 4.5)`)
+  console.log(`             episode --ink 14px   : ${f(ratio(INK, bg))}:1  (need 4.5)`)
+  console.log(`             notice --ink-2 13px  : ${f(ratio(INK2, bg))}:1  (need 4.5)`)
 }
 
 console.log('\n=== .stage-skip-pill boundary ===')
 for (const [name, frame] of [['black frame', K], ['white frame', W]]) {
-  const fill = over(W, 0.95, frame)
+  const fill = W
   const border = over(K, 0.42, fill)
-  console.log(`  ${name}: fill vs frame ${f(ratio(fill, frame))}:1 · new border vs fill ${f(ratio(border, fill))}:1 · text #0a0a0a vs fill ${f(ratio([10 / 255, 10 / 255, 10 / 255], fill))}:1`)
+  console.log(`  ${name}: fill vs frame ${f(ratio(fill, frame))}:1 · border vs fill ${f(ratio(border, fill))}:1 · border vs frame ${f(ratio(border, frame))}:1 · label --on-action vs fill ${f(ratio(ON_ACTION, fill))}:1`)
+}
+
+// The party's chat ticker: a name in the person's own colour, and the message
+// in --ink, on a dark bubble over playing video. The bubble's fill and the
+// depth of its pre-exit dim are read from lib/personColor.ts, with the nine
+// colours, so this cannot drift from what is drawn. While dimmed the whole
+// bubble, text included, is partly transparent over the frame.
+{
+  const src = fs.readFileSync(new URL('../src/lib/personColor.ts', import.meta.url), 'utf8')
+  const num = name => {
+    const m = src.match(new RegExp(`export const ${name} = ([\\d.]+)`))
+    if (!m) throw new Error(`contrast: could not read ${name} from lib/personColor.ts`)
+    return Number(m[1])
+  }
+  const list = src.match(/PERSON_COLORS = \[([^\]]*)\]/)
+  const rgb = src.match(/NAME_BUBBLE_FILL_RGB = \[(\d+), (\d+), (\d+)\]/)
+  if (!list || !rgb) throw new Error('contrast: could not read the person colours or the bubble fill from lib/personColor.ts')
+  const colors = [...list[1].matchAll(/#[0-9a-f]{6}/gi)].map(m => m[0])
+  const FILL = [rgb[1], rgb[2], rgb[3]].map(v => Number(v) / 255)
+  const fillAlpha = num('NAME_BUBBLE_FILL_ALPHA'), dim = num('NAME_BUBBLE_DIM_OPACITY')
+  console.log(`\n=== chat ticker bubble over a white frame : fill ${fillAlpha}, dims to ${dim} ===`)
+  for (const [state, opacity] of [['lit', 1], ['dimmed', dim]]) {
+    const bg = over(FILL, fillAlpha * opacity, W)
+    const names = colors.map(c => [c, ratio(over(hex(c), opacity, W), bg)])
+    const worst = names.reduce((a, b) => (b[1] < a[1] ? b : a))
+    console.log(`  ${state}: lowest name ${worst[0]} ${f(worst[1])}:1 · message --ink ${f(ratio(over(INK, opacity, W), bg))}:1  (need 4.5)`)
+    for (const [c, r] of names) console.log(`     ${c}  ${f(r)}:1`)
+  }
 }

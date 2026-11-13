@@ -1,60 +1,30 @@
-// Aurora Stage (Option B) — TopNav.
+// The app's navigation chrome: the top bar, and on phones the bottom tab bar.
 //
-// The production top navigation replaces the
-// 240px fixed <aside> Sidebar + the separate content header with one 64px
-// bar. Same eight destinations, same admin gate, same triggers — only the
-// chrome moves. The vertical space the sidebar ate is handed back to
-// artwork, which is the whole point of Option B.
+// Top bar (md and up): the logo, the destinations, the search field, a
+// live-presence pill, and ONE identity control. The identity control shows
+// who is watching and opens the only account menu there is: switch profile,
+// notifications, your profile, your requests, settings, admin, sign out.
 //
-// Lives in its own file rather than in App.tsx on purpose: App is already
-// ~5,300 lines and owns the shell plus Home/Auth/Search plus the drawers.
-// UserMenu moved in here with it — it's nav chrome, and the avatar
-// dropdown is now where Server Status / Notifications / Settings / Sign
-// Out live (they were the sidebar's footer).
+// Phones: the top bar shrinks to the logo mark, the page's name and the
+// presence pill; the destinations, search and the account page ("Me") are a
+// bottom tab bar (BottomTabBar, rendered by App so it can sit outside the
+// sticky stack).
 //
-// Where the sidebar's parts went:
-//   nav items (8)      → the centered tab strip
-//   Server Status      → avatar dropdown (opens the same ServerPanel)
-//   Notifications      → avatar dropdown (opens the same NotificationPanel)
-//   Settings           → avatar dropdown (already there pre-Stage)
-//   user chip (footer) → the avatar + the dropdown's header
-//   mobile drawer      → the menu sheet below md (see MobileSheet)
+// What a session is offered comes from `navScope` (lib/navScope), which App
+// derives from the profile the SERVER has bound, and from `adminUI` (App's
+// showsAdminUI verdict). Neither falls back to the account's role or to a
+// remembered profile here.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { AuroraWordmark } from '@/components/AuroraWordmark'
 import { Icon } from '@/components/Icon'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
-import { ProfileSwitcher } from '@/components/ProfileSwitcher'
 import type { Profile, User as ApiUser } from '@/lib/api'
-import { lockBodyScroll } from '@/lib/scrollLock'
+import { destinationForView, navDestinationsFor, profileSummary, type NavDestination, type NavScope } from '@/lib/navScope'
 import { useExitTransition } from '@/hooks/useExitTransition'
+import { focusResult } from '@/lib/searchKeys'
 
-export interface NavTab {
-  id: string
-  label: string
-  icon: string
-  admin?: boolean
-}
-
-// Same ids/labels/order the Sidebar used, so handleNavigate, the popstate
-// view sync, and every deep link keep working untouched.
-const BASE_TABS: readonly NavTab[] = [
-  { id: 'home', label: 'Home', icon: 'home' },
-  { id: 'movies', label: 'Movies', icon: 'movie' },
-  { id: 'shows', label: 'TV Shows', icon: 'tv' },
-  { id: 'collections', label: 'Collections', icon: 'star' },
-  { id: 'calendar', label: 'Calendar', icon: 'clock' },
-  { id: 'library', label: 'My Library', icon: 'library' },
-  { id: 'requests', label: 'Requests', icon: 'download' },
-]
-const ADMIN_TAB: NavTab = { id: 'admin', label: 'Admin', icon: 'settings', admin: true }
-
-/** The tabs a given role sees. Exported for tests. */
-export function navTabsFor(role?: string): NavTab[] {
-  return role === 'admin' ? [...BASE_TABS, ADMIN_TAB] : [...BASE_TABS]
-}
-
-function AuroraMark({ size = 30 }: { size?: number }) {
+export function AuroraMark({ size = 28 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 36 36" fill="none" aria-hidden="true">
       <defs>
@@ -64,324 +34,293 @@ function AuroraMark({ size = 30 }: { size?: number }) {
           <stop offset="1" stopColor="#22D3EE" />
         </linearGradient>
       </defs>
-      <circle cx="18" cy="18" r="16" fill="url(#auroraMarkNav)" />
+      <circle cx="18" cy="18" r="18" fill="url(#auroraMarkNav)" />
       <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
     </svg>
   )
 }
 
-/* ───────────────────────── avatar dropdown ───────────────────────── */
-// Pre-Stage this was UserMenu in App.tsx with Settings / Admin / Sign out.
-// It gains the two triggers that used to sit in the sidebar footer, so
-// Server Status and Notifications remain reachable from one click.
-function AvatarMenu({
-  user,
-  avatarUrl,
-  onNavigate,
-  onSignOut,
-  onOpenServer,
-  onOpenNotifications,
-  notifCount,
-  onOpenMyProfile,
-  onOpenMembers,
-  showAdmin,
-}: {
+/** The aurora dot: the one mark for "something is live". Decorative; the
+ *  text beside it says what. */
+export function AuroraDot({ className = '' }: { className?: string }) {
+  return <span aria-hidden="true" className={`inline-block h-2 w-2 flex-none rounded-full [background:var(--aurora)] ${className}`} />
+}
+
+/** What the presence pill says, or null when nothing is live. */
+export interface NavPresence {
+  /** "3 watching Night Train" (or "In a watch party"). */
+  label: string
+  /** The same for a narrow bar: "3 watching". */
+  short: string
+  /** Set when the pill toggles a panel (the viewer's own party). */
+  expanded?: boolean
+}
+
+/* ───────────────────────── identity control ───────────────────────── */
+
+interface IdentityMenuProps {
   user: ApiUser
-  avatarUrl?: string
-  onNavigate: (v: string) => void
-  onSignOut: () => void
-  /** Shows the Admin row (TopNavProps.adminUI). */
-  showAdmin: boolean
-  /** Undefined for non-admins — the panel is admin-only, so no dead row. */
-  onOpenServer?: () => void
-  onOpenNotifications: () => void
+  navScope: NavScope
+  adminUI: boolean
+  profiles: Profile[]
+  activeProfileId: number | null
   notifCount: number
-  /** Opens /user/:username (social phase 1). Optional so test renders
-   *  without routing wired keep working; no row when absent. */
+  onSelectProfile: (id: number) => void
+  onOpenProfilesGate?: () => void
+  onManageProfiles?: () => void
+  onOpenNotifications: () => void
   onOpenMyProfile?: () => void
-  /** Opens the member directory (social phase 2). Same optionality. */
-  onOpenMembers?: () => void
-}) {
+  onOpenRequests?: () => void
+  requestsLabel: string
+  onOpenSettings: () => void
+  onReportBug?: () => void
+  onOpenAdmin: () => void
+  onOpenServer: () => void
+  onSignOut: () => void
+}
+
+function IdentityMenu({
+  user, navScope, adminUI, profiles, activeProfileId, notifCount,
+  onSelectProfile, onOpenProfilesGate, onManageProfiles, onOpenNotifications,
+  onOpenMyProfile, onOpenRequests, requestsLabel, onOpenSettings, onReportBug, onOpenAdmin, onOpenServer, onSignOut,
+}: IdentityMenuProps) {
   const [open, setOpen] = useState(false)
-  // The dropdown stays mounted for its exit fade after `open` flips false.
+  // The popover stays mounted for its exit fade after `open` flips false.
   const exit = useExitTransition(open)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
-  // NOT a `role="menu"`. Phase 9 first implemented the full APG Menu contract
-  // here, and a review established that the correct fix was to delete the role
-  // instead — the argument "a role without its keyboard contract is worse than no
-  // role" cuts both ways, and I had only run it in one direction.
-  //
-  // These rows are predominantly NAVIGATION (Settings, Admin) plus two panel
-  // openers plus Sign out. MDN is explicit: "When including a 'menu' for site
-  // navigation, do not use the `menu` role. Rather … simply a list of links. The
-  // `menu` role should be reserved for composite widgets requiring focus
-  // management" — and APG's Disclosure Navigation example says the same. The role
-  // buys nothing here and costs the user their virtual cursor, H/K/B quick-nav and
-  // the ability to read non-interactive text, because `menu` forces NVDA/JAWS out
-  // of browse mode into forms mode.
-  //
-  // Implementing it also caused a measured REGRESSION. `menu` may own only
-  // menuitem/group/separator, so the username + "Admin" badge header was an
-  // invalid owned element. Chromium exposes it anyway — but as a `paragraph`
-  // inside a `menu`, which the menu's own arrow navigation cannot reach. Before,
-  // focus never entered the menu, the reader stayed in browse mode, and the
-  // virtual cursor could read it. Forcing focus in made that text present in the
-  // tree and reachable by nothing.
-  //
-  // What was worth keeping from that pass is orthogonal to the role and is still
-  // here: focus into the panel on open, Escape, and `closeTo` returning focus to
-  // the trigger on every activation path instead of dropping it to <body>.
-  // ContextMenu keeps `role="menu"` — its items are all genuine commands, which is
-  // exactly the case the role exists for.
-  const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  const panelId = useId()
+  const profilesLabelId = useId()
+  const active = profiles.find(p => p.id === activeProfileId) ?? null
+  // The name on the control is the profile the server has bound. With no
+  // profile to show (none exist, or the binding is not known yet) it is the
+  // account's own name.
+  const shownName = active?.name ?? user.username
+  const full = navScope === 'full'
+  // A restricted profile's limit rides on the control ("Kids PG").
+  const limitShown = navScope === 'restricted' ? active?.max_age_rating?.trim() || null : null
+
+  const close = useCallback((restoreFocus: boolean) => {
+    setOpen(false)
+    if (restoreFocus) triggerRef.current?.focus()
+  }, [])
 
   useEffect(() => {
     if (!open) return
-    const onDocClick = (e: MouseEvent) => {
-      if (!rootRef.current) return
-      if (rootRef.current.contains(e.target as Node)) return
-      // Focus back to the trigger here too. This was the one dismissal path that
-      // still dropped focus to <body> while a comment claimed "every dismissal
-      // returns focus to the trigger" — measured as a focusout with no focusin
-      // after it. Low impact, since outside-click is a pointer gesture, but the
-      // claim was false.
-      setOpen(false)
-      triggerRef.current?.focus()
+    const onDoc = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setOpen(false)
-        triggerRef.current?.focus()
-      }
+      if (e.key === 'Escape') { e.stopPropagation(); close(true) }
     }
-    // Focus the first RENDERED row on open. `.filter(Boolean)` rather than
-    // `itemRefs.current[0]`, because the row set is conditional — My Profile
-    // (slot 0) and Members (slot 1) render only when routing is wired, and
-    // Server Status (slot 2) is admin-only, so leading slots can be empty.
-    // The earlier
-    // version of this pass pinned `tabIndex={0}` to that same slot, which meant a
-    // non-admin's open panel had ZERO tab stops; the rows are ordinary tab stops
-    // now, so that particular hazard is gone, but the focus call still has to
-    // skip the holes.
-    const raf = requestAnimationFrame(() => {
-      itemRefs.current.filter(Boolean)[0]?.focus()
-    })
-    document.addEventListener('mousedown', onDocClick)
+    document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
     return () => {
-      cancelAnimationFrame(raf)
-      document.removeEventListener('mousedown', onDocClick)
+      document.removeEventListener('mousedown', onDoc)
       document.removeEventListener('keydown', onKey)
     }
+  }, [open, close])
+
+  // Focus moves into the popover on open: the current profile's row when
+  // there is one, else the first control.
+  useEffect(() => {
+    if (!open) return
+    const t = window.setTimeout(() => {
+      const panel = panelRef.current
+      ;(panel?.querySelector<HTMLElement>('button[aria-current="true"]') ?? panel?.querySelector<HTMLElement>('button'))?.focus()
+    }, 0)
+    return () => window.clearTimeout(t)
   }, [open])
 
-  /** Every row is an ordinary tab stop now (no roving index, no arrow keys — this
-   *  is a disclosure, not a menu widget). The only key this needs to own is Tab
-   *  off the LAST row: without that, Tab walks out of an open dropdown and puts
-   *  focus on page content behind it. Shift+Tab off the first row does the same
-   *  in reverse. */
-  const onPanelKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key !== 'Tab') return
-    const live = itemRefs.current.filter(Boolean) as HTMLButtonElement[]
-    if (!live.length) return
-    const at = live.indexOf(document.activeElement as HTMLButtonElement)
-    const leaving = e.shiftKey ? at === 0 : at === live.length - 1
-    if (!leaving) return   // let Tab move between rows normally
-    e.preventDefault()
-    setOpen(false)
-    triggerRef.current?.focus()
+  // Tabbing out of the popover closes it; focus is already where the user
+  // sent it, so it is not pulled back to the trigger.
+  const onBlurCapture = (e: React.FocusEvent) => {
+    const next = e.relatedTarget as Node | null
+    if (open && next && rootRef.current && !rootRef.current.contains(next)) setOpen(false)
   }
 
-  /** Every dismissal returns focus to the trigger. Without this the row that was
-   *  activated unmounts under the user's focus and it falls to <body>. */
-  const closeTo = (fn?: () => void) => {
-    setOpen(false)
-    triggerRef.current?.focus()
-    fn?.()
+  // NOT a `role="menu"`, and no menu items inside it. The popover is a
+  // disclosure (the control's aria-expanded says so) holding ordinary
+  // buttons in the tab order: a group of profiles, then navigation. A `menu`
+  // role is for a composite widget with its own focus management; over a
+  // list that is mostly navigation it takes a screen reader out of browse
+  // mode, hides the non-interactive text (the group's label, each profile's
+  // facts) from the virtual cursor, and promises arrow keys. The current
+  // profile is marked with aria-current, which plain buttons may carry.
+  // What matters is kept without the role: focus moves in on open, Escape
+  // closes, and focus returns to the control on every way out.
+  const run = (fn: (() => void) | undefined) => () => {
+    if (!fn) return
+    close(true)
+    fn()
   }
 
-  const go = (view: string) => {
-    closeTo(() => onNavigate(view))
-  }
-  // The drawers render as fixed-position panels of their own; close the
-  // menu first so it isn't left floating over the thing it opened.
-  //
-  // These rows are OPENERS, not toggles. App passes explicit open handlers
-  // (not the nav icons' toggles): a row labelled "Notifications" that
-  // silently closes the panel when it happens to be open already is a
-  // trap, and below md this dropdown is the only surface for it — with no
-  // icon state to hint at what happened.
-  const openPanel = (fn: () => void) => {
-    // An earlier comment here said "the panels this opens (ServerPanel /
-    // NotificationPanel) manage their own focus". They do not — a reviewer grepped
-    // both: each renders `role="dialog"` with ZERO focus() calls, no autoFocus, no
-    // aria-modal, no Escape handler and no focus trap. So the ordering below fights
-    // nothing, but the reasoning it rested on was invented.
-    //
-    // Returning focus to the trigger is still right: it lands on a real control
-    // rather than on <body>. The remaining defect is the panels', not this menu's —
-    // activating a row opens a role="dialog" while focus sits on a trigger whose
-    // aria-expanded just went false, so a screen-reader user gets no announcement
-    // and no route in. Pre-existing, out of scope here, recorded rather than
-    // papered over.
-    closeTo(fn)
-  }
-
-  // The negative outline-offset is not cosmetic. The global :focus-visible floor
-  // paints its 2px ring at `outline-offset: 2px` — i.e. OUTSIDE the border box —
-  // and these rows are `w-full` inside a panel with `overflow-hidden` and no
-  // padding, so the entire left and right runs of the ring fell outside the clip
-  // rect and never painted. Measured: 3px clipped per side, and the destructive
-  // Sign out row (last child) lost its bottom edge too. Pulling the offset inward
-  // puts the whole ring inside the clip. This only started mattering when Phase 9
-  // made these rows focusable.
-  const itemCls = 'w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] flex items-center gap-2.5 focus-visible:[outline-offset:-2px]'
+  const row = 'flex h-11 w-full items-center gap-3 rounded-art px-3 text-left text-[15px] text-ink transition-colors hover:bg-white/[0.08]'
+  const rule = <div className="mx-3 my-2 h-px bg-line-strong" aria-hidden="true" />
 
   return (
-    <div ref={rootRef} className="relative flex-none">
+    <div ref={rootRef} className="relative" onBlurCapture={onBlurCapture}>
+      {/* The control's accessible name is its own content, in reading order:
+          the visible name (and limit) FIRST, so the name contains the visible
+          label and a voice command for what is on screen works; then, for
+          assistive tech only, what it is, whose account it is, and how many
+          notifications are unread, which the bar says nowhere else. */}
       <button
         ref={triggerRef}
         type="button"
+        data-identity-trigger=""
         onClick={() => setOpen(o => !o)}
-        title={`Signed in as ${user.username}${showAdmin ? ' (admin)' : ''}`}
-        // "true", not "menu" — see the note above `itemRefs`: this opens a
-        // disclosure panel of links and buttons, not a menu widget.
-        aria-haspopup="true"
         aria-expanded={open}
-        aria-label={
-          // Below md the labelled bell is hidden and the badge is
-          // aria-hidden, so without the count here a screen-reader user
-          // could never learn there are unread notifications on a phone.
-          notifCount > 0
-            ? `Account menu for ${user.username}, ${notifCount} unread notification${notifCount === 1 ? '' : 's'}`
-            : `Account menu for ${user.username}`
-        }
-        className="relative block rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
+        aria-controls={open ? panelId : undefined}
+        title={`Signed in as ${user.username}${adminUI ? ' (admin)' : ''}`}
+        className="flex h-10 items-center gap-2.5 rounded-full bg-white/[0.08] pl-1.5 pr-2.5 text-ink transition-colors hover:bg-white/[0.14]"
       >
-        <ProfileAvatar avatarUrl={avatarUrl} name={user.username} size={38} />
-        {/* Unread count doubles as the bell badge below md, where the
-            standalone bell is hidden. */}
-        {notifCount > 0 && (
-          <span
-            className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-purple-600 border-2 border-[#050505] text-[10px] font-bold text-white grid place-items-center md:hidden"
-            aria-hidden="true"
-          >
-            {notifCount > 9 ? '9+' : notifCount}
-          </span>
+        <span className="relative flex-none">
+          <ProfileAvatar avatarUrl={active?.avatar_url} name={shownName} colorKey={active?.id} size={28} />
+          {notifCount > 0 && (
+            <span
+              aria-hidden="true"
+              className="absolute -right-2 -top-1.5 h-4 min-w-4 rounded-full bg-action px-1 text-center text-xs font-bold leading-4 text-action-on"
+            >
+              {notifCount > 9 ? '9+' : notifCount}
+            </span>
+          )}
+        </span>
+        {/* The name is drawn from lg up; between md and lg the avatar's
+            initial stands for it (the room goes to the search field), and
+            the control's accessible name still says it (below). */}
+        <span data-identity-name="" className="max-w-[120px] truncate text-sm font-semibold max-lg:sr-only">{shownName}</span>
+        {limitShown && (
+          <span className="rounded-chip bg-ink px-1.5 py-0.5 text-xs font-bold text-action-on">{limitShown}</span>
         )}
+        <span className="sr-only">
+          {`, account menu${shownName === user.username ? '' : ` for ${user.username}`}`}
+          {notifCount > 0 ? `, ${notifCount} unread notification${notifCount === 1 ? '' : 's'}` : ''}
+        </span>
+        <Icon name="chevronDown" size={14} className="flex-none text-ink-2" />
       </button>
+
       {exit.mounted && (
         <div
-          // No role. `aria-labelledby` points at the username header below, which
-          // is now ordinary readable content rather than an invalid owned element
-          // of a `menu`.
-          aria-labelledby="avatar-menu-heading"
-          onKeyDown={onPanelKeyDown}
-          // inert while the exit plays: pointer-events:none does not stop
-          // Tab, and a focus landing on a node 150ms from unmount would
-          // drop to <body>.
-          inert={exit.closing || undefined}
-          className={`absolute right-0 mt-2 w-60 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-[shadow:var(--shadow-pop)] z-[55] overflow-hidden animate-pop-in origin-top-right${exit.closing ? ' is-closing' : ''}`}
+          ref={panelRef}
+          aria-label="Account and profiles"
+          role="group"
+          id={panelId}
+          // Never taller than the window under the bar, and it scrolls: with
+          // several profiles on a short screen the rows below them (Settings,
+          // Sign out) ran off the bottom and could not be reached.
+          className={`absolute right-0 top-[calc(100%+8px)] z-[55] w-[344px] max-w-[calc(100vw-32px)] max-h-[calc(100dvh-var(--chrome-h,64px)-16px)] overflow-y-auto overscroll-contain rounded-control bg-surface-raised-2 p-2 shadow-[0_24px_64px_rgba(0,0,0,0.6)] animate-pop-in ${exit.closing ? 'is-closing' : ''}`}
         >
-          <div id="avatar-menu-heading" className="px-4 py-3 border-b border-white/[0.06]">
-            <p className="text-white text-sm font-medium truncate">{user.username}</p>
-            <p className="text-white/50 text-xs mt-0.5 flex items-center gap-1.5">
-              {showAdmin ? (
-                <>
-                  <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px] font-semibold uppercase tracking-wide">Admin</span>
-                  Account
-                </>
-              ) : 'Account'}
-            </p>
-          </div>
-          {onOpenMyProfile && (
-            <button
-              ref={el => { itemRefs.current[0] = el }}
-              type="button"
-              // closeTo (not openPanel): this row NAVIGATES — same dismissal
-              // contract as the Settings/Admin rows' go().
-              onClick={() => closeTo(onOpenMyProfile)}
-              className={itemCls}
-            >
-              <Icon name="user" size={14} className="text-white/50" />
-              My Profile
-            </button>
+          {profiles.length > 0 && (
+            <>
+              <p className="stage-eyebrow px-3 pb-1.5 pt-2.5" id={profilesLabelId}>Watching as</p>
+              <div role="group" aria-labelledby={profilesLabelId} data-profiles="">
+                {profiles.map(p => {
+                  const sel = p.id === activeProfileId
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      data-profile={p.id}
+                      aria-current={sel ? 'true' : undefined}
+                      onClick={() => {
+                        close(true)
+                        if (!sel) onSelectProfile(p.id)
+                      }}
+                      // As tall as its lines: the summary wraps rather than
+                      // being cut (its longest form does not fit one line of
+                      // this panel), so the row grows a line for it.
+                      className={`flex min-h-[52px] w-full items-center gap-3 rounded-art px-3 py-2 text-left transition-colors hover:bg-white/[0.08] ${sel ? 'bg-white/[0.08]' : ''}`}
+                    >
+                      <ProfileAvatar avatarUrl={p.avatar_url} name={p.name} colorKey={p.id} size={32} />
+                      <span className="min-w-0 flex-1 leading-tight">
+                        <span className="block truncate text-[15px] font-semibold text-ink">{p.name}</span>
+                        <span className="block text-xs text-ink-2" data-profile-summary="">{profileSummary(p)}</span>
+                      </span>
+                      {sel && <Icon name="check" size={16} className="flex-none text-ink" />}
+                      {sel && <span className="sr-only">, watching now</span>}
+                    </button>
+                  )
+                })}
+              </div>
+              {(onOpenProfilesGate || (full && onManageProfiles)) && (
+                <div className="flex gap-1 pt-1">
+                  {onOpenProfilesGate && (
+                    <button type="button" onClick={run(onOpenProfilesGate)} className="h-10 flex-1 rounded-art text-[13px] font-semibold text-ink transition-colors hover:bg-white/[0.08]">
+                      Full picker
+                    </button>
+                  )}
+                  {full && onManageProfiles && (
+                    <button type="button" onClick={run(onManageProfiles)} className="h-10 flex-1 rounded-art text-[13px] font-semibold text-ink transition-colors hover:bg-white/[0.08]">
+                      Manage profiles
+                    </button>
+                  )}
+                </div>
+              )}
+              {rule}
+            </>
           )}
-          {onOpenMembers && (
-            <button
-              ref={el => { itemRefs.current[1] = el }}
-              type="button"
-              onClick={() => closeTo(onOpenMembers)}
-              className={itemCls}
-            >
-              <Icon name="users" size={14} className="text-white/50" />
-              Members
-            </button>
-          )}
-          {onOpenServer && (
-            <button
-              ref={el => { itemRefs.current[2] = el }}
-              type="button"
-              onClick={() => openPanel(onOpenServer)}
-              className={itemCls}
-            >
-              <Icon name="server" size={14} className="text-white/50" />
-              Server Status
-            </button>
-          )}
-          <button
-              ref={el => { itemRefs.current[3] = el }}
-              type="button"
-              onClick={() => openPanel(onOpenNotifications)}
-              className={itemCls}
-            >
-            <Icon name="bell" size={14} className="text-white/50" />
-            Notifications
+
+          <button type="button" onClick={run(onOpenNotifications)} className={row}>
+            <Icon name="bell" size={18} className="flex-none text-ink-2" />
+            <span className="flex-1">Notifications</span>
             {notifCount > 0 && (
-              <span className="ml-auto min-w-[19px] h-[19px] px-1.5 rounded-full bg-purple-600 text-[10.5px] font-bold text-white grid place-items-center">
-                {notifCount}
+              <span className="h-5 min-w-5 rounded-full bg-action px-1.5 text-center text-xs font-bold leading-5 text-action-on">
+                <span className="sr-only">(</span>{notifCount > 99 ? '99+' : notifCount}<span className="sr-only"> unread)</span>
               </span>
             )}
           </button>
-          <div className="border-t border-white/[0.06] my-1" />
-          <button
-              ref={el => { itemRefs.current[4] = el }}
-              type="button"
-              onClick={() => go('settings')}
-              className={itemCls}
-            >
-            <Icon name="settings" size={14} className="text-white/50" />
-            Settings
-          </button>
-          {showAdmin && (
-            <button
-              ref={el => { itemRefs.current[5] = el }}
-              type="button"
-              onClick={() => go('admin')}
-              className={itemCls}
-            >
-              <Icon name="shield" size={14} className="text-white/50" />
-              Admin
+          {full && onOpenMyProfile && (
+            <button type="button" onClick={run(onOpenMyProfile)} className={row}>
+              <Icon name="user" size={18} className="flex-none text-ink-2" />
+              Your profile
             </button>
           )}
-          <div className="border-t border-white/[0.06] my-1" />
-          <button
-            ref={el => { itemRefs.current[6] = el }}
-            type="button"
-            // closeTo focuses the trigger before calling onSignOut, which is the
-            // best that can be done from here — but it does NOT save this path, and
-            // the Phase 9 claim that "all of them now return it to the trigger" was
-            // wrong about this row specifically. App renders
-            // `if (user === false) return <AuthView/>`, so signing out unmounts
-            // TopNav and the trigger with it; measured end state is <body>. Fixing
-            // it properly means AuthView taking focus on mount, which is AuthView's
-            // job, not this menu's.
-            onClick={() => closeTo(onSignOut)}
-            className="w-full text-left px-4 py-2.5 text-sm text-red-300/85 hover:bg-red-500/10 flex items-center gap-2.5 focus-visible:[outline-offset:-2px]"
-          >
-            <Icon name="log-out" size={14} className="text-red-400/60" />
-            Sign out
+          {full && onOpenRequests && (
+            <button type="button" onClick={run(onOpenRequests)} className={row}>
+              <Icon name="download" size={18} className="flex-none text-ink-2" />
+              {requestsLabel}
+            </button>
+          )}
+          <button type="button" onClick={run(onOpenSettings)} className={row}>
+            <Icon name="settings" size={18} className="flex-none text-ink-2" />
+            Settings
+          </button>
+          {/* For every session, a profile with a content limit included. The
+              panel closes first and its control takes the focus, so that is
+              where the focus returns when the report's dialog closes. */}
+          {onReportBug && (
+            <button type="button" onClick={run(onReportBug)} className={row}>
+              <Icon name="bug" size={18} className="flex-none text-ink-2" />
+              Report a bug
+            </button>
+          )}
+
+          {adminUI && (
+            <>
+              {rule}
+              <button type="button" onClick={run(onOpenAdmin)} className={row}>
+                <Icon name="shield" size={18} className="flex-none text-ink-2" />
+                Admin
+              </button>
+              <button type="button" onClick={run(onOpenServer)} className={row}>
+                <Icon name="server" size={18} className="flex-none text-ink-2" />
+                Server status
+              </button>
+            </>
+          )}
+
+          {rule}
+          {/* The server's logout ends EVERY session on the account, on every
+              device. The row says so: it must never read as a per-device
+              sign-out, which does not exist. */}
+          <button type="button" onClick={run(onSignOut)} className={`${row} !h-auto py-2`}>
+            <Icon name="log-out" size={18} className="flex-none text-ink-2" />
+            <span className="leading-tight">
+              <span className="block">Sign out</span>
+              <span className="block text-xs text-ink-2">Signs out every device on this account</span>
+            </span>
           </button>
         </div>
       )}
@@ -389,293 +328,66 @@ function AvatarMenu({
   )
 }
 
-/* ───────────────────────── mobile menu sheet ─────────────────────── */
-// Below md the tab strip is hidden and this replaces it. It is the
-// successor to the sidebar's mobile drawer (QA BUG-012): removing the
-// sidebar without shipping this would leave phones with no navigation at
-// all. Same Escape / backdrop-dismiss behavior as the drawer had.
-function MobileSheet({
-  tabs,
-  currentView,
-  onNavigate,
-  closing = false,
-  onClose,
-  profiles,
-  activeProfileId,
-  onSelectProfile,
-  onAddProfile,
-  onOpenProfilesGate,
-  searchQuery,
-  onSearchQueryChange,
-  onSearchClose,
-}: {
-  tabs: NavTab[]
-  currentView: string
-  onNavigate: (v: string) => void
-  onClose: () => void
-  /** True while the sheet plays its exit; TopNav owns the timing. */
-  closing?: boolean
-  profiles: Profile[]
-  activeProfileId: number | null
-  onSelectProfile: (id: number) => void
-  // Routes to Settings, where profile creation lives. Threaded through to
-  // ProfileSwitcher's dashed Add-Profile row.
-  onAddProfile?: () => void
-  // Opens the full-page "Who's watching?" gate on demand (D7). The gate is
-  // otherwise first-visit-only, so this is the way back to it.
-  onOpenProfilesGate?: () => void
-  searchQuery: string
-  onSearchQueryChange: (v: string) => void
-  /** Clears the query and drops back to Home if it was driving the
-   *  search view — the X button next to the field. */
-  onSearchClose: () => void
-}) {
-  const panelRef = useRef<HTMLDivElement | null>(null)
-  const firstItemRef = useRef<HTMLButtonElement | null>(null)
+/* ─────────────────────────────── top bar ─────────────────────────────── */
 
-  // Focus in on open, and trap Tab inside the panel. This is the only
-  // navigation below md, so the drawer it replaced getting away with
-  // mouse-only dismissal is not a precedent worth keeping: without this a
-  // keyboard or switch user tabs straight past the menu into the page
-  // underneath, which the scrim only blocks for the mouse.
-  useEffect(() => {
-    firstItemRef.current?.focus()
-  }, [])
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        // Stop App's window-level Escape handler from ALSO firing: on a
-        // detail page it calls handleBack(), so dismissing the menu used to
-        // navigate the user off the page they were on.
-        e.stopPropagation()
-        onClose()
-        return
-      }
-      if (e.key !== 'Tab' || !panelRef.current) return
-      const focusable = panelRef.current.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
-      )
-      if (focusable.length === 0) return
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault()
-        first.focus()
-      } else if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault()
-        last.focus()
-      }
-    }
-    // Capture phase so the stopPropagation above beats App's listener even
-    // though App's is on `window` (which is upstream of `document` on the
-    // bubble path but downstream on capture).
-    document.addEventListener('keydown', onKey, true)
-    return () => document.removeEventListener('keydown', onKey, true)
-  }, [onClose])
-
-  // Lock the page behind the sheet — without this a drag over the scrim
-  // scrolls the content underneath on iOS. Shared ref-counted lock, so the
-  // theater and the profile gate can hold it at the same time in any order.
-  useEffect(() => lockBodyScroll(), [])
-
-  return (
-    <>
-      {/* The scrim starts BELOW the bar so the nav's own controls — the
-          menu button that closes this, the avatar, search — stay lit and
-          tappable, the way the old drawer kept its hamburger reachable. */}
-      <div
-        className={`fixed left-0 right-0 bottom-0 bg-black/60 backdrop-blur-sm z-[48] md:hidden stage-scrim-in${closing ? ' is-closing' : ''}`}
-        style={{ top: 'var(--chrome-h, var(--topnav-h))' }}
-        onClick={onClose}
-        aria-hidden="true"
-      />
-      <div
-        ref={panelRef}
-        id="stage-mobile-nav"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Menu"
-        // inert during the exit fade — see AvatarMenu.
-        inert={closing || undefined}
-        className={`fixed left-2 right-2 z-[49] md:hidden rounded-2xl bg-[#0a0a0f]/[0.97] backdrop-blur-xl border border-white/[0.08] shadow-[shadow:var(--shadow-pop)] p-2 animate-pop-in origin-top max-h-[70vh] overflow-y-auto overscroll-contain${closing ? ' is-closing' : ''}`}
-        style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 6px)' }}
-      >
-        {/* Real search field, not a shortcut to the palette. The palette
-            only ever jumps to a title's detail page — it has no "see all
-            results" route — so with the nav's desktop input hidden below md
-            this is the ONLY way a phone user reaches the search RESULTS
-            page (SearchView, with its grid and library toggles). Pre-Stage
-            the header input rendered at every width; dropping it here would
-            have quietly deleted a whole destination on mobile. */}
-        <div className="stage-navsearch flex mx-1 mb-2">
-          <Icon name="search" size={16} className="text-white/35 flex-none" />
-          <input
-            type="text"
-            placeholder="Search titles…"
-            aria-label="Search titles"
-            value={searchQuery}
-            onChange={(e) => onSearchQueryChange(e.target.value)}
-          />
-          {searchQuery && (
-            <button
-              type="button"
-              className="stage-navsearch-clear"
-              onClick={onSearchClose}
-              aria-label="Clear search"
-            >
-              <Icon name="x" size={14} />
-            </button>
-          )}
-        </div>
-        {profiles.length > 0 && (
-          <div className="px-2 pt-1 pb-2.5 mb-1 border-b border-white/[0.06]">
-            {/* Profile switching lives here on phones — the nav's right
-                cluster has no room for the chip below md. */}
-            <ProfileSwitcher
-              profiles={profiles}
-              activeProfileId={activeProfileId}
-              onSelect={onSelectProfile}
-              // Closes the sheet FIRST. Every other navigation out of this
-              // sheet goes through go(), which does the same — without it,
-              // Add-Profile rendered Settings underneath while the sheet stayed
-              // mounted with role="dialog" aria-modal="true", body scroll locked
-              // and its Tab trap live. Combined with the switcher unmounting the
-              // focused row, the trap's first/last checks matched neither branch,
-              // so Tab escaped into a page that aria-modal had hidden from AT.
-              onAddProfile={onAddProfile && (() => { onClose(); onAddProfile() })}
-              onOpenProfilesGate={onOpenProfilesGate && (() => { onClose(); onOpenProfilesGate() })}
-            />
-          </div>
-        )}
-        <nav aria-label="Main">
-          {tabs.map((tab, i) => {
-            const active = currentView === tab.id
-            return (
-              <button
-                key={tab.id}
-                ref={i === 0 ? firstItemRef : undefined}
-                type="button"
-                aria-current={active ? 'page' : undefined}
-                onClick={() => { onNavigate(tab.id); onClose() }}
-                className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl text-[15px] transition-colors ${
-                  active
-                    ? 'bg-purple-500/15 text-white font-semibold'
-                    : 'text-white/70 hover:bg-white/[0.05] hover:text-white'
-                }`}
-              >
-                <Icon name={tab.icon} size={18} />
-                {tab.label}
-                {tab.admin && <span className="stage-tab-adm">admin</span>}
-              </button>
-            )
-          })}
-        </nav>
-      </div>
-    </>
-  )
-}
-
-/* ───────────────────────────── TopNav ────────────────────────────── */
 export interface TopNavProps {
   user: ApiUser
   currentView: string
+  /** What this session is offered (lib/navScope). */
+  navScope: NavScope
+  /** App's showsAdminUI verdict. The Admin and Server status rows follow it
+   *  and nothing else: the account's role alone never shows them. */
+  adminUI: boolean
+  /** Takes a destination id (lib/navScope: 'home', 'catalog' for Library,
+   *  'together', 'movies'…) or a view id ('settings', 'admin'). */
   onNavigate: (v: string) => void
-  /** Warms a lazy view's chunk on hover/focus of its tab, so the click that
-   *  follows mounts real content instead of the Suspense fallback. */
+  /** Warm a destination's code on hover or focus of its link. */
   onPrefetch?: (v: string) => void
-  /** Inline search — the same controlled input the old header owned. */
+  /** The phone bar's title: the name of the page on screen. */
+  pageTitle: string
   searchQuery: string
   onSearchQueryChange: (v: string) => void
-  onSearchFocus: () => void
-  /** Clears the query and drops back to Home if it was driving the
-   *  search view — the X button, an outside click, and Escape all
-   *  route through this. */
-  onSearchClose: () => void
+  /** Enter in the field: search by what the words describe. */
+  onSearchSubmit?: () => void
+  /** The field's clear button: the words go, the page and the cursor stay. */
+  onSearchClear: () => void
   searchInputRef: React.RefObject<HTMLInputElement | null>
-  /** Opens the ⌘K palette. Below md this is the whole search affordance. */
-  onOpenPalette: () => void
-  /** True when the user is in a watch party (drives the live dot). */
-  partyActive: boolean
-  partyLabel: string
-  onPartyClick: () => void
-  /** Whether the party panel the button toggles is currently open. */
-  partyPanelOpen: boolean
-  serverOpen: boolean
-  /** Toggles the panel — for the nav icon, which shows its own state. */
-  onToggleServer: () => void
-  /** Force-opens it — for the avatar dropdown row (see AvatarMenu). */
-  onOpenServerPanel: () => void
-  notifOpen: boolean
-  onToggleNotifications: () => void
-  onOpenNotificationsPanel: () => void
+  /** Null when nothing is live. */
+  presence: NavPresence | null
+  onPresenceClick: () => void
   notifCount: number
+  onOpenNotificationsPanel: () => void
+  onOpenServerPanel: () => void
   profiles: Profile[]
+  /** The profile the server has bound to this session, or null. */
   activeProfileId: number | null
   onSelectProfile: (id: number) => void
-  // Routes to Settings, where profile creation lives. Threaded through to
-  // ProfileSwitcher's dashed Add-Profile row.
-  onAddProfile?: () => void
-  // Opens the full-page "Who's watching?" gate on demand (D7). The gate is
-  // otherwise first-visit-only, so this is the way back to it.
+  /** Opens the full-screen "Who's watching?" picker. */
   onOpenProfilesGate?: () => void
-  avatarUrl?: string
-  onSignOut: () => void
-  /** Opens the signed-in user's own profile page (social phase 1). */
+  onManageProfiles?: () => void
   onOpenMyProfile?: () => void
-  /** Opens the member directory (social phase 2). */
-  onOpenMembers?: () => void
-  /** Shows the Admin tab and the admin-only controls: the account is an
-   *  admin's AND the session acts as an unrestricted profile (showsAdminUI).
-   *  The role alone is not enough; the server refuses a restricted session. */
-  adminUI: boolean
+  onOpenRequests?: () => void
+  /** "My requests", or "Requests" for a session that is listed everyone's. */
+  requestsLabel?: string
+  /** "Report a bug" in the identity panel, when the server takes reports. */
+  onReportBug?: () => void
+  onSignOut: () => void
 }
 
 export function TopNav({
-  user,
-  currentView,
-  onNavigate,
-  onPrefetch,
-  searchQuery,
-  onSearchQueryChange,
-  onSearchFocus,
-  onSearchClose,
-  searchInputRef,
-  onOpenPalette,
-  partyActive,
-  partyLabel,
-  onPartyClick,
-  partyPanelOpen,
-  serverOpen,
-  onToggleServer,
-  onOpenServerPanel,
-  notifOpen,
-  onToggleNotifications,
-  onOpenNotificationsPanel,
-  notifCount,
-  profiles,
-  activeProfileId,
-  onSelectProfile,
-  onAddProfile,
-  onOpenProfilesGate,
-  avatarUrl,
-  onSignOut,
-  onOpenMyProfile,
-  onOpenMembers,
-  adminUI,
+  user, currentView, navScope, adminUI, onNavigate, onPrefetch, pageTitle,
+  searchQuery, onSearchQueryChange, onSearchSubmit, onSearchClear, searchInputRef,
+  presence, onPresenceClick, notifCount, onOpenNotificationsPanel, onOpenServerPanel,
+  profiles, activeProfileId, onSelectProfile, onOpenProfilesGate, onManageProfiles,
+  onOpenMyProfile, onOpenRequests, requestsLabel = 'My requests', onReportBug, onSignOut,
 }: TopNavProps) {
-  const isAdmin = adminUI
-  const tabs = useMemo(() => navTabsFor(isAdmin ? user.role : undefined), [isAdmin, user.role])
-  const [sheetOpen, setSheetOpen] = useState(false)
-  // The sheet stays mounted for its exit fade after sheetOpen flips false.
-  const sheetExit = useExitTransition(sheetOpen)
-  const stripRef = useRef<HTMLDivElement | null>(null)
-  const menuBtnRef = useRef<HTMLButtonElement | null>(null)
+  const destinations = navDestinationsFor(navScope)
+  const current = destinationForView(currentView, navScope)
   const navRef = useRef<HTMLElement | null>(null)
 
   // `data-scrolled` on the bar once the page has moved past the top, so it
   // firms up over content (.stage-topnav[data-scrolled]). Written straight
-  // to the DOM from one rAF per scroll frame — no React state, no re-render
+  // to the DOM from one rAF per scroll frame: no React state, no re-render
   // of the nav on scroll. Passive listener: never blocks scrolling.
   useEffect(() => {
     let raf = 0
@@ -691,312 +403,212 @@ export function TopNav({
       if (raf) cancelAnimationFrame(raf)
     }
   }, [])
-  const searchPillRef = useRef<HTMLDivElement | null>(null)
-
-  // Stable identity: MobileSheet keys its document listeners on onClose, and
-  // TopNav re-renders on every notification poll / party tick / keystroke.
-  const closeSheet = useCallback(() => {
-    setSheetOpen(false)
-    menuBtnRef.current?.focus()
-  }, [])
-
-  // Click outside the desktop search pill closes it, same as the X button.
-  // Only armed while there's a query to close — an empty, unfocused pill has
-  // nothing to dismiss.
-  useEffect(() => {
-    if (!searchQuery) return
-    const onDocMouseDown = (e: MouseEvent) => {
-      // Only the desktop pill needs this: below `md` it's `display:none`
-      // (no offsetParent), and the mobile drawer's search field — the
-      // ONLY route to search results on a phone — is a completely
-      // different DOM node the ref never covers. Without this guard every
-      // tap on the drawer (its scrim, its own search field, a nav row)
-      // read as "outside" and wiped the query mid-search.
-      if (!searchPillRef.current?.offsetParent) return
-      const target = e.target as Node
-      if (searchPillRef.current.contains(target)) return
-      // A scrollbar drag targets <html>/<body>, not real page content.
-      if (target === document.documentElement || target === document.body) return
-      // Bails on the search RESULTS grid (SearchView, a page-level
-      // sibling — not a DOM descendant of the pill): this listener fires
-      // on `mousedown`, which lands before a result card's own `click`,
-      // so without the exemption every result click would clear the
-      // query and swap the view back to Home out from under it. Also
-      // bails on any dialog/menu overlay (ContextMenu, the add-to-list
-      // picker, ServerPanel, …) — those render as later App-level
-      // siblings too, so e.g. right-clicking a result and choosing "Add
-      // to Watchlist" would otherwise close search out from under the
-      // still-open menu.
-      if ((target as Element).closest?.('[data-search-results], [role="dialog"], [role="menu"]')) return
-      onSearchClose()
-    }
-    document.addEventListener('mousedown', onDocMouseDown)
-    return () => document.removeEventListener('mousedown', onDocMouseDown)
-  }, [searchQuery, onSearchClose])
-
-  // Navigating from anywhere in the nav dismisses the sheet. The brand and
-  // the avatar dropdown's rows are reachable while the sheet is open (its
-  // scrim starts below the bar on purpose), and without this they navigated
-  // out from under an open menu that stayed up over the new page.
-  const go = useCallback((v: string) => {
-    setSheetOpen(false)
-    onNavigate(v)
-  }, [onNavigate])
-
-  // Between md and xl the strip scrolls; keep the active tab visible so
-  // navigating (including via browser back/forward, which changes
-  // currentView without a click) never leaves the current page's tab
-  // parked off-screen.
-  useEffect(() => {
-    const strip = stripRef.current
-    if (!strip) return
-    const el = strip.querySelector<HTMLElement>('[aria-current="page"]')
-    if (!el) return
-    if (strip.scrollWidth <= strip.clientWidth) return
-    el.scrollIntoView({ block: 'nearest', inline: 'center' })
-  }, [currentView, tabs.length])
-
-  // Close the sheet when the viewport grows past md — otherwise a rotate
-  // or resize leaves an orphaned panel over the desktop layout.
-  useEffect(() => {
-    if (!sheetOpen) return
-    const mq = window.matchMedia('(min-width: 768px)')
-    const onChange = () => { if (mq.matches) setSheetOpen(false) }
-    mq.addEventListener('change', onChange)
-    return () => mq.removeEventListener('change', onChange)
-  }, [sheetOpen])
+  const link = (d: NavDestination) => {
+    const active = current === d.id
+    return (
+      <button
+        key={d.id}
+        type="button"
+        className="stage-tab"
+        data-nav={d.id}
+        aria-current={active ? 'page' : undefined}
+        onClick={() => onNavigate(d.id)}
+        onPointerEnter={() => onPrefetch?.(d.id)}
+        onFocus={() => onPrefetch?.(d.id)}
+      >
+        {d.label}
+      </button>
+    )
+  }
 
   return (
-    // MobileSheet is a SIBLING of <nav>, not a child, and that is
-    // load-bearing: .stage-topnav sets `backdrop-filter`, which makes the
-    // bar a containing block for fixed-position descendants. Nested, the
-    // sheet's `fixed` panel would resolve against the 64px bar instead of
-    // the viewport — and worse, only when glow != "subtle" (that mode drops
-    // the blur), so it would work on one appearance setting and break on
-    // another.
-    <>
-    <nav ref={navRef} className="stage-topnav">
-      {/* Brand → home. Matches the pre-Stage sidebar behavior (clicking the
-          logo always returns home) and every media-app convention. */}
+    <header ref={navRef} className="stage-topnav" data-nav-scope={navScope}>
       <button
         type="button"
-        onClick={() => go('home')}
-        aria-label="Aurora Pro — go to home"
-        className="flex items-center gap-2.5 flex-none rounded-lg px-1 py-1 -mx-1 hover:bg-white/[0.03] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
+        onClick={() => onNavigate('home')}
+        aria-label="AuroraPro, go to Tonight"
+        // 36px as drawn; a 44px target on a touch screen (stage-hit44).
+        className="-mx-1 flex flex-none items-center gap-2.5 rounded-art px-1 py-1 stage-hit44"
       >
-        <span className="flex-none drop-shadow-[0_0_10px_rgba(168,85,247,0.45)]">
-          <AuroraMark />
-        </span>
-        {/* Drawn Borealis wordmark, flat
-            ink per the study's small-size guidance — the gradient has
-            nowhere to travel at 15px. Decorative: the button's aria-label
-            already names it. */}
-        <AuroraWordmark decorative ink="#DDD6FE" className="hidden sm:block h-[15px] w-auto" />
+        <AuroraMark />
+        {/* Drawn wordmark in plain ink: at this size the gradient has nowhere
+            to travel, and the mark beside it carries the brand colour.
+            Decorative: the button's aria-label names it. */}
+        {/* From lg up. Between md and lg (a tablet in portrait, a narrow
+            window) the bar has no room for it AND a search field anyone
+            can type in: the mark alone carries the brand there. */}
+        <AuroraWordmark decorative ink="#F4F4F5" className="hidden h-[15px] w-auto lg:block" />
       </button>
 
-      {/* Tabs. Hidden below md (the sheet takes over); a scrolling strip
-          up to xl; fully inline from xl. */}
-      <div ref={stripRef} className="stage-tabstrip hidden md:flex flex-1 justify-start 2xl:justify-center min-w-0">
-        {tabs.map(tab => {
-          const active = currentView === tab.id
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              className="stage-tab"
-              aria-current={active ? 'page' : undefined}
-              onClick={() => go(tab.id)}
-              // Intent, not commitment: hovering or tabbing onto a tab is
-              // enough signal to fetch its code. import() dedupes, so a tab
-              // hovered ten times costs one request.
-              onPointerEnter={() => onPrefetch?.(tab.id)}
-              onFocus={() => onPrefetch?.(tab.id)}
-            >
-              {tab.label}
-              {tab.admin && <span className="stage-tab-adm">admin</span>}
-            </button>
-          )
-        })}
-      </div>
+      {/* Phones: the bar names the page; the destinations are the tab bar. */}
+      <span className="min-w-0 flex-1 truncate font-display text-xl font-semibold tracking-[-0.01em] text-ink md:hidden">
+        {pageTitle}
+      </span>
 
-      {/* Right cluster */}
-      <div className="ml-auto flex items-center gap-2 md:gap-3 flex-none">
-        {/* Search. The real input on md+ (preserves type-to-open-results);
-            an icon button below md that opens the palette, which is a far
-            better search surface on a phone than a 120px pill. */}
-        <div ref={searchPillRef} className="stage-navsearch hidden md:flex w-[176px] lg:w-[196px]">
-          <Icon name="search" size={15} className="text-white/35 flex-none" />
-          <input
-            ref={searchInputRef}
-            type="text"
-            placeholder="Search titles…"
-            aria-label="Search titles"
-            value={searchQuery}
-            onChange={(e) => onSearchQueryChange(e.target.value)}
-            onFocus={onSearchFocus}
-          />
-          {/* Swap the ⌘K hint for a clear button once there's a query to
-              clear — the pill is too narrow at 176px to show both. */}
-          {searchQuery ? (
-            <button
-              type="button"
-              className="stage-navsearch-clear"
-              onClick={onSearchClose}
-              aria-label="Clear search"
-            >
-              <Icon name="x" size={13} />
-            </button>
-          ) : (
-            <kbd aria-hidden="true">⌘K</kbd>
-          )}
-        </div>
-        <button
-          type="button"
-          className="stage-iconbtn md:hidden"
-          onClick={onOpenPalette}
-          aria-label="Search"
-          aria-haspopup="dialog"
-        >
-          <Icon name="search" size={17} />
-        </button>
+      <nav aria-label="Main" className="hidden flex-none items-center gap-1 md:flex">
+        {destinations.map(link)}
+      </nav>
 
-        {/* Watch party */}
-        <button
-          type="button"
-          className="stage-iconbtn"
-          onClick={onPartyClick}
-          title={partyLabel}
-          // partyLabel alone is a STATE ("In party AB12"); a screen reader
-          // would announce it with no hint that activating opens a panel.
-          aria-label={partyActive ? `${partyLabel} — open watch party panel` : partyLabel}
-          aria-expanded={partyActive ? partyPanelOpen : undefined}
-        >
-          <Icon name="users" size={17} />
-          {partyActive && (
-            <span
-              className="absolute -top-px -right-px w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-[#050505] shadow-[0_0_8px_rgba(16,185,129,0.8)]"
-              aria-hidden="true"
-            />
-          )}
-        </button>
+      {/* The search field. What is typed shows on the search page, which is a
+          page with its own address: a press elsewhere does not dismiss it
+          (it used to, back when the results were drawn over another page).
+          A label: a press anywhere on the field (its icon, its hairline)
+          puts the cursor in it, so the whole 44px a touch screen draws is
+          the target. The input keeps its own name (aria-label). */}
+      <label className="stage-navsearch hidden md:flex">
+        <Icon name="search" size={16} className="flex-none text-ink-2" />
+        <input
+          ref={searchInputRef}
+          type="text"
+          placeholder="Search, or describe a mood"
+          aria-label="Search titles"
+          value={searchQuery}
+          onChange={(e) => onSearchQueryChange(e.target.value)}
+          // Typing matches titles as you go. Enter asks for more: a search
+          // by what the words describe, which takes the server a model call,
+          // so it is run only when asked for.
+          enterKeyHint="search"
+          onKeyDown={(e) => {
+            // Down goes from the field into the results on the page (the
+            // field has nowhere else for it to go).
+            if (e.key === 'ArrowDown' && !e.nativeEvent.isComposing) {
+              if (focusResult('first')) e.preventDefault()
+              return
+            }
+            if (e.key !== 'Enter' || e.nativeEvent.isComposing || !searchQuery.trim()) return
+            e.preventDefault()
+            onSearchSubmit?.()
+          }}
+        />
+        {searchQuery ? (
+          <button type="button" className="stage-navsearch-clear" onClick={onSearchClear} aria-label="Clear search">
+            <Icon name="x" size={14} />
+          </button>
+        ) : (
+          // A hint for a keyboard, drawn only while the FIELD is wide enough
+          // to hold it beside what is typed (a container query on the field,
+          // index.css): the field's width follows the names and the pill
+          // beside it, not the window's alone. Squeezed, the hint used to
+          // spill out of the field onto the presence pill.
+          <kbd aria-hidden="true" className="stage-navsearch-hint">⌘K</kbd>
+        )}
+      </label>
 
-        {/* Server status + notifications. Both also live in the avatar
-            dropdown; these are the at-a-glance shortcuts and are hidden
-            below md to keep the bar breathable.
-
-            The mockup draws this as a green "OK" health pill. There is no
-            health signal to drive that today — ServerPanel fetches
-            /api/admin/dashboard itself and only while open, and there is
-            no /api/health helper — so this stays a neutral trigger rather
-            than a fabricated all-clear. Wiring a real signal is a
-            backend-touching follow-up, tracked in the plan.
-
-            Admin-only, because the panel it opens is: pre-Stage the
-            sidebar showed this to everyone and non-admins got a
-            "Server status is admin-only" message — a dead affordance. */}
-        <div className="hidden md:flex items-center gap-2">
-          {isAdmin && (
-            <button
-              type="button"
-              className="stage-iconbtn"
-              onClick={onToggleServer}
-              aria-expanded={serverOpen}
-              aria-controls={serverOpen ? 'stage-server-panel' : undefined}
-              aria-label="Server status"
-              title="Server status"
-            >
-              <Icon name="server" size={17} />
-            </button>
-          )}
+      <div className="ml-auto flex flex-none items-center gap-3">
+        {presence && (
           <button
             type="button"
-            className="stage-iconbtn"
-            onClick={onToggleNotifications}
-            aria-expanded={notifOpen}
-            aria-controls={notifOpen ? 'stage-notification-panel' : undefined}
-            aria-label={notifCount > 0 ? `Notifications (${notifCount} unread)` : 'Notifications'}
-            title="Notifications"
+            data-presence=""
+            onClick={onPresenceClick}
+            aria-expanded={presence.expanded}
+            className="flex h-11 max-w-[280px] items-center gap-2 rounded-full bg-white/[0.08] px-3.5 text-[13px] font-medium text-ink transition-colors hover:bg-white/[0.14] md:h-10"
           >
-            <Icon name="bell" size={17} />
-            {notifCount > 0 && (
-              <span
-                className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-purple-600 border-2 border-[#050505] text-[10px] font-bold text-white grid place-items-center"
-                aria-hidden="true"
-              >
-                {notifCount > 9 ? '9+' : notifCount}
-              </span>
+            <AuroraDot />
+            {/* What is on is named from xl up. Below that the bar cannot
+                hold the title AND a search field wide enough to type in. */}
+            <span className="truncate xl:hidden">{presence.short}</span>
+            {/* What is on is still part of the pill's name where it is not
+                drawn: the rest of the label, for assistive tech only. (Not an
+                aria-label: the name must go on containing the words on
+                screen, and "In a party" is not in "In a watch party".) */}
+            {presence.label.startsWith(presence.short) && presence.label.length > presence.short.length && (
+              <span className="sr-only xl:hidden" data-presence-rest="">{presence.label.slice(presence.short.length)}</span>
             )}
+            <span className="hidden truncate xl:inline">{presence.label}</span>
           </button>
-        </div>
-
-        {/* md, not lg: the sheet that carries the switcher on phones is
-            `md:hidden`, so gating this at lg left the 768–1023px band (iPad
-            portrait, small laptops, a 320px page reflowed at 400% zoom)
-            with no way to switch profile at all — which gates Continue
-            Watching, recommendations and maturity filtering. */}
-        {profiles.length > 0 && (
-          <div className="hidden md:block">
-            <ProfileSwitcher
-              profiles={profiles}
-              activeProfileId={activeProfileId}
-              onSelect={onSelectProfile}
-              onAddProfile={onAddProfile}
-              onOpenProfilesGate={onOpenProfilesGate}
-            />
-          </div>
         )}
 
-        <AvatarMenu
-          user={user}
-          avatarUrl={avatarUrl}
-          // go(), not onNavigate: Settings/Admin from this dropdown must
-          // also dismiss the mobile sheet if it's open behind it.
-          onNavigate={go}
-          onSignOut={onSignOut}
-          showAdmin={isAdmin}
-          onOpenServer={isAdmin ? onOpenServerPanel : undefined}
-          onOpenNotifications={onOpenNotificationsPanel}
-          notifCount={notifCount}
-          // Wrapped like go(): navigating from the dropdown must also
-          // dismiss the mobile sheet if it's open behind it.
-          onOpenMyProfile={onOpenMyProfile && (() => { setSheetOpen(false); onOpenMyProfile() })}
-          onOpenMembers={onOpenMembers && (() => { setSheetOpen(false); onOpenMembers() })}
-        />
-
-        {/* Menu button — below md only. */}
-        <button
-          ref={menuBtnRef}
-          type="button"
-          className="stage-iconbtn md:hidden"
-          onClick={() => setSheetOpen(o => !o)}
-          aria-label={sheetOpen ? 'Close menu' : 'Open menu'}
-          aria-expanded={sheetOpen}
-          aria-haspopup="dialog"
-          // Only reference the panel while it exists — a dangling IDREF is
-          // an axe violation and AT drops the relationship silently.
-          aria-controls={sheetOpen ? 'stage-mobile-nav' : undefined}
-        >
-          <Icon name={sheetOpen ? 'x' : 'menu'} size={18} />
-        </button>
+        <div className="hidden md:block">
+          <IdentityMenu
+            user={user}
+            navScope={navScope}
+            adminUI={adminUI}
+            profiles={profiles}
+            activeProfileId={activeProfileId}
+            notifCount={notifCount}
+            onSelectProfile={onSelectProfile}
+            onOpenProfilesGate={onOpenProfilesGate}
+            onManageProfiles={onManageProfiles}
+            onOpenNotifications={onOpenNotificationsPanel}
+            onOpenMyProfile={onOpenMyProfile}
+            onOpenRequests={onOpenRequests}
+            requestsLabel={requestsLabel}
+            onOpenSettings={() => onNavigate('settings')}
+            onReportBug={onReportBug}
+            onOpenAdmin={() => onNavigate('admin')}
+            onOpenServer={onOpenServerPanel}
+            onSignOut={onSignOut}
+          />
+        </div>
       </div>
+    </header>
+  )
+}
+
+/* ───────────────────────────── bottom tab bar ───────────────────────────── */
+
+export interface BottomTabBarProps {
+  currentView: string
+  navScope: NavScope
+  onNavigate: (v: string) => void
+  onPrefetch?: (v: string) => void
+  /** Something is live: marks the Together tab with the aurora dot. */
+  live: boolean
+  notifCount: number
+  /** For the Me tab's avatar. Null until the session's profile is known. */
+  activeProfile: Profile | null
+  username: string
+}
+
+/** The five tabs a session gets on a phone. Search and Me are always there;
+ *  the ones between follow the same rule as the top bar's destinations. */
+export function bottomTabsFor(scope: NavScope): NavDestination[] {
+  const dest = navDestinationsFor(scope)
+  const search: NavDestination = { id: 'search', label: 'Search', icon: 'search' }
+  const me: NavDestination = { id: 'me', label: 'Me', icon: 'user' }
+  if (scope === 'restricted') return [...dest, search, me]
+  // Tonight, Library, Search, (Together), Me.
+  return [...dest.slice(0, 2), search, ...dest.slice(2), me]
+}
+
+export function BottomTabBar({ currentView, navScope, onNavigate, onPrefetch, live, notifCount, activeProfile, username }: BottomTabBarProps) {
+  const tabs = bottomTabsFor(navScope)
+  const current = currentView === 'search' || currentView === 'me' ? currentView : destinationForView(currentView, navScope)
+  return (
+    <nav aria-label="Main" className="stage-tabbar flex md:hidden">
+      {tabs.map(t => {
+        const active = current === t.id
+        return (
+          <button
+            key={t.id}
+            type="button"
+            data-nav={t.id}
+            aria-current={active ? 'page' : undefined}
+            onClick={() => onNavigate(t.id)}
+            onPointerEnter={() => onPrefetch?.(t.id)}
+            className="stage-tabbar-item flex flex-col items-center justify-center"
+          >
+            {t.id === 'me' ? (
+              <span className={`relative rounded-full ${active ? 'shadow-[0_0_0_2px_var(--surface-page),0_0_0_4px_#fff]' : ''}`}>
+                <ProfileAvatar avatarUrl={activeProfile?.avatar_url} name={activeProfile?.name ?? username} colorKey={activeProfile?.id} size={24} />
+                {notifCount > 0 && (
+                  <span aria-hidden="true" className="absolute -right-1.5 -top-1 h-2.5 w-2.5 rounded-full border-2 border-surface-page bg-action" />
+                )}
+              </span>
+            ) : (
+              <span className="relative">
+                <Icon name={t.icon} size={22} />
+                {t.id === 'together' && live && <AuroraDot className="absolute -right-1 -top-1" />}
+              </span>
+            )}
+            <span>
+              {t.label}
+              {t.id === 'together' && live && <span className="sr-only"> (live now)</span>}
+              {t.id === 'me' && notifCount > 0 && <span className="sr-only"> ({notifCount} unread notifications)</span>}
+            </span>
+          </button>
+        )
+      })}
     </nav>
-    {sheetExit.mounted && (
-      <MobileSheet
-        closing={sheetExit.closing}
-        tabs={tabs}
-        currentView={currentView}
-        onNavigate={onNavigate}
-        onClose={closeSheet}
-        profiles={profiles}
-        activeProfileId={activeProfileId}
-        onSelectProfile={onSelectProfile}
-        onAddProfile={onAddProfile}
-        onOpenProfilesGate={onOpenProfilesGate}
-        searchQuery={searchQuery}
-        onSearchQueryChange={onSearchQueryChange}
-        onSearchClose={onSearchClose}
-      />
-    )}
-    </>
   )
 }

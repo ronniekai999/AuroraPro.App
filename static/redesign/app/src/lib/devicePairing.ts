@@ -20,3 +20,28 @@ export function consumeDevicePairing(now = Date.now()): string | null {
     return entry.code
   } catch { return null }
 }
+
+// "Connect a TV with a code" followed, with no code in the address yet: the
+// viewer is on the pairing page to sign in first. A password sign-in leaves
+// them there; a provider's round trip comes back to the app's front page.
+// So the intent is kept for this tab, as a time and nothing else: where it
+// leads is fixed (the pairing page), and no value from the address is
+// stored. It is used once, after the next sign-in, and forgotten on use, on
+// sign-out, and after ten minutes.
+const INTENT = 'aurora_tv_intent_v1'
+
+export function rememberDeviceIntent(now = Date.now()): void {
+  try { sessionStorage.setItem(INTENT, String(now + 10 * 60_000)) } catch { /* The link on the sign-in page is still there. */ }
+}
+
+export function consumeDeviceIntent(now = Date.now()): boolean {
+  try {
+    const saved = sessionStorage.getItem(INTENT)
+    sessionStorage.removeItem(INTENT)
+    return saved !== null && /^\d+$/.test(saved) && Number(saved) > now
+  } catch { return false }
+}
+
+export function forgetDeviceIntent(): void {
+  try { sessionStorage.removeItem(INTENT) } catch { /* nothing kept */ }
+}

@@ -7,16 +7,18 @@
 //
 //   - The roving tabIndex DID NOT ROVE. Both widgets rendered `tabIndex` off a
 //     ref, and writing a ref does not re-render, so the tab stop never moved.
-//   - DetailTabs called preventDefault on ArrowUp/ArrowDown, which broke page
-//     scroll on a HORIZONTAL tablist.
+//   - The title page's tab strip called preventDefault on ArrowUp/ArrowDown,
+//     which broke page scroll on a HORIZONTAL tablist. The strip is gone; the
+//     same "do not swallow the arrow keys" rule is held for what replaced it.
 //   - ContextMenu's Escape dismissed the menu AND navigated back off the title,
-//     because App's handler guarded only on `paletteOpen`.
+//     because App's handler did not know a menu was open.
 
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ContextMenu } from './ContextMenu'
-import { DetailTabs } from './detail/DetailTabs'
+import { Disclosure } from './detail/Disclosure'
+import { EpisodeList } from './detail/EpisodeList'
 
 describe('ContextMenu — APG menu contract', () => {
   const items = [
@@ -94,7 +96,7 @@ describe('ContextMenu — APG menu contract', () => {
     window.addEventListener('keydown', windowSpy)
     await user.keyboard('{Escape}')
     expect(onClose).toHaveBeenCalled()
-    // App's Escape handler guards only on `paletteOpen`, so an Escape that reached
+    // App's Escape handler does not know a menu is open, so an Escape that reached
     // the window fell through to `view === 'detail' && handleBack()` — dismissing
     // the menu AND navigating off the title. stopPropagation is the fix.
     const escapes = windowSpy.mock.calls.filter(c => (c[0] as KeyboardEvent).key === 'Escape')
@@ -125,110 +127,129 @@ describe('ContextMenu — APG menu contract', () => {
   })
 })
 
-describe('DetailTabs — APG tabs contract', () => {
-  const tabs = [
-    { id: 'episodes', label: 'Episodes' },
-    { id: 'cast', label: 'Cast' },
-    { id: 'files', label: 'Files' },
-  ]
-  const open = (active = 'episodes', onChange = vi.fn()) => {
-    const r = render(<DetailTabs tabs={tabs} active={active} onChange={onChange} />)
-    return { ...r, onChange }
-  }
+// The title page lost its tab strip: it is one column now, and what the tabs
+// used to divide is on the page in order. The two hand-rolled keyboard
+// widgets that remain on it are held to their own patterns here instead.
 
-  it('marks exactly one tab selected and points every tab at the panel', () => {
+describe('Disclosure — APG disclosure contract', () => {
+  const open = (defaultOpen = false) => render(
+    <Disclosure title="Media info" summary="2 versions" defaultOpen={defaultOpen}>
+      <p>Technical details</p>
+    </Disclosure>,
+  )
+  const head = () => screen.getByRole('button', { name: /Media info/ })
+
+  it('is one button that says whether its panel is open and points at it, open or closed', () => {
     open()
-    const list = screen.getAllByRole('tab')
-    expect(list.filter(t => t.getAttribute('aria-selected') === 'true')).toHaveLength(1)
-    // "Every tab has the property aria-controls referring to its associated
-    // tabpanel" — every tab, not just the selected one.
-    for (const t of list) expect(t).toHaveAttribute('aria-controls', 'detail-panel')
+    expect(head()).toHaveAttribute('aria-expanded', 'false')
+    // aria-controls must reference a real element even while closed.
+    const panel = document.getElementById(head().getAttribute('aria-controls')!)!
+    expect(panel).not.toBeNull()
+    expect(panel).toHaveAttribute('hidden')
+    expect(panel).toHaveTextContent('Technical details')
   })
 
-  it('derives selection from `active`, not from position', () => {
-    // Every other test in this block renders with active='episodes', which is
-    // tabs[0] — so `selectedIndex` is always 0 and `aria-selected` is true only at
-    // index 0. That makes the DERIVATION unpinned even though the TRANSITIONS are
-    // covered: a reviewer replaced `const on = t.id === active` with `i === 0`, and
-    // `selectedIndex` with the literal `0`, and both mutations left 10/10 green.
-    // The component would have been permanently stuck on the first tab in the app
-    // while the suite reported it healthy.
-    //
-    // One render at a non-zero tab is all it takes.
-    open('cast')
-    const list = screen.getAllByRole('tab')
-    expect(list[1]).toHaveAttribute('aria-selected', 'true')
-    expect(list[0]).toHaveAttribute('aria-selected', 'false')
-    expect(list[2]).toHaveAttribute('aria-selected', 'false')
-    // The roving tab stop initialises FROM the selection, so it moves too.
-    const stops = list.filter(t => t.getAttribute('tabindex') === '0')
-    expect(stops).toHaveLength(1)
-    expect(stops[0]).toBe(list[1])
+  it('derives its starting state from the prop, not from a constant', () => {
+    open(true)
+    expect(head()).toHaveAttribute('aria-expanded', 'true')
+    expect(document.getElementById(head().getAttribute('aria-controls')!)).not.toHaveAttribute('hidden')
   })
 
-  it('resyncs the tab stop when `active` changes underneath it', () => {
-    // The deep-link / parent-swap case: `active` changes without the user touching
-    // the strip. Deleting the effect that resyncs `focused` also survived.
-    const { rerender } = open('episodes')
-    rerender(<DetailTabs tabs={tabs} active="files" onChange={vi.fn()} />)
-    const list = screen.getAllByRole('tab')
-    expect(list[2]).toHaveAttribute('aria-selected', 'true')
-    const stops = list.filter(t => t.getAttribute('tabindex') === '0')
-    expect(stops[0]).toBe(list[2])
-  })
-
-  it('roves the tab stop with Left/Right and activates automatically', async () => {
-    const user = userEvent.setup()
-    const { onChange } = open()
-    const list = screen.getAllByRole('tab')
-    list[0].focus()
-
-    await user.keyboard('{ArrowRight}')
-    expect(list[1]).toHaveFocus()
-    const stops = list.filter(t => t.getAttribute('tabindex') === '0')
-    expect(stops).toHaveLength(1)
-    expect(stops[0]).toBe(list[1])
-    // Automatic activation: the criterion is latency, and these panels are
-    // already-loaded local state.
-    expect(onChange).toHaveBeenCalledWith('cast')
-
-    await user.keyboard('{ArrowLeft}')
-    expect(list[0]).toHaveFocus()
-  })
-
-  it('wraps horizontally and honours Home/End', async () => {
+  it('toggles with Enter and with Space, and keeps focus on the button', async () => {
     const user = userEvent.setup()
     open()
-    const list = screen.getAllByRole('tab')
-    list[0].focus()
-    await user.keyboard('{ArrowLeft}')
-    expect(list[2]).toHaveFocus()
-    await user.keyboard('{ArrowRight}')
-    expect(list[0]).toHaveFocus()
-    await user.keyboard('{End}')
-    expect(list[2]).toHaveFocus()
-    await user.keyboard('{Home}')
-    expect(list[0]).toHaveFocus()
+    head().focus()
+    await user.keyboard('{Enter}')
+    expect(head()).toHaveAttribute('aria-expanded', 'true')
+    expect(head()).toHaveFocus()
+    await user.keyboard(' ')
+    expect(head()).toHaveAttribute('aria-expanded', 'false')
+    expect(head()).toHaveFocus()
   })
 
-  it('leaves ArrowUp/ArrowDown ALONE so the page can still scroll', async () => {
+  it('leaves the arrow keys ALONE so the page can still scroll', async () => {
     const user = userEvent.setup()
     open()
-    const list = screen.getAllByRole('tab')
-    list[0].focus()
-
-    // This is a horizontal tablist. APG maps Up/Down for VERTICAL ones only, and
-    // an earlier version called preventDefault on them — which on a horizontal
-    // strip does nothing useful and stops the page scrolling while a tab has
-    // focus. Assert the default is intact rather than that focus stayed put:
-    // "focus did not move" would also pass if the handler swallowed the event.
-    let defaultPrevented: boolean | null = null
-    const probe = (e: KeyboardEvent) => { defaultPrevented = e.defaultPrevented }
+    head().focus()
+    // Assert the default is intact rather than that nothing visibly changed:
+    // "nothing changed" would also pass if a handler swallowed the event.
+    const prevented: boolean[] = []
+    const probe = (e: KeyboardEvent) => { prevented.push(e.defaultPrevented) }
     window.addEventListener('keydown', probe)
-    await user.keyboard('{ArrowDown}')
+    await user.keyboard('{ArrowDown}{ArrowUp}{ArrowLeft}{ArrowRight}')
     window.removeEventListener('keydown', probe)
+    expect(prevented).toEqual([false, false, false, false])
+    expect(head()).toHaveAttribute('aria-expanded', 'false')
+  })
+})
 
-    expect(defaultPrevented).toBe(false)
-    expect(list[0]).toHaveFocus()
+describe('EpisodeList — the season switch', () => {
+  const seasons = [{ season_number: 1 }, { season_number: 2 }, { season_number: 3 }]
+  const open = (selected: number, onSelectSeason = vi.fn()) => {
+    const r = render(
+      <EpisodeList count={0} seasons={seasons} selectedSeason={selected} onSelectSeason={onSelectSeason} rows={[]} onPlay={vi.fn()} onUnavailable={vi.fn()} />,
+    )
+    return { ...r, onSelectSeason }
+  }
+  const chips = () => within(screen.getByRole('group', { name: 'Season' })).getAllByRole('button')
+
+  it('marks exactly one season pressed, and derives it from the selection, not from position', () => {
+    // Rendered on a season that is not the first: a chip row that hard-coded
+    // "the first one is on" would pass every test that starts at season 1.
+    open(2)
+    expect(chips().map(c => c.getAttribute('aria-pressed'))).toEqual(['false', 'true', 'false'])
+  })
+
+  it('follows the selection when it changes underneath it', () => {
+    const { rerender } = open(1)
+    rerender(<EpisodeList count={0} seasons={seasons} selectedSeason={3} onSelectSeason={vi.fn()} rows={[]} onPlay={vi.fn()} onUnavailable={vi.fn()} />)
+    expect(chips().map(c => c.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'true'])
+  })
+
+  it('asks for the pressed season by NUMBER, from the chips and from the menu alike', async () => {
+    const user = userEvent.setup()
+    const { onSelectSeason } = open(1)
+    await user.click(chips()[2])
+    expect(onSelectSeason).toHaveBeenLastCalledWith(3)
+    // The same choice as a menu, for a phone (CSS shows one of the two).
+    const menu = screen.getByRole('combobox', { name: 'Season' })
+    expect(menu).toHaveValue('1')
+    await user.selectOptions(menu, '2')
+    expect(onSelectSeason).toHaveBeenLastCalledWith(2)
+  })
+
+  it('every chip is an ordinary tab stop: no roving index to get stuck', () => {
+    open(2)
+    for (const c of chips()) expect(c).not.toHaveAttribute('tabindex')
+  })
+
+  it('offers no switch for a show with one season', () => {
+    render(<EpisodeList count={0} seasons={[{ season_number: 1 }]} selectedSeason={1} rows={[]} onPlay={vi.fn()} onUnavailable={vi.fn()} />)
+    expect(screen.queryByRole('group', { name: 'Season' })).toBeNull()
+    expect(screen.queryByRole('combobox', { name: 'Season' })).toBeNull()
+  })
+
+  it('becomes a menu alone once a show has more seasons than fit as chips', () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ season_number: i + 1 }))
+    render(<EpisodeList count={0} seasons={many} selectedSeason={7} rows={[]} onPlay={vi.fn()} onUnavailable={vi.fn()} />)
+    expect(screen.queryByRole('group', { name: 'Season' })).toBeNull()
+    expect(screen.getByRole('combobox', { name: 'Season' })).toHaveValue('7')
+  })
+
+  // The count used to be hidden from md up exactly when the menu replaced
+  // the chips: a long-running show lost its "N episodes" line on a desktop.
+  it('keeps the episode count on screen at every width when the seasons are a menu', () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ season_number: i + 1 }))
+    const row = { id: 1, number: 1, title: 'Pilot', still: '', hasFile: true, state: 'watched' as const }
+    render(<EpisodeList count={1} seasons={many} selectedSeason={7} rows={[row]} onPlay={vi.fn()} onUnavailable={vi.fn()} />)
+    const count = screen.getByText('1 episode · 1 watched')
+    // No class that hides it at any breakpoint.
+    expect(count.className.split(/\s+/).filter(c => /(^|:)hidden$/.test(c))).toEqual([])
+  })
+
+  it('calls season 0 what it is', () => {
+    render(<EpisodeList count={0} seasons={[{ season_number: 0 }, { season_number: 1 }]} selectedSeason={1} rows={[]} onPlay={vi.fn()} onUnavailable={vi.fn()} />)
+    expect(chips().map(c => c.textContent)).toEqual(['Specials', 'Season 1'])
+    expect(within(screen.getByRole('combobox', { name: 'Season' })).getAllByRole('option').map(o => o.textContent)).toEqual(['Specials', 'Season 1'])
   })
 })

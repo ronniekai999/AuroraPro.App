@@ -68,35 +68,35 @@ export function PartyInvite({ code, partyName, onClose, className = '' }: PartyI
 
   if (!valid) {
     return (
-      <div className={`glass-panel rounded-2xl p-5 text-sm text-white/50 ${className}`}>
+      <div className={`rounded-sheet bg-surface-raised-2 p-5 text-[14px] text-ink-2 ${className}`}>
         No active party code to share yet.
       </div>
     )
   }
 
   return (
-    <div className={`glass-panel relative rounded-2xl p-5 ${className}`}>
+    <div className={`relative rounded-sheet bg-surface-raised-2 p-5 shadow-[0_24px_64px_rgba(0,0,0,0.6)] ${className}`}>
       {onClose && (
         <button
           type="button"
           onClick={onClose}
-          className="absolute right-3 top-3 rounded-lg p-1.5 text-white/40 transition-colors hover:bg-white/[0.06] hover:text-white"
+          className="absolute right-2 top-2 grid h-11 w-11 place-items-center rounded-control text-ink-2 transition-colors hover:bg-surface-raised hover:text-ink"
           aria-label="Close invite"
         >
-          <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+          <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
         </button>
       )}
 
-      <p className="font-display text-base font-semibold text-white">Invite to the party</p>
-      <p className="mt-0.5 text-xs text-white/50">
-        {partyName ? `${partyName} · ` : ''}Scan to join on your phone — chat, react, and talk along.
+      <p className="pr-10 font-display text-[17px] font-semibold text-ink">Invite to the party</p>
+      <p className="mt-0.5 pr-10 text-[13px] leading-snug text-ink-2">
+        {partyName ? `${partyName} · ` : ''}Scan to join on a phone, to chat, react and talk along.
       </p>
 
       <div className="mt-4 flex items-center gap-4">
-        {/* QR tile — server-rendered PNG. On a load error (endpoint not
-            present), fall back to a labeled placeholder so the panel
-            still works via the code + link. */}
-        <div className="flex h-[124px] w-[124px] flex-shrink-0 items-center justify-center overflow-hidden rounded-xl border border-[var(--glow-border)] bg-white p-1.5">
+        {/* The QR code, drawn by the server. If it does not load, the code
+            and the link beside it still work. White on purpose: a scanner
+            needs dark on light. */}
+        <div className="flex h-[124px] w-[124px] flex-shrink-0 items-center justify-center overflow-hidden rounded-art bg-white p-1.5">
           {!qrFailed ? (
             <img
               src={qrSrc}
@@ -107,18 +107,18 @@ export function PartyInvite({ code, partyName, onClose, className = '' }: PartyI
               onError={() => setQrFailed(true)}
             />
           ) : (
-            <span className="px-2 text-center text-[10px] leading-tight text-gray-500">
-              QR unavailable — use the code or link
+            <span className="px-2 text-center text-xs leading-tight text-action-on">
+              No QR code. Use the code or the link.
             </span>
           )}
         </div>
 
         <div className="min-w-0 flex-1">
-          <p className="text-[11px] uppercase tracking-[0.14em] text-white/50">Join code</p>
+          <p className="text-xs font-semibold text-ink-2">Join code</p>
           <button
             type="button"
             onClick={() => void copy(normalized, 'code')}
-            className="group mt-1 flex items-center gap-2 font-display text-2xl font-bold tracking-[0.18em] text-white transition-colors hover:text-[color:var(--stage-purple-lt)]"
+            className="mt-0.5 flex min-h-11 items-center gap-2 rounded-chip font-mono text-[24px] font-bold tracking-[0.14em] text-ink"
             title="Copy code"
             aria-label={`Copy join code ${normalized}`}
           >
@@ -126,25 +126,23 @@ export function PartyInvite({ code, partyName, onClose, className = '' }: PartyI
             <CopyGlyph active={copied === 'code'} />
           </button>
 
-          <button
-            type="button"
-            onClick={() => void copy(joinUrl, 'link')}
-            className="mt-3 inline-flex items-center gap-2 rounded-xl border border-purple-500/40 bg-purple-500/[0.12] px-3 py-2 text-sm font-medium text-[color:var(--stage-purple-lt)] transition-colors hover:bg-purple-500/20"
-          >
+          <button type="button" onClick={() => void copy(joinUrl, 'link')} className="stage-btn stage-btn-ghost mt-2 px-4">
             <CopyGlyph active={copied === 'link'} />
             {copied === 'link' ? 'Link copied' : 'Copy invite link'}
           </button>
 
-          <p className="mt-2 truncate text-[11px] text-white/50" title={joinUrl}>{joinUrl}</p>
+          <p className="mt-2 truncate text-xs text-ink-2" title={joinUrl}>{joinUrl}</p>
         </div>
       </div>
+      {/* Said, not only shown by a tick changing colour. */}
+      <p role="status" className="sr-only">{copied === 'code' ? 'Code copied' : copied === 'link' ? 'Link copied' : ''}</p>
     </div>
   )
 }
 
 function CopyGlyph({ active }: { active: boolean }) {
   return active ? (
-    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4 text-emerald-400" aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4 text-ok" aria-hidden="true">
       <path d="M5 13l4 4L19 7" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ) : (

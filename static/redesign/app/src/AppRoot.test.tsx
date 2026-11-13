@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { AppRoot } from './AppRoot'
 
 // The desktop app, standing in for a tab opened before a deploy: its first
@@ -35,8 +35,15 @@ describe('AppRoot', () => {
   // the notice has to be outside the boundary to still be there to answer.
   it('says a newer build is deployed when a deleted chunk takes the app down', async () => {
     render(<AppRoot basename="" />)
-    expect(await screen.findByRole('heading', { name: "Part of Aurora couldn't load" })).toBeInTheDocument()
-    expect(await screen.findByRole('button', { name: 'Reload' })).toBeInTheDocument()
+    const heading = await screen.findByRole('heading', { name: 'That did not load.' })
+    // The notice, by what only it has (the error screen has a Reload of its
+    // own): its message, and its Reload beside its dismiss button.
+    const dismiss = await screen.findByRole('button', { name: 'Dismiss update notice' })
+    const notice = dismiss.parentElement!
+    expect(notice).toHaveTextContent('A new version of Aurora is ready.')
+    expect(within(notice).getByRole('button', { name: 'Reload' })).toBeInTheDocument()
+    // And it is outside what the error screen replaced.
+    expect(heading.closest('[data-error-screen]')!.contains(notice)).toBe(false)
     expect(fetch).toHaveBeenCalled()
   })
 })

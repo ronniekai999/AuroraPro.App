@@ -1,35 +1,39 @@
-// Aurora V2 — CompanionRoom
+// The phone companion once it is in a party: the chat, the reactions and
+// voice, beside a film that plays on another screen.
 //
-// The active "second screen" once joined. Matches
-// the phone companion room:
-//   - LIVE header (party name + code + connection dot)
-//   - Read-only now-playing strip ("in sync with host" + position)
-//   - Horizontal members row with speaking-glow + companion badge
-//   - Chat bubbles (mine right/purple, theirs left; system lines centered)
-//   - 9-emoji reaction quick bar + floating reactions (ReactionOverlay)
-//   - Composer: emoji picker + text input + mic toggle (mute-by-default)
+//   - The party's name, its code, how many are here, and Leave.
+//   - What is playing, and where it was when the phone last heard; its
+//     poster's colour is washed down the top of the screen.
+//   - Who is here; the ring round a person means they are speaking.
+//   - The chat, a line a message.
+//   - The nine reactions, voice, and the message field.
 //
-// Pure presentation over useCompanion state/actions — it owns NO socket.
+// It only shows what the companion's connection holds and calls its actions:
+// it owns no socket.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { ChatMessageEvent, PartyParticipant } from '@/lib/party'
 import type { VoiceState } from '@/lib/voice'
+import { Icon } from '@/components/Icon'
+import { PersonDisc } from '@/components/PersonDisc'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
+import { ambientFor } from '@/lib/ambient'
+import { personColor } from '@/lib/personColor'
+import { QUICK_REACTIONS, drawnReaction } from '@/lib/reactions'
 import type { CompanionState } from '@/hooks/useCompanion'
 import { CompanionPoster } from './JoinScreen'
-import { useReducedMotion } from './companionUi'
-
-// Same 9 emojis as ReactionPicker / the mockup quick bar.
-const QUICK_EMOJI = ['😂', '😱', '🔥', '❤️', '👏', '🤯', '😭', '💀', '🎉']
-// A small palette for the composer's emoji button — a quick insert
-// menu rather than a full picker (kept light for the phone).
-const COMPOSER_EMOJI = ['😀', '😂', '😍', '😱', '🔥', '👀', '💀', '🎉', '👏', '❤️', '😭', '🤯']
 
 export interface CompanionRoomProps {
   state: CompanionState
   voice: VoiceState
   currentUserId: number
-  sendChat: (message: string) => void
+  /** False when the message was not sent: the draft is then kept. */
+  sendChat: (message: string) => boolean | void
+  /** What is typed and not yet sent, when the caller holds it: the room can
+   *  be taken down under it (the connection given up on), and the words
+   *  must be there when the person comes back to the party. */
+  draft?: string
+  onDraftChange?: (text: string) => void
   sendReaction: (emoji: string) => void
   joinVoice: () => Promise<void>
   toggleMute: () => void
@@ -40,27 +44,94 @@ export interface CompanionRoomProps {
 export function CompanionRoom({
   state, voice, currentUserId,
   sendChat, sendReaction, joinVoice, toggleMute, leaveVoice, onLeave,
+  draft: heldDraft, onDraftChange,
 }: CompanionRoomProps) {
-  const reduced = useReducedMotion()
-  const [draft, setDraft] = useState('')
-  const [emojiOpen, setEmojiOpen] = useState(false)
+  const ids = useId()
+  const [ownDraft, setOwnDraft] = useState('')
+  const draft = heldDraft ?? ownDraft
+  const setDraft = onDraftChange ?? setOwnDraft
   const [micBusy, setMicBusy] = useState(false)
+  // Set as voice is asked for, not at the next render: two presses in one
+  // moment must not both ask.
+  const micAsking = useRef(false)
   const [micError, setMicError] = useState<string | null>(null)
   const chatScrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // Auto-scroll chat to the newest message when it grows, but only if
-  // the user is already near the bottom (don't yank them up while
-  // they're reading scrollback).
+  // The colour the poster of what is playing casts on the screen behind it
+  // (lib/ambient: sampled from the picture already drawn, and clamped dark),
+  // kept with the poster it came from: it is shown only while that is still
+  // the poster on screen.
+  const poster = state.mediaPoster
+  const [wash, setWash] = useState<{ poster: string | undefined; color: string | null } | null>(null)
+  const onArt = useCallback((img: HTMLImageElement) => {
+    void ambientFor(img).then(color => {
+      setWash(was => (was && was.poster === poster && was.color === color ? was : { poster, color }))
+    })
+  }, [poster])
+  const ambient = wash && wash.poster === poster ? wash.color : null
+
+  // Follow the newest message, but only for someone already near the end:
+  // a person reading back is not pulled down. A chat that has just filled
+  // (the history that arrives with the connection) opens at its end.
+  //
+  // "Near the end" is kept from the scroller's own scroll events, as it was
+  // BEFORE the new line arrived: measured after, one tall message put the
+  // end further away than the allowance and the chat stopped following. And
+  // the effect runs for a new last message, not a new count: the list is
+  // capped, so after two hundred messages the count no longer changes.
+  const nearEnd = useRef(true)
+  const chatHad = useRef(0)
+  const last = state.chat[state.chat.length - 1]
+  const lastKey = last ? chatKey(last) : ''
   useEffect(() => {
     const el = chatScrollRef.current
     if (!el) return
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120
-    if (nearBottom) el.scrollTop = el.scrollHeight
-  }, [state.chat.length])
+    const filled = chatHad.current === 0
+    chatHad.current = state.chat.length
+    if (filled || nearEnd.current) el.scrollTop = el.scrollHeight
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastKey])
 
-  // Map voice peers by user id for O(1) speaking lookup in the members
-  // row. Self-speaking is tracked separately on voice.selfSpeaking.
+  // When everything left is within reach of the end, the reader is at the
+  // end, whatever the last scroll event said: a history that comes back
+  // shorter than the box (after a reconnect) fires no scroll event, and a
+  // reader left "scrolled back" would never be followed again.
+  useEffect(() => {
+    const el = chatScrollRef.current
+    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 120) nearEnd.current = true
+  }, [state.chat])
+
+  // The chat's own box changes height too (a note appears above the message
+  // field, the voice row opens): someone at the end stays at the end.
+  useEffect(() => {
+    const el = chatScrollRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const watch = new ResizeObserver(() => { if (nearEnd.current) el.scrollTop = el.scrollHeight })
+    watch.observe(el)
+    return () => watch.disconnect()
+  }, [])
+
+  // The chat is a live region, and the history that arrives with the
+  // connection is not news: up to a hundred lines would be read out at once.
+  // It is switched on a frame after the room's state has been drawn, and
+  // off again from a drop until the state has arrived anew. `synced`, not
+  // the connection's status: the socket is "connected" as it opens, before
+  // the server has sent the history.
+  const [chatLive, setChatLive] = useState(false)
+  useEffect(() => {
+    if (!state.synced) { setChatLive(false); return }
+    const frame = requestAnimationFrame(() => setChatLive(true))
+    return () => cancelAnimationFrame(frame)
+  }, [state.synced])
+
+  // Entering the room, the focus goes to its heading: the screen before it
+  // (the code field, the sign-in) is gone, and the focus with it.
+  const headingRef = useRef<HTMLHeadingElement | null>(null)
+  useEffect(() => { headingRef.current?.focus() }, [])
+
+  // The others in voice, by user id, and whether each is speaking. The
+  // viewer's own voice is on voice.enabled and voice.selfSpeaking.
   const speakingByUser = useMemo(() => {
     const m = new Map<number, boolean>()
     for (const p of voice.peers) m.set(p.userId, p.speaking)
@@ -70,14 +141,23 @@ export function CompanionRoom({
   const submit = () => {
     const t = draft.trim()
     if (!t) return
-    sendChat(t)
+    // Not sent (the connection is down): what was typed stays in the field.
+    if (!live || sendChat(t) === false) return
     setDraft('')
     inputRef.current?.focus()
   }
 
   const onMicClick = async () => {
+    if (micAsking.current) return
     setMicError(null)
     if (!voice.enabled) {
+      // No microphone API at all: a page not served over https, or an old
+      // in-app browser. Trying again cannot help, so it is not what is said.
+      if (typeof navigator === 'undefined' || typeof navigator.mediaDevices?.getUserMedia !== 'function') {
+        setMicError('Voice is not available in this browser.')
+        return
+      }
+      micAsking.current = true
       setMicBusy(true)
       try {
         await joinVoice()
@@ -85,333 +165,292 @@ export function CompanionRoom({
         const reason = (err as { reason?: string })?.reason
         setMicError(
           reason === 'denied'
-            ? 'Mic blocked. Allow microphone access in your browser settings.'
+            ? 'The microphone is blocked. Allow it for this site in your browser’s settings.'
             : reason === 'device'
-              ? 'Mic unavailable — check OS mic permissions or close apps using it.'
-              : 'Could not start the mic. Tap to try again.',
+              ? 'The microphone is not available. Check the phone’s microphone permission, or close another app that is using it.'
+              : 'Voice could not be started. Try again.',
         )
       } finally {
+        micAsking.current = false
         setMicBusy(false)
       }
       return
     }
-    // Already in voice → toggle mute on/off.
+    // In voice already: this is the mute switch.
     toggleMute()
   }
 
+  // Voice that ended without the person leaving it (it goes with the room's
+  // connection) is said: the button has gone back to "Join voice" by itself.
+  const leftVoice = useRef(false)
+  const wasInVoice = useRef(voice.enabled)
+  useEffect(() => {
+    if (wasInVoice.current && !voice.enabled && !leftVoice.current) {
+      setMicError('Voice ended when the connection dropped. Join voice again once you are reconnected.')
+    }
+    wasInVoice.current = voice.enabled
+    leftVoice.current = false
+  }, [voice.enabled])
+  const leave = () => { leftVoice.current = true; leaveVoice() }
+
   const live = state.connected && !state.reconnecting
-  // joining = first connect in flight (no party-state yet). Treat it
-  // like reconnecting for the dot/badge so the header never flashes a
-  // misleading "OFFLINE" while we're actively connecting.
+  // The connection has come back: said for a few seconds, since the note
+  // about being disconnected otherwise just goes.
+  const [backAgain, setBackAgain] = useState(false)
+  // The room is on screen from the moment a join is asked for, before the
+  // socket has opened: it starts out not live, and its first connection is
+  // not a return. Only a connection that follows one counts.
+  const hasBeenLive = useRef(false)
+  useEffect(() => {
+    if (!live) { setBackAgain(false); return }
+    const returned = hasBeenLive.current
+    hasBeenLive.current = true
+    if (!returned) return
+    setBackAgain(true)
+    const t = window.setTimeout(() => setBackAgain(false), 6000)
+    return () => window.clearTimeout(t)
+  }, [live])
+  // The first connection still on its way counts as connecting, so the
+  // header never says "offline" while the phone is in fact getting there.
   const pending = state.reconnecting || (state.status === 'joining' && !state.connected)
-  const connDotClass = pending
-    ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.6)]'
-    : state.connected
-      ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]'
-      : 'bg-red-400 shadow-[0_0_8px_rgba(239,68,68,0.6)]'
+  const here = state.participants.length
+  const inVoice = voice.enabled
+  const liveMic = inVoice && !voice.muted
+  // What the server refused while connected (too many messages, say). An
+  // error that ends the party is the join screen's to show.
+  const refused = state.connected && state.error ? state.error : null
 
   return (
-    <div className="relative flex flex-1 flex-col min-h-0">
-      {/* ── Header ──────────────────────────────────────────────────── */}
-      <header className="flex items-center gap-2.5 border-b border-[rgba(220,200,255,0.08)] px-4 pb-3 pt-2">
-        {live ? (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-red-500/40 bg-red-500/[0.18] px-2 py-[3px] text-[11px] font-bold tracking-[0.1em] text-white">
-            <span className={`h-1.5 w-1.5 rounded-full bg-red-400 shadow-[0_0_8px_#ef4444] ${reduced ? '' : 'animate-pulse'}`} />
-            LIVE
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/[0.14] px-2 py-[3px] text-[11px] font-bold tracking-[0.1em] text-amber-200">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-            {pending ? (state.status === 'joining' ? 'CONNECTING' : 'RECONNECTING') : 'OFFLINE'}
-          </span>
-        )}
+    <div
+      className="relative flex min-h-0 flex-1 flex-col"
+      style={{ '--ambient': ambient ?? 'transparent' } as CSSProperties}
+    >
+      {/* Behind everything else on the screen: the header and the page
+          below are positioned, and come after it. */}
+      <div className="companion-wash" aria-hidden="true" />
+      <header className="relative flex flex-none items-center gap-2 pl-4 pr-2 pt-3">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-white">
-            {state.partyName || state.mediaTitle || 'Watch Party'}
+          <h1 ref={headingRef} tabIndex={-1} className="truncate rounded-chip font-display text-[26px] font-bold leading-[1.15] tracking-[-0.015em] text-ink">
+            <bdi>{state.partyName || state.mediaTitle || 'Watch party'}</bdi>
+          </h1>
+          <p className="text-[13px] leading-snug text-ink-2">
+            {state.code && <>Code <span className="tracking-[0.04em]">{state.code}</span></>}
+            {state.code && here > 0 && ' · '}
+            {here > 0 && `${here} here`}
           </p>
-          {state.code && (
-            <p className="font-display text-[11px] tracking-[0.08em] text-white/50">
-              CODE · {state.code}
-            </p>
-          )}
+          {/* The connection, in words, whenever it is not simply up. */}
+          <p role="status" className={live ? (backAgain ? 'text-[13px] leading-snug text-ink-2' : 'sr-only') : `text-[13px] leading-snug ${pending ? 'text-warn' : 'text-danger-ink'}`}>
+            {live
+              ? (backAgain ? (draft.trim() ? 'Connected again. Your message is still in the field.' : 'Connected again.') : '')
+              : pending ? (state.status === 'joining' ? 'Connecting…' : 'Reconnecting…') : 'Offline'}
+          </p>
         </div>
-        <span className={`h-2 w-2 flex-shrink-0 rounded-full ${connDotClass}`} title={live ? 'Connected' : pending ? 'Connecting…' : 'Disconnected'} />
-        <button
-          type="button"
-          onClick={onLeave}
-          className="ml-1 flex-shrink-0 rounded-lg px-2 py-1.5 text-xs text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white"
-          aria-label="Leave the party"
-        >
+        <button type="button" onClick={onLeave} className="stage-btn stage-btn-danger flex-none" aria-label="Leave the party">
           Leave
         </button>
       </header>
 
-      {/* Transient server-error banner — surfaces 'error' frames that
-          arrive while connected (e.g. chat rate-limited, invalid action)
-          so they aren't silently swallowed. Fatal end-of-party errors are
-          handled by CompanionApp's status switch, not here. */}
-      {state.connected && state.error && (
+      <main className="relative flex min-h-0 flex-1 flex-col">
+        {(state.mediaTitle || state.mediaPoster) && (
+          <section aria-label="Now playing" className="companion-tall-only mx-4 mt-3 flex-none items-center gap-3 rounded-control bg-surface-raised p-3">
+            <CompanionPoster poster={state.mediaPoster} className="h-[60px] w-10 rounded-chip" onArt={onArt} />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[15px] font-semibold text-ink"><bdi>{state.mediaTitle || 'Now playing'}</bdi></p>
+              {/* The room's connection is told the position when the phone
+                  connects and when the title or the host changes, not as
+                  the film runs: so this is where it was, not a clock. */}
+              <p className="mt-1 text-xs tabular-nums text-ink-2">
+                {formatClock(state.currentTimeMs)} · {state.isPlaying ? 'playing' : 'paused'} at the last update
+              </p>
+            </div>
+          </section>
+        )}
+
+        {here > 0 && (
+          <ul aria-label="Participants" className="companion-tall-only scrollbar-hide mt-3 flex-none gap-3 overflow-x-auto px-4">
+            {state.participants.map(p => {
+              const self = p.user_id === currentUserId
+              return (
+                <Member
+                  key={p.user_id}
+                  participant={p}
+                  isSelf={self}
+                  // Who else is in voice is only known to a phone that is in
+                  // voice itself: out of it, nothing is said of the others'.
+                  inVoice={self ? inVoice : inVoice && speakingByUser.has(p.user_id)}
+                  speaking={self ? voice.selfSpeaking : !!speakingByUser.get(p.user_id)}
+                />
+              )
+            })}
+          </ul>
+        )}
+
         <div
-          role="alert"
-          className="mx-3.5 mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+          ref={chatScrollRef}
+          role="log"
+          aria-label="Chat"
+          aria-live={chatLive ? 'polite' : 'off'}
+          onScroll={e => {
+            const el = e.currentTarget
+            nearEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+          }}
+          className="mt-2 flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-4 py-3"
+          // Kept out of a bug report's screenshot, as the reactions are.
+          data-screenshot-exclude="true"
         >
-          {state.error}
-        </div>
-      )}
-
-      {/* ── Now-playing strip (READ-ONLY) ──────────────────────────── */}
-      {(state.mediaTitle || state.mediaPoster) && (
-        <div className="glass-panel mx-3.5 mt-3 flex items-center gap-3 rounded-2xl px-3 py-2.5">
-          <CompanionPoster poster={state.mediaPoster} className="h-[50px] w-[34px] rounded-md" />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[13px] font-semibold text-white">{state.mediaTitle || 'Now playing'}</p>
-            <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[color:var(--stage-purple-lt)]">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-              {state.isPlaying ? 'In sync with host' : 'Paused by host'}
+          {/* Pushes a short chat to the foot of its space, above the reactions. */}
+          <div className="flex-1" aria-hidden="true" />
+          {state.chat.length === 0 && (
+            <p className="text-[14px] leading-snug text-ink-2">
+              Nothing said yet. What you send appears here and on everyone’s screen.
             </p>
-          </div>
-          <span className="font-display text-[13px] tabular-nums text-white/55">{formatClock(state.currentTimeMs)}</span>
-        </div>
-      )}
-
-      {/* ── Members row ─────────────────────────────────────────────── */}
-      {state.participants.length > 0 && (
-        <div className="flex gap-1.5 overflow-x-auto px-3.5 pb-2.5 pt-3 scrollbar-hide" aria-label="Participants">
-          {state.participants.map(p => (
-            <MemberChip
-              key={p.user_id}
-              participant={p}
-              isSelf={p.user_id === currentUserId}
-              speaking={p.user_id === currentUserId ? voice.selfSpeaking : !!speakingByUser.get(p.user_id)}
-            />
+          )}
+          {state.chat.map(m => (
+            <ChatLine key={chatKey(m)} msg={m} mine={m.user_id === currentUserId} />
           ))}
         </div>
-      )}
 
-      {/* ── Chat ────────────────────────────────────────────────────── */}
-      <div
-        ref={chatScrollRef}
-        className="flex flex-1 flex-col gap-2.5 overflow-y-auto px-3.5 py-1.5"
-        // Keep transient chat out of bug-report screenshots, matching
-        // the ReactionOverlay precedent.
-        data-screenshot-exclude="true"
-      >
-        {state.chat.length === 0 && (
-          <p className="py-6 text-center text-xs text-white/50">
-            Say hi 👋 — messages you send appear here and on everyone's screen.
-          </p>
-        )}
-        {state.chat.map(m => (
-          <ChatBubble key={chatKey(m)} msg={m} mine={m.user_id === currentUserId} />
-        ))}
-      </div>
+        {/* The one place this screen reports a refusal: the server's, and
+            the microphone's. */}
+        {/* Not atomic: when one of the two changes, only that one is read
+            out again. */}
+        <p role="alert" aria-atomic="false" className={refused || micError ? 'flex-none px-4 pb-2 text-[13px] leading-snug text-danger-ink' : 'sr-only'}>
+          {refused && <span>{refused}</span>}{refused && micError ? ' ' : ''}{micError && <span id={`${ids}-mic`}>{micError}</span>}
+        </p>
 
-      {/* ── Reaction quick bar ─────────────────────────────────────── */}
-      <div className="flex gap-1 overflow-x-auto px-3 pb-1.5 pt-2 scrollbar-hide" aria-label="Quick reactions">
-        {QUICK_EMOJI.map(e => (
-          <button
-            key={e}
-            type="button"
-            onClick={() => sendReaction(e)}
-            className="h-9 w-9 flex-shrink-0 rounded-xl bg-white/[0.04] text-lg transition-colors hover:bg-purple-500/[0.18] active:bg-purple-500/30"
-            aria-label={`React with ${e}`}
-          >
-            {e}
-          </button>
-        ))}
-      </div>
-
-      {/* ── Composer ───────────────────────────────────────────────── */}
-      {micError && (
-        <p className="px-4 pb-1 text-[11px] text-amber-300">{micError}</p>
-      )}
-      <div className="relative flex items-center gap-2 border-t border-[rgba(220,200,255,0.08)] px-3 pb-[calc(env(safe-area-inset-bottom)+0.875rem)] pt-2">
-        {/* Emoji insert popover */}
-        {emojiOpen && (
-          <div
-            className="absolute bottom-full left-3 mb-2 grid grid-cols-6 gap-1 rounded-2xl border border-white/[0.08] bg-[#15131c] p-2 shadow-xl"
-            role="menu"
-          >
-            {COMPOSER_EMOJI.map(e => (
+        <div className="flex flex-none items-center gap-2 px-4">
+          <div role="group" aria-label="Quick reactions" className="scrollbar-hide -my-1 flex min-w-0 flex-1 gap-2 overflow-x-auto py-1">
+            {/* lib/reactions' nine: each is one the server accepts, as it is
+                sent; what is drawn can differ (the heart). */}
+            {QUICK_REACTIONS.map(e => (
               <button
                 key={e}
                 type="button"
-                onClick={() => { setDraft(d => d + e); setEmojiOpen(false); inputRef.current?.focus() }}
-                className="rounded-lg px-2 py-1 text-xl transition-colors hover:bg-white/[0.08]"
-                aria-label={`Insert ${e}`}
+                onClick={() => sendReaction(e)}
+                className="grid h-12 w-12 flex-none place-items-center rounded-control bg-surface-raised text-[22px] transition-colors hover:bg-surface-raised-2"
+                aria-label={`React with ${drawnReaction(e)}`}
               >
-                {e}
+                {drawnReaction(e)}
               </button>
             ))}
           </div>
-        )}
-        <button
-          type="button"
-          onClick={() => setEmojiOpen(o => !o)}
-          className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-white/[0.05] text-lg transition-colors hover:bg-white/[0.08]"
-          aria-label="Insert emoji"
-          aria-expanded={emojiOpen}
-        >
-          😀
-        </button>
-        <input
-          ref={inputRef}
-          value={draft}
-          onChange={e => setDraft(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); submit() } }}
-          placeholder="Message the party…"
-          maxLength={1000}
-          enterKeyHint="send"
-          aria-label="Message the party"
-          className="min-w-0 flex-1 rounded-xl border border-[rgba(220,200,255,0.10)] bg-white/[0.05] px-3.5 py-2.5 text-sm text-white placeholder:text-white/50 focus:border-purple-500/40 focus:outline-none"
-        />
-        {draft.trim() ? (
+          {/* Voice. Joining starts with the microphone muted; the same
+              button is then the mute switch, and its words say which. A
+              long press (the context menu) leaves voice, as "Leave voice"
+              below does in sight. */}
           <button
             type="button"
-            onClick={submit}
-            className="flex h-[2.875rem] w-[2.875rem] flex-shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-purple-500 to-purple-800 text-white shadow-[0_0_18px_rgba(168,85,247,0.4)]"
-            aria-label="Send message"
-          >
-            <svg viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5"><path d="M3.4 20.4 21 12 3.4 3.6 3 10l12 2-12 2z" /></svg>
-          </button>
-        ) : (
-          <MicButton
-            voice={voice}
-            busy={micBusy}
-            reduced={reduced}
             onClick={() => void onMicClick()}
-            onLongOff={leaveVoice}
-          />
+            onContextMenu={e => { if (inVoice) { e.preventDefault(); leave() } }}
+            aria-disabled={micBusy}
+            aria-describedby={micError ? `${ids}-mic` : undefined}
+            className={`stage-btn stage-btn-thumb stage-btn-pill flex-none ${inVoice ? `stage-btn-ghost ${liveMic ? 'is-on' : ''}` : 'stage-btn-primary'}`}
+          >
+            {inVoice && <Icon name="mic" size={18} />}
+            {micBusy ? 'Starting…' : !inVoice ? 'Join voice' : liveMic ? 'Mute' : 'Unmute'}
+          </button>
+        </div>
+        {inVoice && (
+          <p className="flex flex-none items-center justify-between gap-3 px-4 pt-2 text-[13px] leading-snug text-ink-2">
+            <span>{liveMic ? 'Your microphone is on.' : 'You are in voice, muted.'}</span>
+            <button type="button" onClick={leave} className="stage-btn stage-btn-sm stage-hit44 stage-btn-quiet -mr-3 flex-none">Leave voice</button>
+          </p>
         )}
-      </div>
 
-      {/* Floating reactions — reuse the shared overlay. It's fixed
-          inset-0; inside the companion's full-viewport tree it rises
-          from the bottom like the mockup, and honors prefers-reduced-
-          motion via its own animation. */}
+        {/* Why Send is off while the connection is down, tied to the field
+            and the button. What is typed is kept, not sent into nothing. */}
+        {!live && (
+          <p id={`${ids}-held`} className="flex-none px-4 pt-2 text-[13px] leading-snug text-ink-2">
+            Not connected. What you type is kept here until the connection is back.
+          </p>
+        )}
+        <form
+          className="flex flex-none gap-2 px-4 pb-[calc(env(safe-area-inset-bottom)+1.75rem)] pt-3"
+          onSubmit={e => { e.preventDefault(); submit() }}
+        >
+          <label htmlFor={`${ids}-msg`} className="sr-only">Message the party</label>
+          <input
+            id={`${ids}-msg`}
+            ref={inputRef}
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            placeholder="Message the party"
+            maxLength={1000}
+            enterKeyHint="send"
+            autoComplete="off"
+            aria-describedby={live ? undefined : `${ids}-held`}
+            className="companion-field h-12 min-w-0 flex-1"
+          />
+          {/* Off, not disabled, while there is nothing to send or nowhere to
+              send it: it keeps its place in the tab order and the focus a
+              press gave it. */}
+          <button
+            type="submit"
+            aria-disabled={!draft.trim() || !live}
+            aria-describedby={live ? undefined : `${ids}-held`}
+            aria-label="Send message"
+            className="stage-btn stage-btn-thumb stage-btn-square stage-btn-ghost flex-none"
+          >
+            <Icon name="send" size={18} />
+          </button>
+        </form>
+      </main>
+
+      {/* The reactions that float up the screen: the app's own overlay,
+          which covers the window. Under reduced motion the stylesheet
+          stills them. */}
       <ReactionOverlay events={state.recentReactions} />
     </div>
   )
 }
 
-// ── Mic toggle button. Mute-by-default: first tap opts into voice
-// (mic still MUTED until a second tap unmutes). Emerald "live" ring
-// pulses while unmuted + speaking-capable.
-function MicButton({
-  voice, busy, reduced, onClick, onLongOff,
-}: {
-  voice: VoiceState
-  busy: boolean
-  reduced: boolean
-  onClick: () => void
-  onLongOff: () => void
-}) {
-  // In voice + unmuted = "live" (emerald, pulsing). In voice + muted =
-  // amber-ish idle. Not in voice = neutral.
-  const inVoice = voice.enabled
-  const liveMic = inVoice && !voice.muted
-  const base = 'relative flex h-[2.875rem] w-[2.875rem] flex-shrink-0 items-center justify-center rounded-2xl border transition-colors'
-  const tone = liveMic
-    ? 'border-emerald-400/50 bg-emerald-500/[0.16] text-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,0.10)]'
-    : inVoice
-      ? 'border-white/15 bg-white/[0.06] text-white/70'
-      : 'border-white/10 bg-white/[0.05] text-white/60'
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      // Long-press to fully leave voice (release the mic + mesh). A11y:
-      // also reachable via the leave-party path; this is a power move.
-      onContextMenu={e => { if (inVoice) { e.preventDefault(); onLongOff() } }}
-      disabled={busy}
-      className={`${base} ${tone} disabled:opacity-60`}
-      aria-pressed={liveMic}
-      aria-label={
-        busy ? 'Starting microphone' :
-        !inVoice ? 'Turn on microphone (joins muted)' :
-        liveMic ? 'Mute microphone' : 'Unmute microphone'
-      }
-      title={!inVoice ? 'Tap to join voice (starts muted)' : liveMic ? 'Live — tap to mute' : 'Muted — tap to talk'}
-    >
-      {liveMic && !reduced && (
-        <span className="pointer-events-none absolute -inset-[5px] rounded-[18px] border-[1.5px] border-emerald-400/50 motion-safe:[animation:companion-mic-ring_1.6s_ease-out_infinite]" />
-      )}
-      {busy ? (
-        <svg viewBox="0 0 24 24" fill="none" className={`h-5 w-5 ${reduced ? '' : 'animate-spin'}`} aria-hidden="true">
-          <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" opacity="0.25" />
-          <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
-        </svg>
-      ) : inVoice && voice.muted ? (
-        // Muted glyph — mic with a slash.
-        <svg viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5" aria-hidden="true">
-          <path d="M19 11a1 1 0 0 0-2 0c0 .57-.1 1.12-.27 1.62l1.5 1.5A7 7 0 0 0 19 11zM15 5a3 3 0 0 0-6 0v.18l6 6V5zM3.3 2.3 2 3.6l6.99 7v.4a3 3 0 0 0 4.31 2.7l1.45 1.45A5 5 0 0 1 7 11a1 1 0 0 0-2 0 7 7 0 0 0 6 6.9V21a1 1 0 0 0 2 0v-3.1c.74-.1 1.43-.33 2.06-.66l3.34 3.35 1.3-1.3z" />
-        </svg>
-      ) : (
-        <svg viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5" aria-hidden="true">
-          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zm7 10a1 1 0 0 0-2 0 5 5 0 0 1-10 0 1 1 0 0 0-2 0 7 7 0 0 0 6 6.9V21a1 1 0 0 0 2 0v-2.1A7 7 0 0 0 19 12z" />
-        </svg>
-      )}
-      {/* Component-scoped keyframes for the live ring (no global CSS edit). */}
-      <style>{`@keyframes companion-mic-ring{0%{transform:scale(.9);opacity:.8}100%{transform:scale(1.25);opacity:0}}`}</style>
-    </button>
-  )
-}
-
-function MemberChip({ participant, isSelf, speaking }: {
+/** One person in the party: their disc (ringed while they speak), their
+ *  name, and what is known of how they are here. */
+function Member({ participant, isSelf, inVoice, speaking }: {
   participant: PartyParticipant
   isSelf: boolean
+  inVoice: boolean
   speaking: boolean
 }) {
+  const parts = [
+    participant.is_host ? 'host' : null,
+    speaking ? 'talking' : inVoice ? 'in voice' : null,
+    participant.companion ? 'on phone' : null,
+  ].filter((x): x is string => x !== null)
+  // With nothing more known of them, a person is here: whether they are
+  // watching, and for others whether they are in voice, is not something
+  // this phone is told.
+  const note = parts.length ? parts.join(', ') : 'here'
   return (
-    <span
-      className={[
-        'inline-flex flex-shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-[5px] text-[11px] whitespace-nowrap',
-        speaking
-          ? 'border-emerald-400/50 bg-emerald-500/[0.14] text-white shadow-[0_0_12px_rgba(52,211,153,0.35)]'
-          : 'border-[rgba(220,200,255,0.10)] bg-white/[0.04] text-white/80',
-      ].join(' ')}
-    >
-      <span className={`h-[7px] w-[7px] rounded-full ${speaking ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]' : 'bg-white/35'}`} />
-      {isSelf ? 'You' : participant.username}
-      {participant.is_host && <span className="text-[color:var(--stage-purple-lt)]" title="Host" aria-label="Host">★</span>}
-      {participant.companion && <span title="On phone" aria-label="On phone">📱</span>}
-      {speaking && (
-        <svg viewBox="0 0 24 24" fill="currentColor" className="h-2.5 w-2.5 text-emerald-400" aria-hidden="true">
-          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zm7 10a1 1 0 0 0-2 0 5 5 0 0 1-10 0 1 1 0 0 0-2 0 7 7 0 0 0 6 6.9V21a1 1 0 0 0 2 0v-2.1A7 7 0 0 0 19 12z" />
-        </svg>
-      )}
-    </span>
+    <li className="flex w-16 flex-none flex-col items-center gap-1 text-center">
+      {/* No surface of its own: the people sit on the wash, and a ring in
+          the page's colour showed against it. */}
+      <PersonDisc name={participant.username} colorKey={participant.user_id} size={48} speaking={speaking} surface="transparent" />
+      <span className="w-full truncate text-xs font-semibold text-ink">{isSelf ? 'You' : <bdi>{participant.username}</bdi>}</span>
+      <span className="text-xs leading-tight text-ink-2">{note.charAt(0).toUpperCase() + note.slice(1)}</span>
+    </li>
   )
 }
 
-function ChatBubble({ msg, mine }: { msg: ChatMessageEvent; mine: boolean }) {
+/** A message: who said it, in their colour, then what. */
+function ChatLine({ msg, mine }: { msg: ChatMessageEvent; mine: boolean }) {
   return (
-    <div className={`flex max-w-[82%] flex-col ${mine ? 'self-end items-end' : 'items-start'}`}>
-      <span className={`mb-0.5 text-[10px] ${mine ? 'text-[color:var(--stage-purple-lt)]' : 'text-white/50'}`}>
-        {mine ? 'You' : msg.username}
-      </span>
-      <div
-        className={[
-          'px-3 py-2 text-sm leading-snug break-words',
-          mine
-            ? 'rounded-2xl rounded-br-[5px] border border-purple-500/25 bg-purple-500/[0.28] text-white'
-            : 'rounded-2xl rounded-bl-[5px] bg-white/[0.05] text-white/90',
-        ].join(' ')}
-      >
-        {msg.message}
-      </div>
-    </div>
+    <p className="text-[15px] leading-[1.4] [overflow-wrap:anywhere]">
+      {/* Each isolated: a name or a message in a right-to-left script must
+          not reorder what is beside it. */}
+      <span className="font-semibold" style={{ color: personColor(msg.user_id) }}>{mine ? 'You' : <bdi>{msg.username}</bdi>}</span>{' '}
+      <bdi className="text-ink">{msg.message}</bdi>
+    </p>
   )
 }
 
-// Stable-ish key for a chat row. Server messages carry an id; fall back
-// to a composite if a malformed row lacks one.
+// A key for a chat line: the server's id, or what stands in for one when a
+// malformed row has none.
 function chatKey(m: ChatMessageEvent): string {
   return m.id || `${m.user_id}|${m.timestamp}|${m.message.slice(0, 16)}`
 }
 
-// Format ms → H:MM:SS / M:SS for the read-only position indicator.
+// Where playback has got to, as H:MM:SS or M:SS.
 function formatClock(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000))
   const h = Math.floor(total / 3600)

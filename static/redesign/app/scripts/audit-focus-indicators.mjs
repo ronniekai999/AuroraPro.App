@@ -53,13 +53,7 @@ const CSS = 'src/index.css'
 const REAL_INDICATOR = /focus(-visible)?:(ring(-|\b)|shadow-|outline-(?!none))/
 const INPUT_FAMILY = new Set(['input', 'textarea', 'select'])
 
-const ALLOWED = new Map([
-  ['src/companion/JoinScreen.tsx:176',
-    'Invisible (opacity-0) overlay input for OTP-style entry. NOTE: the box ' +
-    'treatment it delegates to is gated on `isCursor && !filled`, so once all ' +
-    'six characters are entered NOTHING indicates focus — tracked as a real ' +
-    'defect, fixed separately; this entry documents the delegation, not that it works.'],
-])
+const ALLOWED = new Map([])
 
 let problems = 0
 
@@ -220,8 +214,9 @@ if (!problems) console.log('  no unguarded suppressions.')
  *  From then on Check 3 printed "no containers reset the global treatment —
  *  nothing to check" while Check 4, three lines further down the same output,
  *  listed two of them: the check existed, ran, and verified nothing. Deleting
- *  `.convo-search:focus-within` — the vibe bar's only focus indicator — left
- *  the gate green. Same family as Check 4's own selector scan below, so the two
+ *  `.convo-search:focus-within` — the only focus indicator of the vibe bar
+ *  that sat on Home at the time (since folded into search) — left the gate
+ *  green. Same family as Check 4's own selector scan below, so the two
  *  checks can no longer disagree about which containers exist. */
 function resettersIn(text) {
   return [...new Set(
@@ -245,18 +240,36 @@ if (!m) {
   problems++
 } else {
   const body = m[1]
-  const bc = body.match(/border-color:\s*(rgba?\([^)]*\))/)
-  const bg = body.match(/background:\s*(rgba?\([^)]*\))/)
+  // A colour here is rgb()/rgba(), a #rrggbb, or var(--token) naming exactly
+  // one #rrggbb custom property in index.css. Anything else is refused: the
+  // ratio below must be computed from what the rule really paints.
+  const COLOUR = String.raw`(rgba?\([^)]*\)|#[0-9a-fA-F]{6}\b|var\(--[\w-]+\))`
+  const token = name => {
+    const all = [...css.matchAll(new RegExp(String.raw`\n\s*${name}\s*:\s*([^;]+);`, 'g'))]
+    if (all.length !== 1 || !/^#[0-9a-fA-F]{6}$/.test(all[0][1].trim()))
+      throw new Error(`audit: ${name} is not exactly one #rrggbb custom property in ${CSS} — the audit is out of date, not passing`)
+    return all[0][1].trim()
+  }
+  const bc = body.match(new RegExp(String.raw`border-color:\s*${COLOUR}`))
+  const bg = body.match(new RegExp(String.raw`background:\s*${COLOUR}`))
   if (!bc || !bg) { console.log('  *** rule no longer sets border-color + background'); problems++ }
   else {
     const lin = c => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
     const Y = ([r, g, b]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
     const over = (f, a, b) => f.map((c, i) => a * c + (1 - a) * b[i])
     const ratio = (a, b) => { const [l1, l2] = [Y(a), Y(b)].sort((x, y) => y - x); return (l1 + 0.05) / (l2 + 0.05) }
-    const parse = str => { const n = str.match(/[\d.]+/g).map(Number); return { rgb: n.slice(0, 3).map(v => v / 255), a: n[3] ?? 1 } }
-    const B = parse(bc[1]), G = parse(bg[1])
     const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255)
-    for (const [name, panel] of [['#0a0a0f', hex('#0a0a0f')], ['#050505', hex('#050505')], ['#141420', hex('#141420')]]) {
+    const parse = str => {
+      const v = str.match(/^var\((--[\w-]+)\)$/)
+      if (v) return { rgb: hex(token(v[1])), a: 1 }
+      if (str.startsWith('#')) return { rgb: hex(str), a: 1 }
+      const n = str.match(/[\d.]+/g).map(Number)
+      return { rgb: n.slice(0, 3).map(v => v / 255), a: n[3] ?? 1 }
+    }
+    const B = parse(bc[1]), G = parse(bg[1])
+    // Every surface step a field can sit on, read from the tokens rather than
+    // repeated here, so a retuned surface is measured as retuned.
+    for (const [name, panel] of ['--surface-page', '--surface-raised', '--surface-raised-2'].map(t => [`${t} ${token(t)}`, hex(token(t))])) {
       const fill = over(G.rgb, G.a, panel)
       const border = over(B.rgb, B.a, fill)
       const r = ratio(border, fill)
@@ -283,8 +296,9 @@ if (!m) {
 // global treatment, stated in so many words that they "must supply their own
 // :focus-within indicator", and then never looked. The block only console.log'd —
 // it never touched `problems`. So deleting `.convo-search:focus-within` outright,
-// which is the vibe search bar's ONLY focus indicator once the global rule is
-// nulled at (0,3,1), left the gate at exit 0 with the words "must supply their own
+// which was the vibe search bar's ONLY focus indicator once the global rule was
+// nulled at (0,3,1) (that bar has since been folded into search, and so has the
+// palette; the top bar's field is the container today), left the gate at exit 0 with the words "must supply their own
 // :focus-within indicator" still printed in its own passing output.
 //
 // That is precisely the defect class this file's header says it exists to catch,

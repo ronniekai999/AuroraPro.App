@@ -1,19 +1,17 @@
-// Aurora V2 — MiniDock
+// The party's mini dock: the "minimal" face's one input surface, at the
+// bottom centre over the picture. It holds the three things reached for
+// without the full rail: a reaction, a one-line quick reply, and the
+// microphone's mute.
 //
-// The compact pill dock for the cinematic ("minimal") overlay mode.
-// Bottom-center, it holds the three things you reach for without the
-// full rail: an emoji reaction, a one-line quick reply, and a mic
-// mute toggle. Keep this aligned with the cinematic overlay controls.
-// `.mini-dock`.
+// It reuses the ReactionPicker (opening UPWARD, since the dock sits at the
+// bottom of the screen) and sends chat through the same onSendChat the rail
+// composer uses: no chat or reaction logic of its own.
 //
-// It reuses the existing ReactionPicker verbatim (opening UPWARD, since
-// the dock sits at the bottom of the screen) and sends chat through the
-// same onSendChat the rail composer uses — no new chat/reaction logic.
-//
-// The dock is interactive, so it opts INTO pointer events (the ticker /
-// reactions above it are pointer-events:none so clicks fall through to
-// the player; the dock must not). It's the user's own input surface, so
-// — like the rail composer — it is NOT screenshot-excluded.
+// It is an opaque raised card, not glass: it sits on moving video, and
+// text on a see-through fill over a bright frame fails contrast. The dock
+// is interactive, so it takes pointer events (the ticker and reactions
+// above it let presses through to the player). It is the person's own
+// input surface, so, like the rail composer, it is NOT screenshot-excluded.
 
 import { useState } from 'react'
 import type { VoiceState } from '@/lib/voice'
@@ -44,21 +42,24 @@ export function MiniDock({ onSendChat, onSendReaction, voice, onToggleVoiceMute 
   const micActionable = showMic && !!voice?.enabled
 
   return (
-    // The 0.5 fill sits on the video, so faint text here fails AA over a
-    // bright frame: see NOT COVERED in scripts/audit-glass-contrast.mjs.
     <div
-      className="aurora-glass-overlay fixed left-1/2 -translate-x-1/2 bottom-4 z-[67]
-                 inline-flex items-center gap-2 pl-2.5 pr-2.5 py-1.5 rounded-full
-                 bg-[rgba(8,6,14,0.5)] backdrop-blur-lg border border-[rgba(220,200,255,0.18)]
-                 shadow-[0_8px_30px_rgba(0,0,0,0.45)]"
+      // .stage-party-minidock: index.css lifts the dock above the player's
+      // control band while the player is in the window. Its width is fixed:
+      // the field gives Send its room when Send appears, and the dock does
+      // not grow.
+      className="stage-party-minidock fixed left-1/2 -translate-x-1/2 bottom-[calc(1rem+var(--tabbar-space,0px))] z-[67]
+                 flex w-[min(360px,calc(100vw-2rem))] items-center gap-2 p-2 rounded-control
+                 bg-surface-raised-2 shadow-[0_24px_64px_rgba(0,0,0,0.6)]"
     >
-      {/* Emoji — reuse the shared 9-emoji picker. Opens upward so the
-          popover doesn't render below the screen edge. */}
+      {/* Emoji: the shared picker, opening upward so the popover does not
+          run off the bottom of the screen. */}
       {onSendReaction && (
-        <ReactionPicker onSend={onSendReaction} placement="left" vertical="up" />
+        <ReactionPicker onSend={onSendReaction} placement="left" vertical="up" variant="dock" />
       )}
 
-      {/* Quick reply. Enter sends; stays inline so the dock stays a pill. */}
+      {/* Quick reply. Enter sends. Its look is index.css's
+          `input.stage-minidock-field` (the global field rule outranks
+          utilities on an input). */}
       <input
         type="text"
         value={draft}
@@ -69,42 +70,41 @@ export function MiniDock({ onSendChat, onSendReaction, voice, onToggleVoiceMute 
             send()
           }
         }}
-        placeholder="Quick reply…"
+        placeholder="Reply to the party"
         maxLength={500}
         aria-label="Send a quick chat message"
-        className="w-44 sm:w-56 bg-transparent px-2 py-1 text-sm text-white
-                   placeholder:text-white/50 focus:outline-none border-0"
+        className="stage-minidock-field min-w-0 flex-1"
       />
 
-      {/* Send — appears only when there's text, keeping the resting
-          dock minimal. */}
+      {/* Send: appears only when there is text, so a resting dock is one
+          stop shorter for the keys. */}
       {draft.trim() && (
         <button
           type="button"
           onClick={send}
           aria-label="Send message"
-          className="flex items-center justify-center w-8 h-8 rounded-full
-                     bg-gradient-to-br from-[#A855F7] to-[#7e22ce] text-white
-                     hover:brightness-110 transition-[filter]"
+          className="stage-hit44 flex-none grid place-items-center w-10 h-10 rounded-control bg-action-soft text-ink
+                     hover:bg-[var(--action-soft-hover)] transition-colors"
         >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M3.4 20.4l17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a1 1 0 0 0-1.4.92V9.5a1 1 0 0 0 .82.98L13 12 2.82 13.52A1 1 0 0 0 2 14.5v4.98a1 1 0 0 0 1.4.92z" />
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M5 12h13M13 6l6 6-6 6" />
           </svg>
         </button>
       )}
 
-      {/* Mic mute toggle. Compact mirror of the rail's mute button. */}
+      {/* Mic mute toggle. Compact mirror of the rail's mute button: the
+          glyph says muted or live, and live is also drawn in the colour
+          for "on". */}
       {showMic && (
         <button
           type="button"
           onClick={onToggleVoiceMute}
           disabled={!micActionable}
           className={[
-            'flex items-center justify-center w-8 h-8 rounded-full transition-colors',
-            live
-              ? 'bg-emerald-500/20 border border-emerald-400/45'
-              : 'bg-white/[0.06] border border-transparent',
-            micActionable ? 'hover:brightness-110' : 'opacity-40 cursor-not-allowed',
+            'stage-hit44 flex-none grid place-items-center w-10 h-10 rounded-control transition-colors',
+            // Hover lifts the fill a step; the live colour stays.
+            live ? 'bg-action-soft text-ok' : 'text-ink-2',
+            !micActionable ? 'opacity-40 cursor-not-allowed' : live ? 'hover:bg-[var(--action-soft-hover)]' : 'hover:bg-action-soft hover:text-ink',
           ].join(' ')}
           title={
             !micActionable
@@ -119,7 +119,7 @@ export function MiniDock({ onSendChat, onSendReaction, voice, onToggleVoiceMute 
           <svg
             viewBox="0 0 24 24"
             fill="currentColor"
-            className={`w-[15px] h-[15px] ${live ? 'text-emerald-300' : 'text-white/70'}`}
+            className="w-[18px] h-[18px]"
             aria-hidden="true"
           >
             {(voice?.muted ?? true) ? (

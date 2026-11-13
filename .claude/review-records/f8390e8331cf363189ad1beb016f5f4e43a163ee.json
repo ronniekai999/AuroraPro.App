@@ -1,0 +1,10 @@
+{
+  "sha": "f8390e8331cf363189ad1beb016f5f4e43a163ee",
+  "verdict": "lows-only",
+  "summary": "Two commits, each read by the reviewer of its area. Report a bug: by the owner's decision the floating button is gone and the entry is a row on the phone's Me page and an item in the desktop identity panel; from Me the app returns to the page the person came from and opens the dialog over it, so a report's address and capture are that page's; the reserved end padding, the root attribute and the hidden plumbing are removed. One pass, lows-only: the entries are offered on the old condition, the step-back test cannot leave the app or reach another owner's page, and the dialog itself changes only in its focus hand-back. Connect your TV follow-up: while an approval's outcome is unknown, the two not-found answers that most likely confirm it say so and keep the sign-out advice. One pass, lows-only. Applied without the phone companion, which is fix-first; the tree differs from the builder's only in the companion's files. Open lows: an open report dialog survives a profile switch and reporting being switched off (follow-up queued); the admin-area return check; a remembered title page that redirects; pairing wording after a server restart.",
+  "reviewer": "fresh-context-agents-ad83f58e-adcf6c9d",
+  "findings": "9",
+  "diff_digest": "2c0ea3b89989c50c660e91e85e7ad17c0e7547981c8bab0210f5628454ec6119",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T22:18:33Z"
+}

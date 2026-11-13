@@ -1,0 +1,10 @@
+{
+  "sha": "60cb3cf7dab25a948fa9acefdda3e6a20566d8cc",
+  "verdict": "lows-only",
+  "summary": "Two follow-up commits, each re-checked by the reviewer who raised its items. Report a bug (room reserved for the corner button at a page's end on phones; the action row brought into view after a refused send; the error tied to its field and announced again on a repeat; read-only fields dimmed; focus to Choose file after removing the attachment; the attach buttons named by their own words; copy and docs say send): lows-only, every item resolved, nothing regressed. Admin (the second read after a close mid-match takes no focus and cannot land over a newer one; 'about the slowest'): lows-only, all three resolved. Open lows: the reserved space is dropped under every panel so a phone page jumps; nothing is reserved from 768px; four fixed-text refusals are not re-announced; the repeat relies on a trailing no-break space; a placeholder at 3.2:1 during a send. Admin: an older read's failure can show an error over a newer list; a local accept can be undone on screen by a read in flight; the title page's reads are ordered only within one close; the focus rule's ordering is unpinned.",
+  "reviewer": "fresh-context-agents-ad83f58e-afa77048",
+  "findings": "9",
+  "diff_digest": "0fed59af827d0f9d92df3b862471dfeaa019db28aacbb457cdc160bdc70c6c10",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T19:17:21Z"
+}

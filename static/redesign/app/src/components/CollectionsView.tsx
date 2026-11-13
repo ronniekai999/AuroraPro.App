@@ -3,7 +3,8 @@
 // Two states: list (all visible collections) and detail (one
 // collection's items). Click a collection card → detail.
 
-import { useEffect, useState } from 'react'
+import { failureWords } from '@/lib/failureWords'
+import { useEffect, useRef, useState, type MouseEvent } from 'react'
 import {
   listCollections,
   getCollection,
@@ -16,7 +17,7 @@ import {
 } from '@/lib/api'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { Icon } from '@/components/Icon'
-import { PageHeader } from '@/components/PageHeader'
+import { LibraryTools } from '@/components/LibraryHeader'
 import {
   AlertDialog,
   AlertDialogContent,
@@ -65,6 +66,10 @@ interface Props {
   // if a caller hasn't wired them yet.
   libraryIds?: Set<number>
   onToggleLib?: (m: ServerMediaItem) => void
+  // The card menu (right click, More, a long press), given the server's
+  // record like onToggleLib: how a keyboard or a phone adds a title here to
+  // My Library or plays it.
+  onCardContext: (e: MouseEvent, m: ServerMediaItem) => void
   // QA 2026-05-25 — bumped by App.handleNavigate when the user clicks
   // the Collections nav item while already on /collections. Acts as
   // a "back to index" signal so the side-nav doubles as a back
@@ -72,11 +77,26 @@ interface Props {
   // don't wire it just keep the old behavior (drill-down state
   // sticky until the user clicks the in-page Back affordance).
   rewindNonce?: number
+  /** A collection to open the page on (picked from a search's results);
+   *  `n` tells one ask from the next. */
+  open?: { id: number; n: number } | null
+  /** Called once the ask has been taken, so that coming back to the page
+   *  later shows the index. */
+  onOpenTaken?: () => void
 }
 
-export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds, onToggleLib, rewindNonce }: Props) {
+export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds, onToggleLib, onCardContext, rewindNonce, open, onOpenTaken }: Props) {
   const [collections, setCollections] = useState<Collection[] | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
+  // A collection picked somewhere else (the search page): the page opens
+  // on it, once per ask.
+  const [openTaken, setOpenTaken] = useState(0)
+  if (open && open.n !== openTaken) {
+    setOpenTaken(open.n)
+    setSelected(open.id)
+  }
+  const openN = open?.n
+  useEffect(() => { if (openN !== undefined) onOpenTaken?.() }, [openN, onOpenTaken])
   const [items, setItems] = useState<ServerMediaItem[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loadingItems, setLoadingItems] = useState(false)
@@ -93,11 +113,16 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
   >(null)
   const [dialogError, setDialogError] = useState<string | null>(null)
 
-  // Re-click on the Collections nav resets to the index. Skip the
-  // initial render (nonce === 0 OR undefined) so first-paint doesn't
-  // wipe a selection set via deep-link.
+  // Pressing the Collections nav item again goes back to the index. Only a
+  // press made while this page is up: the counter is the app's, one for
+  // every destination, so a page mounted later starts from whatever it has
+  // reached. It used to skip only a count of zero, and with any nav item
+  // re-pressed earlier in the session it ran on mount and undid a selection
+  // the page was opened on (a collection picked on the search page).
+  const rewindSeen = useRef(rewindNonce)
   useEffect(() => {
-    if (rewindNonce === undefined || rewindNonce === 0) return
+    if (rewindNonce === rewindSeen.current) return
+    rewindSeen.current = rewindNonce
     setSelected(null)
   }, [rewindNonce])
 
@@ -109,7 +134,8 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
       .then((c) => { if (!cancelled) setCollections(c) })
       .catch((e) => {
         if (!cancelled && e.name !== 'AbortError') {
-          setError(e instanceof Error ? e.message : 'Failed to load')
+          // The page says it in words of its own (below); kept as a flag.
+          setError('failed')
         }
       })
     return () => { cancelled = true; ac.abort() }
@@ -125,7 +151,7 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
     const ac = new AbortController()
     setLoadingItems(true)
     getCollection(selected, ac.signal)
-      .then((d) => { if (!cancelled) setItems(d.items) })
+      .then((d) => { if (!cancelled) setItems(d.items ?? []) })
       .catch(() => { /* surfaces via error state */ })
       .finally(() => { if (!cancelled) setLoadingItems(false) })
     return () => { cancelled = true; ac.abort() }
@@ -205,10 +231,7 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
                 setConfirm(null)
                 setDialogError(null)
               } catch (err) {
-                setDialogError(
-                  (confirm.kind === 'remove' ? 'Remove failed: ' : 'Delete failed: ') +
-                  (err instanceof Error ? err.message : 'unknown'),
-                )
+                setDialogError(failureWords(err, confirm.kind === 'remove' ? 'remove it from the collection' : 'delete the collection'))
               }
             }}
           >
@@ -219,8 +242,11 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
     </AlertDialog>
   )
 
-  if (error) return <p className="text-red-300 p-8">{error}</p>
-  if (collections === null) return <p className="text-white/60 p-8">Loading collections…</p>
+  // In words, never the transport's own message (it read "HTTP 500").
+  // (The page's heading is drawn in these two states as well: it is the
+  // only heading the page has.)
+  if (error) return <><h1 className="sr-only">Collections</h1><p className="py-8 text-sm text-ink-2" role="alert">Collections could not be loaded. Reload the page to try again.</p></>
+  if (collections === null) return <><h1 className="sr-only">Collections</h1><p className="py-8 text-sm text-ink-2" role="status">Loading collections…</p></>
 
   if (selected != null) {
     const c = collections.find((x) => x.id === selected)
@@ -235,39 +261,37 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
           type="button"
           autoFocus
           onClick={() => setSelected(null)}
-          className="inline-flex items-center gap-2 text-white/60 hover:text-white text-sm mb-6"
+          // The Library header has a "Collections" too (the scope's name):
+          // this one says where it goes.
+          aria-label="Back to collections"
+          className="stage-colback inline-flex min-h-[44px] items-center gap-1.5 text-sm font-medium text-ink-2 hover:text-ink md:min-h-0"
         >
           <Icon name="arrowLeft" size={14} />
-          Back to collections
+          Collections
         </button>
-        {/* PageHeader, like the index — this was the sixth header surface in the
-            app with a seventh title treatment (a hand-rolled text-4xl h1), which
-            is exactly the divergence PageHeader exists to stop, one level
-            deeper than the five screens Phase 6 set out to cover. */}
-        <PageHeader
-          eyebrow={c?.kind === 'ai' ? 'AI-curated' : 'Curated'}
-          title={c?.name || 'Collection'}
-          sub={
-            <>
-              {items.length} title{items.length === 1 ? '' : 's'}
-              {c?.description && <span className="block mt-1">{c.description}</span>}
-              {c?.kind === 'ai' && c.prompt && (
-                <span className="block mt-1 text-purple-300/80 text-xs italic">
-                  ✨ AI-curated from: "{c.prompt}"
-                </span>
-              )}
-            </>
-          }
-          className="mb-8"
-        />
+        {/* The collection's own heading: its name, and one line of facts
+            (who filled it and from what words, how many titles, who can see
+            it), then its note when it has one. */}
+        <div className="mb-10 mt-4 flex flex-col gap-2.5">
+          <h1 className="stage-coltitle">{c?.name || 'Collection'}</h1>
+          <p className="flex flex-wrap items-center gap-2 text-sm text-ink-2" data-collection-facts="">
+            {c?.kind === 'ai' && <span className="aurora-dot" aria-hidden="true" />}
+            {[
+              c?.kind === 'ai' ? (c.prompt ? `Built by Aurora from “${c.prompt}”` : 'Built by Aurora') : '',
+              loadingItems ? '' : `${items.length} title${items.length === 1 ? '' : 's'}`,
+              c ? (c.is_public ? 'public' : 'private') : '',
+            ].filter(Boolean).join(' · ')}
+          </p>
+          {c?.description && <p className="max-w-2xl text-[15px] text-ink-2">{c.description}</p>}
+        </div>
 
         {loadingItems ? (
-          <p className="text-white/60 text-sm">Loading…</p>
+          <p className="text-sm text-ink-2" role="status">Loading…</p>
         ) : items.length === 0 ? (
-          <div className="text-center py-20">
-            <p className="text-white/60 text-lg">This collection is empty.</p>
-            <p className="text-white/60 text-sm mt-2">
-              Add titles via the right-click context menu on any media card.
+          <div className="py-20 text-center">
+            <p className="text-lg text-ink">This collection is empty.</p>
+            <p className="mt-2 text-sm text-ink-2">
+              Add titles from any poster's menu: its More button, a right click or a long press.
             </p>
           </div>
         ) : (
@@ -277,7 +301,7 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
           // card's own JSX stays the same shape as every other surface.
           // Note that ServerMediaItem uses `poster_path` (not the UI
           // Media's `poster`), so we map the prop here.
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
+          <div className="poster-grid">
             {items.map((m) => (
               <MediaCardCinema
                 key={m.id}
@@ -291,6 +315,7 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
                   // hides via the existing meta guard.
                 }}
                 onSelect={() => onOpenMedia(m.id)}
+                onCardContext={(e) => onCardContext(e, m)}
                 libraryIds={libraryIds}
                 onToggleLib={onToggleLib ? () => onToggleLib(m) : undefined}
                 topRightOverlay={isAdmin && (
@@ -319,120 +344,76 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
   return (
     <>
     <div className="animate-fade-in">
-      <PageHeader
-        eyebrow="Curated"
-        title="Collections"
-        sub={`Smart shelves, yours and Aurora's — ${collections.length} collection${collections.length === 1 ? '' : 's'}`}
-        action={
-          // The mockup's dashed "+ New Collection" tile. Dashed reads as "this
-          // creates a new thing" rather than "this is a thing", which matters
-          // here because it sits directly above a grid of solid cards that all
-          // OPEN something.
-          <button type="button" onClick={onOpenCreate} className="stage-newcol inline-flex px-5">
-            <Icon name="plus" size={14} />
-            New Collection
-          </button>
-        }
-      />
+      {/* No heading block of its own: the Library header's row names the
+          page, and carries this count and "New collection" at its right. */}
+      <h1 className="sr-only">Collections</h1>
+      <LibraryTools>
+        <p className="stage-libhead-note" role="status" data-collections-count="">
+          {collections.length.toLocaleString()} collection{collections.length === 1 ? '' : 's'}
+        </p>
+        <button type="button" onClick={onOpenCreate} className="stage-btn stage-btn-sm stage-btn-ghost stage-hit44">
+          <Icon name="plus" size={14} />
+          New collection
+        </button>
+      </LibraryTools>
 
       {collections.length === 0 ? (
-        <div className="text-center py-20">
-          <p className="text-white/60 text-lg">No collections yet.</p>
-          <p className="text-white/60 text-sm mt-2 max-w-md mx-auto">
-            Create one manually or describe a vibe and let Aurora's AI build it
-            from your library.
+        <div className="py-20 text-center">
+          <h2 className="text-lg text-ink">No collections yet</h2>
+          <p className="mx-auto mt-2 max-w-md text-sm text-ink-2">
+            Make one by hand, or describe it and let Aurora fill it from your library.
           </p>
         </div>
       ) : (
-        // Audit MED — collection cards were bare <div onClick> with no
-        // keyboard/AT affordance. Each card is now operable by keyboard and
-        // announced via aria-label.
-        //
-        // The mechanism changed in Phase 6. It used to be `role="button"` on
-        // the card container, chosen specifically because the admin delete
-        // control is a <button> and nesting <button> in <button> is invalid.
-        // That traded one problem for a worse one: role="button" is Children
-        // Presentational, so it pruned the card's own subtree AND still held a
-        // focusable descendant. Two real sibling <button>s — one stretched over
-        // the card, one for delete — has neither problem, and needs no
-        // stopPropagation at all.
-        //
-        // <ul>/<li> so the grid announces as "list, N items".
-        <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5 list-none p-0 m-0">
+        // <ul>/<li> so the grid announces as "list, N items". Each card is a
+        // plain container holding two sibling buttons: the one that opens
+        // the collection (the artwork, the name and the line under it), and,
+        // for an admin, delete. Not one button inside the other (invalid),
+        // and not role="button" on the container (it prunes its subtree from
+        // the accessibility tree while keeping a focusable descendant).
+        <ul className="stage-colgrid m-0 grid list-none p-0">
           {collections.map((c) => {
             const strips = collectionStrips(c)
+            const count = c.item_count || 0
+            // What the line under the name says, in words: how many, who
+            // filled it, and who can see it.
+            const facts = [`${count} title${count === 1 ? '' : 's'}`, c.kind === 'ai' ? 'built by Aurora' : '', c.is_public ? 'public' : 'private'].filter(Boolean)
             return (
-              // The CARD is a plain container; the whole-surface click target is
-              // a real <button> stretched over it with position:absolute inset-0
-              // (see below), and the admin delete <button> is a SIBLING of that
-              // rather than a descendant.
-              //
-              // This replaces `role="button" tabIndex={0}` on the container. That
-              // pattern avoided invalid button-in-button nesting, which the old
-              // comment here claimed settled the matter — but role="button" is
-              // Children Presentational (ARIA 1.2 §5.2.8), so it pruned the
-              // subtree from the accessibility tree AND held a focusable
-              // descendant, which the spec forbids and Chrome half-honours
-              // (pruned from the a11y tree, still in the tab order). Two real
-              // buttons side by side has neither problem.
-              <li key={c.id} className="stage-colcard group list-none">
-                {/* aria-hidden: the strips are decorative — the button's label
-                    names the collection and its size, and announcing four
-                    unlabelled member posters would add noise, not information. */}
-                <div className="absolute inset-0 flex" aria-hidden="true">
-                  {strips.map((src, i) => (
-                    <img
-                      key={i}
-                      src={src}
-                      alt=""
-                      loading="lazy"
-                      // flex-1 min-w-0 so 1, 2, 3 or 4 strips each fill the
-                      // card evenly — the count is data-driven (a collection
-                      // with two members yields two strips), so a fixed 25%
-                      // would leave dead space.
-                      className="flex-1 min-w-0 h-full object-cover"
-                    />
-                  ))}
-                </div>
-                <div className="stage-colcard-scrim" />
-                {/* The click target: a real button covering the card, under the
-                    badge row's z-[3] so the delete control stays clickable.
-                    z-[2] also puts it above the strips and scrim. */}
+              <li key={c.id} className="stage-colcard group relative list-none">
                 <button
                   type="button"
                   onClick={() => setSelected(c.id)}
-                  aria-label={`Open collection ${c.name}, ${c.item_count || 0} ${c.item_count === 1 ? 'title' : 'titles'}`}
-                  className="absolute inset-0 z-[2] w-full h-full flex flex-col justify-end items-start text-left px-[17px] pb-[14px] rounded-[15px]"
+                  aria-label={`Open collection ${c.name}, ${facts.join(', ')}`}
+                  className="stage-colcard-open flex w-full flex-col text-left"
                 >
-                  <span className="font-display text-[16.5px] font-bold text-white truncate max-w-full">{c.name}</span>
-                  <span className="text-[11.5px] text-white/65 mt-0.5">
-                    {c.item_count || 0} title{c.item_count === 1 ? '' : 's'}
+                  {/* Decorative: the button's label names the collection, and
+                      four unlabelled posters would add noise, not information.
+                      One to four strips share the width evenly (the count is
+                      the collection's own); none leaves the frame's fill. */}
+                  <span className="stage-colcard-art flex" aria-hidden="true">
+                    {strips.map((src, i) => (
+                      <img key={i} src={src} alt="" loading="lazy" className="h-full min-w-0 flex-1 object-cover" />
+                    ))}
+                  </span>
+                  <span className="stage-colcard-name">{c.name}</span>
+                  <span className="stage-colcard-meta flex items-center">
+                    {c.kind === 'ai' && <span className="aurora-dot" aria-hidden="true" />}
+                    {facts.join(' · ')}
                   </span>
                 </button>
-                {/* Badges top-right. The admin delete control also wants that
-                    corner, so it is offset LEFT of the badges rather than
-                    stacked on top of them — an earlier version put both at
-                    top-3 right-3 and the × landed on the "Public" chip. */}
-                <div className="absolute top-3 right-3.5 z-[3] flex items-center gap-1.5">
-                  {c.kind === 'ai' && <span className="stage-cbadge stage-cbadge-ai">✨ AI</span>}
-                  {c.is_public && <span className="stage-cbadge stage-cbadge-pub">PUBLIC</span>}
-                  {isAdmin && (
-                    <button
-                      type="button"
-                      onClick={() => setConfirm({ kind: 'delete', collectionId: c.id, title: c.name })}
-                      // focus-visible:opacity-100 alongside the hover reveal:
-                      // opacity-0 alone left this focusable but invisible, so
-                      // a keyboard user tabbing the grid hit an unseen control
-                      // (WCAG 2.4.7). No stopPropagation needed now that the
-                      // card's handler lives on a sibling, not an ancestor.
-                      className="w-7 h-7 rounded-md grid place-items-center bg-black/60 hover:bg-red-500/80 text-white/80 hover:text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
-                      title="Delete collection"
-                      aria-label={`Delete collection ${c.name}`}
-                    >
-                      <Icon name="trash" size={12} />
-                    </button>
-                  )}
-                </div>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => setConfirm({ kind: 'delete', collectionId: c.id, title: c.name })}
+                    // Shown on hover and on keyboard focus: opacity-0 alone
+                    // left a focusable control nobody could see.
+                    className="stage-colcard-delete absolute right-2 top-2 grid place-items-center opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+                    title="Delete collection"
+                    aria-label={`Delete collection ${c.name}`}
+                  >
+                    <Icon name="trash" size={14} />
+                  </button>
+                )}
               </li>
             )
           })}

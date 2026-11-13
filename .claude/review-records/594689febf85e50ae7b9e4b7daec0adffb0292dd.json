@@ -1,0 +1,10 @@
+{
+  "sha": "594689febf85e50ae7b9e4b7daec0adffb0292dd",
+  "verdict": "lows-only",
+  "summary": "Fix set for the external review's findings plus the cards re-review follow-ups (15 commits over 4e56082), three passes by one fresh-context reviewer. Pass 1 at d54fb8a fix-first: the card and the title page chose different party episodes for a show with Specials, and the title page listed one season while Play started another. Pass 2 at 1d4a4c9 lows-only: that is resolved; a narrow regression remains (a show whose regular seasons have no files but whose Specials do gets a party with no episode from the title page), Play now skips an episode with no file silently, the prewarm lookup cannot be cancelled, the invitations hook does not guard an answer asked while a profile switch is bound but not yet committed, the leave confirmation does not stop the player's other shortcuts; all sent to the builders. Pass 3 at 594689f: two new tests retargeted from the redesigned title page's markup (not on this branch) to the present title page, confirmed equal strength and verified by mutation. Invitation ownership, the single-flight party poll and the Together gate were found sound; the VideoPlayer hunk does not touch delivery, sessions, casting, party sync, subtitle holds or progress.",
+  "reviewer": "fresh-context-agent-aebb4273",
+  "findings": "9",
+  "diff_digest": "d663d8061ab147842a762ae2dac0fd393941f82233a198c3783c0694aa7871a7",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T01:55:40Z"
+}

@@ -1,0 +1,10 @@
+{
+  "sha": "dcfb99efc7b3e83e8d8dade21dfbd848b68d4543",
+  "verdict": "lows-only",
+  "summary": "Search, step 1 of 4: the results page as designed (a status line, kind filters, a best match, titles, collections matched in the browser, an aside with actions and recent searches kept per user and profile), plus accessible names for the presence pill and a Library list row. Five commits, two passes by a new reviewer with the server's search, collections and requests handlers read. Pass 1 fix-first (a collection opened from a search landed on the index after any nav item had been re-pressed; request offers shown while the profile was unknown; no Search by description when only a collection matched). Pass 2 lows-only, every item resolved. The search and profile-switch invariants hold. The tree is the builder's without its unfinished error screen. Open lows: a search card's name says the year twice; the best match's facts do not lead with the kind; another open tab can write its recent list back just after a sign-out; requests are still offered where the server has them off (next step).",
+  "reviewer": "fresh-context-agent-a27d5c3e",
+  "findings": "4",
+  "diff_digest": "450a316f2e9d1019043b3350efa57136b0cc405daef54097c948c4087cb52b98",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T21:32:10Z"
+}

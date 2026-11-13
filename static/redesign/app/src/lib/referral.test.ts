@@ -267,15 +267,25 @@ describe('referralOptionsFromSummary', () => {
 describe('buildSteps', () => {
   it('omits the referral step when the server says not pending', () => {
     const m = buildSteps({ referralPending: false, taste: true })
-    expect(m.order).toEqual(['avatar', 'name', 'age', 'style', 'titles', 'welcome', 'loading'])
-    expect(m.inputs).toHaveLength(5)
+    expect(m.order).toEqual(['you', 'titles', 'loading'])
+    expect(m.inputs).toEqual(['you', 'titles'])
   })
 
-  it('inserts referral between titles and welcome, and counts it', () => {
+  it('puts referral last of the inputs, straight before the build, and counts it', () => {
     const m = buildSteps({ referralPending: true, taste: true })
-    expect(m.order).toEqual(['avatar', 'name', 'age', 'style', 'titles', 'referral', 'welcome', 'loading'])
-    expect(m.inputs).toHaveLength(6)
+    expect(m.order).toEqual(['you', 'titles', 'referral', 'loading'])
+    expect(m.inputs).toHaveLength(3)
     expect(m.inputs[m.inputs.length - 1]).toBe('referral')
+  })
+
+  // The taste pass has no send-off screen: its last input step leads into
+  // the build, which is its own ending.
+  it('has no welcome step when there is a build to end on', () => {
+    for (const referralPending of [true, false]) {
+      const m = buildSteps({ referralPending, taste: true })
+      expect(m.order).not.toContain('welcome')
+      expect(m.order[m.order.length - 1]).toBe('loading')
+    }
   })
 
   it('collapses to referral → welcome when only the referral is owed', () => {
@@ -306,20 +316,27 @@ describe('buildSteps', () => {
 describe('nextStep / prevStep', () => {
   const m = buildSteps({ referralPending: true, taste: true })
   it('walks forward through the referral step', () => {
+    expect(nextStep(m, 'you')).toBe('titles')
     expect(nextStep(m, 'titles')).toBe('referral')
-    expect(nextStep(m, 'referral')).toBe('welcome')
+    expect(nextStep(m, 'referral')).toBe('loading')
   })
   it('walks backward through it too', () => {
-    expect(prevStep(m, 'welcome')).toBe('referral')
+    expect(prevStep(m, 'loading')).toBe('referral')
     expect(prevStep(m, 'referral')).toBe('titles')
+    expect(prevStep(m, 'titles')).toBe('you')
   })
   it('skips it entirely when it is not in the machine', () => {
     const noRef = buildSteps({ referralPending: false, taste: true })
-    expect(nextStep(noRef, 'titles')).toBe('welcome')
-    expect(prevStep(noRef, 'welcome')).toBe('titles')
+    expect(nextStep(noRef, 'titles')).toBe('loading')
+    expect(prevStep(noRef, 'loading')).toBe('titles')
+  })
+  it('walks the pass that only asks the question', () => {
+    const only = buildSteps({ referralPending: true, taste: false })
+    expect(nextStep(only, 'referral')).toBe('welcome')
+    expect(nextStep(only, 'welcome')).toBeNull()
   })
   it('returns null at the ends', () => {
-    expect(prevStep(m, 'avatar')).toBeNull()
+    expect(prevStep(m, 'you')).toBeNull()
     expect(nextStep(m, 'loading')).toBeNull()
   })
   it('returns null for a step not in the machine', () => {

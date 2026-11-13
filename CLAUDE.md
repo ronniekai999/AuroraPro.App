@@ -213,7 +213,8 @@ All consumers use `internal/llm` through `ChatJSON(With)`, `EmbedBatch`, or
   - The SPA's My Library snapshot is the profile's own (per account and
     profile), but can hold titles saved before its ceiling was set or
     lowered; they show until the server's filtered list arrives, or while
-    offline.
+    offline. (Tonight's "Your list" rail for a restricted profile waits for
+    the server's list and shows only the titles on it.)
   - The calendar, live-party, invite and collection listings fail open on
     a resolve error, like browse; a collection's name, description and AI
     prompt are shown as written; and a party's title still reaches a
@@ -346,8 +347,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   delete with a recap question, which inserts a child of the profile and
   then one of the account. Without the last-unrestricted rule
   nothing on the account could manage profiles again, and onboarding's age
-  step reached that on a single-profile account in one move; that step now
-  gives the account's only such profile the tone lean and no ceiling. A
+  reached that on a single-profile account in one move; an age entered
+  there now gives the account's only such profile the tone lean and no
+  ceiling. A
   profile that already has a ceiling passes, so a restricted session's own
   edits still round-trip it.
 - The acting profile must not degrade to the account default for a session
@@ -409,6 +411,60 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   default on the discovery routes, so a kid's Home showed the parent's hero
   pick on every load; those routes now answer for the acting profile, and the
   wait keeps the app from showing content for a profile it has not confirmed.
+  Tonight's hero leads with the title the profile left unfinished, from
+  Continue Watching, with the recommender's picks in a filmstrip beside it
+  (`lib/tonightSlate.ts`, derived each render, never stored; the strip
+  lists the picks only, never the title to resume). It shows nothing until
+  Continue Watching has answered or failed for the user and profile, or four
+  seconds have passed (`heroLeadSettled`, `HERO_LEAD_WAIT_MS`; when there is
+  no profile to ask for, once the startup load settles): shown earlier it
+  put up a pick and then swapped it for that title. That the wait ran out
+  is one visit's fact: a sign-out and a profile switch forget it, with the
+  mark that the viewer is in the hero (`forgetHeroLeadWait`, called
+  wherever Continue Watching's own answer is forgotten), so a return to the
+  same user and profile waits again. A session that expires is a bare
+  `setUser(false)`, not `resetUserState`, and while the app knows no
+  profile for the account no profile changes either, so one effect clears
+  the hero (its picks, its place in the slate, the catalog's stand-in),
+  Continue Watching and the wait whenever nobody is signed in: the next
+  sign-in on the tab used to be handed the last answer's title as the
+  hero's lead. That effect covers Tonight's hero only; what else that path
+  leaves in the tab is a gap older than this (see Known gaps). An answer
+  that arrives after the four seconds takes the hero over only while the
+  hero is still on the entry it opened on and the viewer has done nothing
+  in it (pointer or focus in it, a pick chosen, the rotation paused).
+  Otherwise the title comes up when the rotation next wraps round to it
+  (its first tick is nine seconds after it starts; it does not run while
+  the pointer or focus is in the hero, or once the viewer has paused it);
+  either way it is the first card of Continue Watching. A touch or
+  screen-reader viewer is not in the hero until they press something in
+  it, so for them a late answer can change the title between aiming and
+  pressing. The filmstrip hands back a place in the slate, which a press
+  reads through a ref mirrored in a layout effect (`heroSlateRef`): in a
+  passive one, a press in the frame the strip was drawn in read the slate
+  of the commit before and put up another pick, or none. A switch puts the
+  hero back on the lead (`heroOnLead`), so the new profile's Tonight opens
+  on its own title, not on the place in the slate the previous profile had
+  moved to. Only a pick is reported to
+  the recommender as seen, at the place the server sent it at: never the
+  title to resume, also when it is one of the picks (the server credits
+  what is watched afterwards to the exposure), and never the catalog's
+  stand-in. A session acting as a restricted profile gets the calmer
+  Tonight: one title, two actions, no filmstrip, no rotation, and a last
+  line that states the limit. Its rails are what it has started (when that
+  is more than the hero's title), its own list and the two catalog shelves
+  ("Movies", "Shows"), on larger cards; the recommender's rails are not
+  shown to it and not asked for. "Your list" appears only once the server
+  has answered for that profile's list in this session
+  (`libraryServerFor`, cleared whenever the list is loaded from this
+  browser's snapshot again, which is every change of user or profile, and
+  on sign-out), and holds the titles the server listed; a listed title's
+  card can still be drawn from this browser's copy of it. Pinned by
+  `App.tonight.test.tsx` and `App.profileSwitch.test.tsx`. Of what forgets
+  the wait, the switch's call and the signed-out effect are each pinned
+  alone (a switch away and back; an expiry on an account with no profile);
+  the call in `resetUserState` is not, since after a sign-out the other two
+  run as well.
   When the binding cannot be read it shows no profile and opens
   the picker, which cannot be left without a pick, rather than guessing the
   default; if the profile list fails, nothing personalized loads at all. The
@@ -419,21 +475,69 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   clears the previous profile's hero. A switch also loads Home cold (its rails
   come down at once, so a slow or failed load shows the skeleton or the error,
   not the old rails), drops the Movies and Shows grids (aborting a Load More
-  or a first page in flight), Continue Watching and the conversational rail,
+  or a first page in flight) and Continue Watching,
   swaps My Library to the new profile's snapshot, sends an open title back
   through its `/title/:id` hydration, which leaves for Home if the new profile
   may not see it, and remounts search, collections, the calendar and member
   pages (`useOnProfileChange`). Each of these used to keep the previous
-  profile's titles: the grids for the session, the conversational rail until
-  the next search, Home's rails and Continue Watching until a refetch
-  succeeded. Those resets run in passive effects, after the commit that
+  profile's titles: the grids for the session, Home's rails and Continue
+  Watching until a refetch succeeded. A search by description (Enter in a
+  search field, or the search page's button; it was a "describe a vibe" bar
+  on Home with a rail of its own) is the search page's: typing asks the
+  server for a title search only (`mode=literal`), and the model-backed
+  search (`mode=semantic`) runs once per ask. The ask carries the user and
+  profile that made it and is handed to the page only while the app still
+  acts as them, so after a switch the remounted page searches the same words
+  by title and no model call is made on the new profile's behalf. The answer
+  to the last ask is kept (`lib/describedSearch.ts`, one entry, under the
+  ask's own key) so that Back from a result shows it again without another
+  model call; it is forgotten on sign-out and on a profile switch. The
+  server answers a description search with title matches both when it has
+  no model and when its description search finds nothing, and says
+  "literal" either way, so the page says exactly that and does not call
+  them results by description. The search page has its own address: the
+  first key typed in the top bar's field, Enter there from another page and
+  a request's "Find it" push `/search` once (`showSearchPage`), so Back from
+  a result is the results and Back from the results is where the viewer
+  was. It used to be drawn over the address the viewer was typing at: Back
+  from a result skipped the results and left the words in the bar over
+  another page. The words are App state, never in the address (a reload of
+  `/search` is the page with nothing typed); they stay in the bar on a
+  title, a collection or My requests opened from the results
+  (`keepSearch`), and go when the viewer leaves the search page any other
+  way (a destination in the bar, Back out of the results), on a sign-out,
+  and when the session expires (`resetUserState` and the signed-out effect:
+  they used to outlive both, so the next account on the tab found them in
+  the bar and had a search run for them). The search effect starts after
+  the commit a key lands in, so until the answer for the words in the field
+  is in, asked the way they are being asked, the page is searching
+  (`settled`, `searching` in `SearchView`): it does not count the last
+  answer under the new words, show its failure, or offer anything for it.
+  Ctrl or Cmd K puts the focus in the search field (there is no palette;
+  `lib/searchKeys.ts` moves the real focus through the results: Left and
+  Right in drawn order, Down and Up by row on the page) and does nothing
+  from another text field, while a player is up (`playerTarget`, so a
+  minimized one too), or while a card's menu, the add-to-list sheet, the
+  profile picker, a PIN prompt or any modal dialog is over the page
+  (`pageCovered`, which the search page's Escape obeys as well; Escape
+  closes the add-to-list sheet, and before any player: the sheet is painted
+  above the player). The search page taking its address
+  (`showSearchPage`: a key typed, Enter from another page, "Find it") is
+  the one change of address that leaves a player on; in practice that is a
+  minimized one. Pinned by `App.searchRequest.test.tsx`,
+  `App.cardMenu.test.tsx`, `SearchView.test.tsx` and
+  `lib/searchKeys.test.ts`, against a memory router and a DOM with no
+  layout (the rows are given boxes); a real browser's history and the
+  arrow keys on a laid-out page were checked by hand only. Those resets run in passive effects, after the commit that
   already names the new profile, and React could paint that commit: the
   previous profile's hero showed under the new name for a frame. Until they
   run (`profileSwitchPending`), Home, the grids, My Library and an open title
   render their cold state instead. A pick from the picker an unreadable
   binding opens is a switch for all of this, the hero included: the catalog
   behind the picker was fetched under the binding the server does have.
-  Home's own library count (its greeting's "titles in your library") waits
+  Home's own library count (the "titles in your library" in the line under
+  Tonight's rails; it opened the page, in a greeting, until the greeting was
+  removed) waits
   for the startup binding too (`catalogProfileSettled`) and is asked again
   for each profile the session acts as: one request once the startup load
   settles and one per switch (Home's live catalog refresh also asks for it
@@ -452,7 +556,7 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   before the binding was read, so a fresh sign-in that bound the default and then
   re-selected the profile this browser last showed counted the default's
   catalog, and a switch kept the previous profile's count. While it is in
-  flight, and when it fails, the greeting falls back to the grid totals,
+  flight, and when it fails, that line falls back to the grid totals,
   which a switch resets (so a switch can briefly show the new profile's
   grid total first). A failed activation (a switch, a PIN unlock, the startup
   re-selection) re-reads the binding, because a lost answer can follow a bind
@@ -490,7 +594,7 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   hand-written SQL can, and a restricted session cannot
   repair it, so refusing there would leave the account, and on a one-admin
   install the server, with no admin at all. Its restricted sessions keep the
-  admin powers. The web app shows its Admin tab, admin controls, scan bar
+  admin powers. The web app shows its Admin entry, admin controls, scan bar
   and server panel only once the session is known to act as an unrestricted
   profile, or the account has none, or none without a limit
   (`showsAdminUI`); on `/admin` until then it says it is checking, or that it
@@ -529,7 +633,7 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - A profile another device edits shows its new name, ceiling and lock in
     an open web tab at the next switch or tab-visibility re-read; until then
     that tab's restricted-session UI (Settings' controls, onboarding's age
-    step, the admin UI) follows the old values. The server enforces the
+    field, the admin UI) follows the old values. The server enforces the
     current ones.
   - A lock protects only the profile it is on. A restricted profile can
     switch to any unlocked profile, including one with a looser limit or
@@ -770,9 +874,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     profile is stricter); their
     progress and feedback writes land on that profile. A backup restore can
     leave tokens in the same state.
-  - The web app has no screen for changing another profile's ceiling or the
-    default profile; ceilings are set in a profile's own onboarding or
-    through the API.
+  - The web app's Settings ("Profiles and parental controls") offers four
+    ceilings (none, TV-G, TV-PG, TV-14); any other rating on the ladder is
+    set through the API or by onboarding (which writes PG), and is shown
+    there as stored.
   - The macOS client cannot switch profiles at all; it uses the session's
     binding.
   - Nothing tests the TV's PIN panel or Back handling on a device. The SPA's
@@ -788,10 +893,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     and through the picker an unreadable binding opens, and fails if any
     commit puts the new name beside the previous profile's titles on Home,
     the grids, My Library or an open title, or the Parent's grid total in
-    Home's greeting. That pins `profileSwitchPending` and the resets whose
+    the line under Tonight's rails. That pins `profileSwitchPending` and the resets whose
     loss would show something: the hero, Home's rails, Continue Watching,
-    the conversational rail (its results, and its run counter, through a
-    search answering after the switch), the grids, the Movies and Shows
+    a search by description (its results, a request answering after the
+    switch, and that the new profile's page asks by title only), the grids, the Movies and Shows
     totals, their Load More aborts and loading flags, their effects'
     profile dependency, an open title and the My Library swap. It also
     fails if Home's own library count shows another profile's catalog on
@@ -826,9 +931,23 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     re-default, a ceiling edit's own lock, the bound session insert and
     rotation would pass. Unpinned besides: that the no-default re-default
     spares bound sessions, and the edit handler's 404.
-    The onboarding age step's lock for a restricted profile (`ceilingLocked`)
-    is tested at its patch helper only; the server refuses the change
-    regardless.
+    The onboarding age field's lock for a restricted profile
+    (`ceilingLocked`) is tested at its patch helper and at the page (the
+    field is disabled and nothing about content is written,
+    `onboardingFlow.test.tsx`); the server refuses the change regardless.
+    Three more rules of that flow, each pinned in `onboardingFlow.test.tsx`
+    under the heading named: the limit an age sets is written when setup
+    finishes, so every way out that does not finish it (`leave`: the
+    header's Skip, "Continue to Aurora" on an empty list, Skip after a
+    failed build) asks first when it would leave that limit unset
+    (`limitToSet`, `limitLeftUnset`; "leaving without finishing"); picks
+    refused under a limit the flow has just written are recognised by the
+    refusal's status with that limit in force and confirmed by reading the
+    grid again, because the server gives that refusal no code of its own
+    (`recoverPicksUnderLimit`; "picks refused under the limit the build has
+    just written"); and `main` is inert while the flow is up, and the flow
+    is inert under the "Who's watching?" picker or a PIN prompt ("under the
+    profile picker", and `App.onboarding.test.tsx` for the app's wiring).
   - Account-level actions still open to a restricted session, for example:
     changing the account password (it needs the current one), approving a
     device pairing (the device binds to the restricted profile, or, when
@@ -873,6 +992,21 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     keeps writing progress for the outgoing profile and is refused.
   - The SPA does not re-read the session's profile after a 403
     `profile_restricted` on a data route.
+  - A session that expires (`SESSION_EXPIRED_EVENT`) signs the tab out with
+    a bare `setUser(false)`; `resetUserState` does not run. On an account
+    with profiles the profile going to null runs the switch's resets. While
+    the app knows no profile for the account (a new account before its
+    first progress write, or a tab that has not listed the profiles since)
+    nothing does, beyond Home's rails (`railsUserRef`), the notification
+    count, the search field's words, the toasts, and Tonight's hero,
+    Continue Watching and wait (the signed-out effects). What else App keeps for the previous user on that path (the
+    browse grids and their totals, an open title) has not been audited: the
+    next sign-in on the tab may be shown it until its own answers land. The
+    grids' totals are not kept per owner. What reads them: a grid's count
+    in the Library header and in the Filters sheet's "Show N movies"
+    button, the layout a grid opens with and whether it has an A to Z strip
+    (both by size), and Tonight's closing line, which falls back to them
+    while Home's own count has not answered.
 
 ### Member profiles and follows
 
@@ -902,6 +1036,40 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   self-validate the current schedule and deduplicate reminders.
 - Party calendar chips group by viewer-local date; episode air dates remain
   UTC-keyed.
+- In the web app the caller's invitation list (`hooks/usePartyInvites.ts`:
+  the bell's rows, Tonight's live strip, the Together page) is stored with
+  the user and acting profile it was asked for and given out to no other,
+  and an answer for an owner that is no longer current is dropped. A profile
+  switch is bound on the server before the app shows it, and for that moment
+  the server answers for the new profile under the old one's name, so the
+  list is also held to the live catalog refresh's rule (see Live catalog
+  updates): no request starts while a switch or its PIN prompt is out, an
+  answer is dropped when one is out or has started since it was asked for,
+  and what was held back or dropped is asked for again when a switch ends,
+  the one that ends on the profile already shown included (App counts the
+  end of every switch made through its UI, `switchProfileWatched`). The
+  "is out" half of the drop is covered by the "started since" half and by
+  the start guard, as in the catalog refresh, so deleting it fails no test;
+  it is kept in case the flag is ever set without a generation bump. Pinned
+  by `usePartyInvites.test.tsx` and `App.invites.test.tsx` (a delayed
+  activation from a restricted profile into an unrestricted one, every
+  commit sampled). Not covered: a switch made only in another tab, which
+  this tab's flag and counter do not see, until its `storage` or visibility
+  re-read moves this tab; and a session moved by the startup re-selection,
+  which is not a switch.
+- A show's party needs an episode (`lib/partyEpisode.ts`): one created with
+  none cannot be joined once it is playing. "Where a show starts" has one
+  definition for a card's Play and "Watch together", the title page and the
+  prewarm: the resume episode, else the earliest episode with a file, the
+  regular seasons in order and the Specials (season 0) last. The title page
+  opens on the season that walk ends in when nothing is in progress, so what
+  it lists, what its Play starts and what its party opens on agree, also
+  when the first regular season's files are gone; and when the viewer has
+  moved the page to a season with nothing to play, its party is sent
+  through the card's lookup rather than created with no episode. Play says
+  so when it starts later than the first episode (`startsLaterNotice`).
+  Known gap: a show with nothing to play anywhere reads every season before
+  Play fails, and its party is still created with no episode.
 
 ### Direct-play casting
 
@@ -1576,26 +1744,28 @@ New titles reach open web apps without a reload. Code:
   and catches up when next shown:
   - Home refetches only its three catalog rails and its library count,
     recomposed under the personalized rails; never Continue Watching or the
-    personalized rails, and the hero only when none is showing (a first import
-    into an empty library). Running the full Home load per update reset the
-    hero carousel every ten seconds. Every catalog-rails fetch (the full load's
-    and the live refresh's) takes a number when it starts (`homeRailsSeqRef`),
-    and its rails land only if no later-started fetch's have, so neither puts
-    back rails that missed titles the other saw. The full load records the
-    version it started at, so an update during it is caught up once its rails
-    land. A live refresh whose rails are dropped that way checks again
-    (`homeRefreshRetry`: a recompose can set the very array on screen and
-    re-run nothing), so Home is not left a version behind. The count's own
-    effect asks once per user and profile, and only the live refresh keeps it
-    current (a full load does not ask), so it is tracked apart
-    (`homeCountVersionRef`, the version it was last ASKED at, recorded when a
-    request starts and put back when a switch drops that request's answer) and
-    a refresh also runs when the count alone is behind. Recorded when an answer
-    landed instead, a count request that kept failing ran a full refresh per
-    recompose in a tight loop; a failed count now waits for the next update,
-    unless a switch drops its refresh. Its requests are numbered across its own
-    effect and this refresh, so an older answer landing last cannot put an
-    older count back.
+    personalized rails, and the catalog's stand-in hero only when none is
+    recorded (a first import into an empty library; the stand-in is what the
+    hero shows when there is neither a title to resume nor a pick, and is
+    never one of the picks). Running the full Home load per update
+    reset the hero carousel every ten seconds. Every catalog-rails fetch (the
+    full load's and the live refresh's) takes a number when it starts
+    (`homeRailsSeqRef`), and its rails land only if no later-started fetch's
+    have, so neither puts back rails that missed titles the other saw. The
+    full load records the version it started at, so an update during it is
+    caught up once its rails land. A live refresh whose rails are dropped
+    that way checks again (`homeRefreshRetry`: a recompose can set the very
+    array on screen and re-run nothing), so Home is not left a version
+    behind. The count's own effect asks once per user and profile, and only
+    the live refresh keeps it current (a full load does not ask), so it is
+    tracked apart (`homeCountVersionRef`, the version it was last ASKED at,
+    recorded when a request starts and put back when a switch drops that
+    request's answer) and a refresh also runs when the count alone is
+    behind. Recorded when an answer landed instead, a count request that
+    kept failing ran a full refresh per recompose in a tight loop; a failed
+    count now waits for the next update, unless a switch drops its refresh.
+    Its requests are numbered across its own effect and this refresh, so an
+    older answer landing last cannot put an older count back.
     A full load does not abort a live refresh. The refresh runs only under
     rails the current user and profile already have up, is aborted by a
     user, profile or settle change, stands down on a switch's first commit
@@ -1645,10 +1815,30 @@ New titles reach open web apps without a reload. Code:
     without blanking; a Load More, an admin delete and a user, profile, sort or
     genre change abort it, and it stands down on a switch's first commit. A
     grid deeper than 5 pages is left stale rather than refetched or dropped.
-    Its featured hero is held by id from its first render while it is
-    anywhere in the list with a backdrop, not only in the rotation pool (the
-    first five), so an insertion ahead of it does not swap it, under the
-    Recently Added sort included (`BrowseView.hero.test.tsx`).
+    A grid has no featured band (the hero is Tonight's alone), so a refresh
+    has no title at the top of the page to swap: its name, count, sort,
+    layout and genres are in the Library header, which App renders above
+    the grid and keeps mounted while the grid reloads, and nothing on the
+    page rotates (`BrowseView.header.test.tsx`).
+    Under the title sort, a grid whose whole list fits in the pages a grid
+    keeps live (`CATALOG_REFRESH_MAX_PAGES`, read by `fitsInPages` in
+    `lib/letterJump.ts`) has an A to Z strip; a longer list has none, and
+    nothing in its place. The server has no request for "titles from M", so
+    a letter with no loaded title is reached by asking for the pages that
+    are left, in order, with the requests Load More makes
+    (`hooks/useLetterJump.ts`): a few at most, never one past the last, and
+    the grid is still live-refreshed afterwards. A jump is dropped when its
+    list goes (another sort or genre, a profile switch, leaving the page),
+    and stops when a page does not come. Nothing is read into the order the
+    server lists titles in (its collation follows the machine's locale): a
+    letter is on when a loaded title files under it, one not seen yet may
+    still be further on until the whole list is loaded, after which the
+    letters are exact, and a jump goes to the first title in the list as it
+    is that files under the letter. Load More, and so a jump, stands down
+    while a profile switch is out and drops an answer if one has started
+    since it was asked, as the live refresh does (the start guard is pinned
+    on both grids in `App.profileSwitch.test.tsx`; the drop is not, beyond
+    what the switch's own abort already covers) (`App.library.test.tsx`).
   - The admin dashboard refetches its counts while its tab shows.
   - Home's rail buffers carry their owner (`railsUserRef`, `railsProfileRef`)
     and the titles removed for that owner (`removedFromHomeRef`, from a 👎 or
@@ -1731,6 +1921,224 @@ New titles reach open web apps without a reload. Code:
   does not ask for the personalized hero pool again (a full Home load does);
   the dashboard's side cards read at mount can land after, and overwrite, a
   refresh's newer numbers; the macOS and TV clients ignore the event.
+
+### Signed out, toasts and My Library writes (web app)
+
+Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
+`changeLibrary` / `writeLibrary` / `restoreToLib`, `lib/libraryUndo.ts`,
+`lib/devicePairing.ts`.
+
+- The sign-in page's wall of frames and its form sit on one line and never
+  wrap; the wall is drawn only from 980px (its 560px and the form column's
+  420px). Wrapping, with the wall drawn from 900px, put the wall alone on the
+  first line from 900 to 979px and the form a whole screen down.
+  `scripts/verify-signed-out.mjs` renders both signed-out pages from the
+  build at nine sizes: the first field and the submit button are in the
+  first screenful (the account form at 320x568 is taller than the screen and
+  is checked to scroll to its button instead), the wall is beside the form
+  or not drawn, and on a touch screen each link in a sentence is a 44px
+  target over its whole width.
+- What the pages say of a refusal is a hand-kept list of the server's whole
+  sentences with their statuses (`ANSWERS`, against
+  `internal/api/auth_handlers.go`), never a word inside one: matched on
+  "password", a 500 "failed to hash password" told its viewer how long a
+  password must be. A 429 is "too many tries" whatever its words; every 5xx
+  and anything unknown is "could not ... just now", about no field. Nothing
+  checks the list against the Go source: a reworded server sentence falls
+  back to that line. A refusal puts the focus in the field it is about (the
+  form's first when none), and going between the two pages puts it on the
+  new page's heading.
+- "Connect a TV with a code" before signing in: a provider's round trip
+  comes back to the front page, so the tab keeps that the viewer was on
+  their way to pair (`rememberDeviceIntent`: a time in sessionStorage and
+  nothing from the address; the destination is fixed). The next sign-in
+  uses it once; a sign-out and ten minutes forget it.
+- A toast is said to whoever is acting when it is raised. Toasts are
+  dropped when nobody is signed in and when the account changes. Each
+  takes the acting profile with its id (`nextToastId`, from a layout-effect
+  mirror), and a profile switch drops the ones said to another profile
+  (none is drawn on the switch's first commit, `profileSwitchPending`): a
+  toast the switch itself causes, such as the bug report's "closed because
+  this tab is now on another profile", is kept. A toast's action runs once.
+- A title's My Library writes go to the server one at a time, in the order
+  made (`changeLibrary`'s queue, keyed by profile and title; both routes
+  are idempotent, so a write is sent whatever became of the one before it),
+  also when its turn comes after a profile switch: it names its profile in
+  the address, so the server takes it from a session acting as an
+  unrestricted profile and refuses it (403) from one acting as a restricted
+  profile, and either way nothing of it reaches the new profile's screen
+  (the owner checks below). A write whose turn comes once the account it
+  was made for is no longer the one signed in (a sign-out) is not sent: its
+  401 would end whatever session the tab has by then. Each write's
+  in-flight mark (`pendingLibOpsRef`, keyed by profile and title) is its
+  own object, cleared only by that write, and a read of a profile's list
+  re-applies only that profile's marks. A
+  refused write takes back its own toast; only the latest write asked for
+  a title is taken back on screen and said ("Couldn't …"), and a queue in
+  which any write failed ends with the profile's list read again from the
+  server, which stands. After a switch or a sign-out a refusal does none of
+  this, and is not said (the list on screen is another's); that owner is a
+  layout-effect mirror (`libraryWriteOwnerRef`), as the profile and the
+  account are, so all three move in the switch's own commit. The toast's Undo
+  only ever restores
+  (`undoMayRestore`): nothing when the title is in the list, nothing on
+  another profile's list. It was the toggle called again, which re-sent a
+  failed removal and silently removed a title saved again by hand.
+- Escape closes the add-to-list sheet before any player: the sheet is
+  `z-[70]` and the player in the window `z-[60]`, siblings. A title page
+  goes Back on Escape only when nothing is over it (`pageCovered`: the
+  onboarding flow, a card's menu, any modal dialog, and a Radix dialog,
+  which sets no `aria-modal` and is seen by the page it hides). A player
+  that casts in the window or full screen is itself such a modal surface,
+  and under it Escape still goes Back, as before, unless something else is
+  over the page too; a cast minimised covers nothing. The trailer, the
+  player's menus and the party's leave question take the key first
+  (`lib/escapeLayers`); so does the recap, which stops the key itself.
+- The toasts' corner (bottom left) is reached by two things of the
+  player's. Its card while it casts minimized (`.player-cast-widget`) is at
+  the bottom right, the window's width on a phone (and above a party's
+  dock), and at the bottom left beside an open party rail from 640px to
+  about 750px; index.css publishes where it stands (`--castcard-bottom`,
+  `--castcard-h`, 64px for both of the player's cards, and, while a card
+  is on the page, `--castcard-top`), and the update notice and the toasts
+  stand 12px above `--castcard-top` at every width (`--corner-base`, by
+  `html:has(.player-cast-widget)`). With a party's rail open, from 640px,
+  the notice and the toasts end 16px left of the rail (narrower there, so
+  they wrap; the notice measures its own height). In the window the
+  player's play, skip and mute are in the corner, and a toast goes to the
+  row above the timeline's lane (`--player-timeline-top` + 88px, the
+  player's own `.player-lane-upper`). `scripts/verify-mobile-layout.mjs`
+  checks both against the built stylesheet, the card's classes read from
+  the player: a toast and the notice clear of the card, alone, with the
+  dock at phone widths and beside the rail, and the card's buttons still
+  reachable; with the rail open, with and without the card, the two clear
+  of the rail and their buttons reachable. The card's height against
+  `--castcard-h` is checked in `scripts/verify-player-lane.mjs`. A toast in the window can lie over the
+  party's chat ticker for its few seconds; the renders put the card's
+  markup on a page, and no real cast session was rendered.
+- A failure is said in the app's own words, chosen by its kind, never the
+  server's or the browser's text (`lib/failureWords`: lib/api's
+  `NetworkError` for a request that got no answer, `APIError`'s status and
+  `error.reason`; an abort says nothing). "Just now" is said only of a 5xx,
+  a lost connection and the app's own failure; a 404 says the same whether
+  or not the thing exists. The server's text is for the Admin page only, as
+  a secondary line (`serverSaidForAdmin`); what is not yet on the helper
+  still shows it: on the Admin page its panel loads (the update status
+  among them), the update trigger, the AI providers' test, the stream
+  diagnosis and the referral question's save as their only line, the
+  download clients' connection test after "Failed:", and the manual match
+  dialog after its own sentence (known gap). The browser's own alert,
+  confirm and prompt boxes are not used: `noNativeDialogs.test.ts` reads
+  every source file with a scanner that blanks comments only (it knows
+  strings, template literals, regular expressions and both comment kinds;
+  a test compares what it blanks with TypeScript's own comment ranges over
+  every source file, so that holds for today's sources), with an
+  allowlist of exempt files, empty since the Admin page moved off them. It matches written forms, so it does
+  not see a box reached by another route: an alias of `window` or of the
+  function, a computed key or `Reflect.get`, a cast whose type has
+  parentheses, or a name built at run time; JSX text holding `//` or `/*`
+  added later would hide code from it, and fail the TypeScript comparison.
+  The app's own question (`ConfirmDialog`, one state in App) is cleared by
+  a sign-out, an expiry and a profile switch. A title page whose title
+  answers 404 is left (the step Back takes) and "This title is not
+  available." is said where the viewer lands; a 404 that lands while a
+  switch attempt is out is dropped, and the title is read again when the
+  attempt ends (`titleReadDroppedRef`, set only while an attempt is out);
+  one that lands after an attempt that started since its read has ended is
+  dropped and read again at once. So one that changes nothing still
+  leaves. A party join that did not happen, at App's entry points (the
+  bell, Tonight's live strip, the calendar, a `/p/` or `/r/` link), is said by the reason the
+  party hook gives beside its words (`joinRefusalWords`), never by its
+  words; "just now" only for a 5xx reason, and a reason not listed gets
+  the general sentence. Together shows the hook's own `error`, which is
+  the app's sentences, not the server's.
+- Pinned by `AuthView.test.tsx`, `Toast.test.tsx`, `lib/libraryUndo.test.ts`,
+  `lib/devicePairing.test.ts`, `App.cardMenu.test.tsx` (a stub that holds
+  and fails library writes), `App.profileSwitch.test.tsx` (a removal's toast
+  and a refusal across a switch, every commit sampled; a queued Undo sent
+  after one, taken or refused, and not sent after a sign-out; a title both
+  profiles have, with the Parent's removal out across a switch; a title
+  the Kid's stored copy holds and its list leaves out, with the Parent's
+  save out across a switch; a queue that ends failed across a switch, its
+  read of the Parent's list not asked for, and one whose read is already
+  out at the switch, its answer kept off the Kid's) and
+  `App.searchRequest.test.tsx` (a sign-out, an expiry, the TV intent).
+- Known gaps: the owner half of `undoMayRestore` is pinned at the function
+  only (once toasts go at a switch no press reaches it in the app); a
+  queued write whose turn comes after a switch to a restricted profile is
+  refused and lost with nothing said, so a parent who removed a title on a
+  slow network, pressed Undo and switched to a kid's profile before the
+  removal was answered keeps the removal, while the parent's list as this
+  browser stored it at the switch holds the Undo's save, so a return to the
+  parent shows the title saved until that profile's list is read, which is
+  at once on the switch back (the same
+  class as the progress writes a switch refuses, see Profile lock); the
+  read at the end of a failed queue replaces the whole list, so if the
+  server answered it before another title's save landed, and that save's
+  mark is cleared before the answer arrives, that title leaves the screen
+  until the next read (a suspicion from reading, not observed; the startup
+  and switch reconcile has the same race); when the read at the end of a
+  failed queue fails too, the
+  screen keeps what the queue's last answer left on it until the next
+  library read; when a removal and its Undo are both refused, the read
+  puts the title back and the Undo's "Couldn't put … back" is still said;
+  the layout-effect mirrors (`buildCardMenuRef`, `restoreToLibRef`, and
+  the write owner `libraryWriteOwnerRef`) have no deterministic test: a
+  press from a MutationObserver as a card is first drawn came after React
+  had run the passive effects, so it passed with the mirror made passive,
+  and every test passes with the write owner made passive too; a password
+  manager's handling of the two forms (one password input whose
+  `autocomplete` switches) was not tested.
+
+### Admin page dialogs and the restore (web app)
+
+Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
+`adminFailure.ts`, `restoreOutcome.ts`, `RestoreOutcomeAlert.tsx`) and
+`components/settings/ConfirmDialog.tsx`.
+
+- No native alert, confirm or prompt (the app-wide guard's allowlist is
+  empty). Every confirmation is `ConfirmDialog` through
+  `useConfirmedAction`: one request per question; the dialog stays up while
+  it is out, and after `WAY_OUT_AFTER_MS` (10 s) offers a way out that
+  closes it and sends or aborts nothing, the panel then saying what is
+  still out and, when it lands, what came of it. While a request of a kind
+  is out no new question of that kind is asked (delete library, delete room,
+  purge, deny and stop stream: the opener is `aria-disabled` and described
+  by the waiting line; the restore button is `disabled`, the retype's
+  buttons and a user's menu `aria-disabled`, with no description). A refusal is said in
+  the dialog; a 404 closes it, reads the list again and says the thing was
+  already gone. A role question keeps the role it was asked about and sends
+  nothing if the row has changed since; a role change that may have
+  happened (5xx, no answer) reads the users again before saying so.
+  Approve and deny keep the ids that are out in a set, so one row's answer
+  never unlocks another row still out: the server's `Approve` checks the
+  status and then writes it with nothing atomic between.
+- The dialogs' and the actions' failures are said by kind through
+  `adminFailure` over `lib/failureWords`, with the server's text as a
+  capped second line (`serverSaidForAdmin`); a write that got no answer is
+  said to have maybe happened. (The panel loads, two actions (the update
+  trigger and the referral question's save) and two tests still show the
+  server's text: see the failure-words bullet above.)
+- A restore runs on its request's context on the server
+  (`internal/api/admin_backup.go`), so a reload, a closed tab or a lost
+  connection stops `pg_restore` part way and can leave the database empty.
+  The confirm says so before anything is sent. While a restore request is
+  out the page holds the browser's leave-this-page prompt
+  (`holdPageForRestore`: `preventDefault()` and a truthy `returnValue`,
+  for current browsers and for Chrome and Edge before 119), released in
+  the request's `finally`, whatever the Admin page does meanwhile. The
+  outcome goes to a module store keyed by the account id from before the
+  restore; the backup panel says it, or `RestoreOutcomeAlert` (mounted by
+  App for `adminUI && user`) does when no backup panel is mounted as it
+  lands (another Admin section, or another page).
+- Known gaps: the server-side hazard itself is unfixed (a restore should
+  outlive its request); the outcome is memory only (a reload loses it) and
+  keyed by the pre-restore account id (after a restore from another
+  install's backup the admin may not be told); the leave-page prompt was
+  seen in no real browser; an answer that lands after its section was left
+  is said nowhere, except a restore's outcome and the AI settings' restart
+  notice; a dialog taller than the window keeps its focused button in view
+  and lets the title scroll away.
 
 ### Nullable database columns
 

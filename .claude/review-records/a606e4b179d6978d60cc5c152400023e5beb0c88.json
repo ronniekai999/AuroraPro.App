@@ -1,0 +1,10 @@
+{
+  "sha": "a606e4b179d6978d60cc5c152400023e5beb0c88",
+  "verdict": "lows-only",
+  "summary": "Cards and rails (A3), two rounds. Round 1 fix-first: progress bar scale (fraction drawn as percent, test pinned the bug), action menu missing on My Library, Search and Collections, Watch together started a show's party with no episode, 36px touch targets with the verifier floor lowered. Round 2 lows-only at 4c6853a: one medium open (menu and card Play can resume different episodes on the My Library Continue Watching grid) and lows L-A to L-D, all sent to the builder for the next milestone. Applied by cherry-pick without the unreviewed title page and profiles; cards-owned files byte-identical to the reviewed head.",
+  "reviewer": "fresh-context-agent-a9a44094",
+  "findings": "9",
+  "diff_digest": "65f185c0bea409a237c03978b7bbfac8a7461439390ebd8fcee7b8eb4de8671e",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-11T23:25:24Z"
+}

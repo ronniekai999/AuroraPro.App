@@ -1,0 +1,10 @@
+{
+  "sha": "edbeb63cf7fc09fb481372ce8fe7e15f49b4ba68",
+  "verdict": "lows-only",
+  "summary": "Search and requests follow-ups: Escape closes the add-to-list sheet before a minimised player and hands the focus back; no failure shown over an emptied search field; the requests explanation announced where it is drawn. Checked lows-only by the search reviewer. One low queued: the sheet also wins Escape over a full player opened over it.",
+  "reviewer": "fresh-context-agent-a27d5c3e",
+  "findings": "1",
+  "diff_digest": "cd4f59059ef56d4abaa4e56a56974bc6ffca541adb0cd7344529ad0598b027ef",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T01:52:51Z"
+}

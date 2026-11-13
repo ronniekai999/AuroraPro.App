@@ -7,11 +7,14 @@
 // the hero and meaningless anywhere else, so extending it would have meant bolting
 // a second, unrelated model into it.
 //
-// WHAT IT EXISTS FOR. The vibe search bar's placeholder sat at 3.18-3.53:1 — under
-// the 4.5 floor — for THREE PHASES, and the on-art audit was structurally
-// incapable of seeing it: the bar is not in HeroSection. A human reviewer found it
-// by hand in Phase 10. Every other panel-and-glass surface in the app is still in
-// that position, and this closes the class rather than the instance.
+// WHAT IT EXISTS FOR. The "describe a vibe" search bar that used to sit on Home
+// had a placeholder at 3.18-3.53:1 — under the 4.5 floor — for THREE PHASES, and
+// the on-art audit was structurally incapable of seeing it: the bar was not in
+// HeroSection. A human reviewer found it by hand in Phase 10. Every other
+// panel-and-glass surface in the app was in that position, and this closes the
+// class rather than the instance. That bar has since been folded into search;
+// the fields a description is typed into now (the top bar's, and the search
+// page's own on a phone) are measured below in its place.
 //
 // THE MODEL. Text on glass has a knowable backdrop, unlike text on artwork: an
 // opaque page ink, then one or more translucent panel fills, then the text's own
@@ -168,6 +171,22 @@ const lineAt = (src, i) => src.slice(0, i).split('\n').length
 // (`w-1/7`) or a line-height (`text-sm/13`). The `opacity-N` family is checked
 // the same way, with `opacity-0` as the sibling that must compile. Comments are
 // skipped: a class in a comment styles nothing.
+//
+// BRACKETED MODIFIERS ARE CHECKED TOO (`X/[0.97]`, `X/[38%]`). On a literal
+// colour they always compile, which is why this check first looked only at
+// bare `/N`. On a colour the theme maps to a CSS variable they never do: the
+// neutral system's keys (surface-*, line*, ink*, action*, ok, warn, danger*)
+// are plain `var(--token)` strings, Tailwind cannot put an alpha on one, and it
+// emits NO rule for any `/<alpha>` form of them. `bg-surface-raised/[0.97]`
+// shipped exactly that way: the phone menu sheet had no background at all.
+//
+// So two things hold a token colour to "no modifier", and either alone fails
+// the run with the file and line:
+//   - the oracle, now asked about every `/…` modifier, numeric or bracketed;
+//   - a direct rule (`tokenColourModifiers`): any class whose colour is one
+//     the config maps to `var(--…)` and which carries a modifier. It reads the
+//     names from tailwind.config.js rather than restating them, and does not
+//     depend on what Tailwind happens to emit for such a class.
 
 const twConfig = loadConfig(path.join(APP_DIR, 'tailwind.config.js'))
 
@@ -218,12 +237,47 @@ function classesIn(src, keep) {
   return placed.sort((a, b) => a.index - b.index)
 }
 
+// `X/N` or `X/[…]`: a modifier after the LAST slash, numeric or bracketed.
+const MODIFIER = /^(.+)\/(\d+|\[[^\]/\s]+\])$/
+
+/** The theme colours the config maps to a bare `var(--token)`, as the names a
+ *  class would carry: `surface-raised-2`, `line`, `ink-3`, `action-on`… A
+ *  nested key named DEFAULT is the group's own name. */
+function tokenColourNames() {
+  const names = []
+  const walk = (obj, prefix) => {
+    for (const [k, v] of Object.entries(obj)) {
+      const name = k === 'DEFAULT' ? prefix : (prefix ? `${prefix}-${k}` : k)
+      if (typeof v === 'string') { if (/^var\(--[\w-]+\)$/.test(v.trim())) names.push(name) }
+      else if (v && typeof v === 'object') walk(v, name)
+    }
+  }
+  walk(twConfig.theme?.extend?.colors ?? {}, '')
+  return names
+}
+const TOKEN_COLOURS = tokenColourNames()
+if (TOKEN_COLOURS.length < 10) throw new Error(`audit: only ${TOKEN_COLOURS.length} theme colours map to var(--token) in tailwind.config.js; the neutral system should — the audit is out of date, not passing`)
+// Longest name first, so `line-strong` is not read as `line` followed by junk.
+const TOKEN_COLOUR_MODIFIER = new RegExp(
+  String.raw`^(?:[^\s:]+:)*!?-?[a-z][a-z-]*-(?:${[...TOKEN_COLOURS].sort((a, b) => b.length - a.length).join('|')})\/.+$`)
+
+/** Every class in `texts` that puts a modifier on a token-mapped colour, on
+ *  any utility prefix and under any variant, as { where, line, token }. */
+function tokenColourModifiers(texts) {
+  const uses = []
+  for (const { where, text } of texts) {
+    for (const { token, index } of classesIn(text, t => TOKEN_COLOUR_MODIFIER.test(t)))
+      uses.push({ where, line: lineAt(text, index), token })
+  }
+  return uses
+}
+
 /** Every dead modifier in `texts` ({ where, text } pairs), as { where, line, token }. */
 async function deadModifiers(texts) {
   const uses = []
   for (const { where, text } of texts) {
-    for (const { token, index } of classesIn(text, t => /\/\d+$/.test(t) || OPACITY_UTILITY.test(t))) {
-      const mod = token.match(/^(.+)\/(\d+)$/)
+    for (const { token, index } of classesIn(text, t => MODIFIER.test(t) || OPACITY_UTILITY.test(t))) {
+      const mod = token.match(MODIFIER)
       const op = token.match(OPACITY_UTILITY)
       if (mod) uses.push({ where, line: lineAt(text, index), token, base: mod[1] })
       else if (op) uses.push({ where, line: lineAt(text, index), token, base: `${op[1]}0` })
@@ -238,7 +292,9 @@ async function deadModifiers(texts) {
 // If an upgrade starts compiling one of the DEAD probes (Tailwind 4 accepts any
 // number), this fails and says so instead of reporting on a changed premise.
 const MOD_PROBE = {
-  dead: ['bg-[#0a0a0f]/97', 'hover:text-white/38', 'bg-purple-500/12', 'w-1/7', 'opacity-97'],
+  dead: ['bg-[#0a0a0f]/97', 'hover:text-white/38', 'bg-purple-500/12', 'w-1/7', 'opacity-97',
+    // Token-mapped colours: dead with ANY modifier, numeric or bracketed.
+    'bg-surface-raised/[0.97]', 'bg-surface-page/85', 'text-ink-2/50', 'md:hover:border-line-strong/[0.5]', 'ring-action/[38%]'],
   live: ['bg-[#0a0a0f]/95', 'bg-[#0a0a0f]/[0.97]', 'hover:text-white/40', 'w-1/2', 'text-sm/6', 'opacity-95', 'text-white/[38%]'],
   ignored: ['/v2/assets/12', '2026-10/25', 'a/b/40'],
   // Shapes a whitespace split got wrong, each holding one dead class.
@@ -258,11 +314,31 @@ let staticFails = 0
     console.log(`  *** known-answer probe: expected exactly [${want}] dead, got [${got}] — the oracle or its premise has changed`)
     staticFails++
   }
+  // The direct rule's own known answers: every token-colour class in the
+  // probe that carries a modifier, and none of the others (a literal colour
+  // with a modifier, a token colour without one, a path).
+  const TOKEN_PROBE = {
+    flagged: ['bg-surface-raised/[0.97]', 'bg-surface-page/85', 'text-ink-2/50', 'md:hover:border-line-strong/[0.5]', 'ring-action/[38%]',
+      'from-surface-raised-2/40', 'placeholder:text-ink-3/70', '!bg-danger/20', 'text-ok/90', 'border-warn/[0.3]', 'ring-offset-line/50'],
+    clean: ['bg-surface-raised', 'text-ink-2', 'border-line-strong', 'bg-white/[0.08]', 'bg-[#0a0a0f]/95', 'text-white/50', 'src/lib/ink/2', 'bg-action-soft'],
+  }
+  const tokenProbe = tokenColourModifiers([{ where: 'probe', text: [...TOKEN_PROBE.flagged, ...TOKEN_PROBE.clean].join(' ') }])
+    .map(u => u.token).sort().join(' ')
+  if (tokenProbe !== [...TOKEN_PROBE.flagged].sort().join(' ')) {
+    console.log(`  *** known-answer probe (token colours): expected exactly [${[...TOKEN_PROBE.flagged].sort().join(' ')}], got [${tokenProbe}]`)
+    staticFails++
+  }
   const files = uiSources()
-  const dead = await deadModifiers(files.map(f => ({ where: f, text: code(f) })))
-  for (const u of dead) console.log(`  ${u.where}:${u.line}  ${u.token}  — emits no CSS; use an arbitrary value (/[0.NN]) or a step on the scale`)
-  console.log(`  ${dead.length} dead modifier(s) across ${files.length} files.\n`)
-  staticFails += dead.length
+  const texts = files.map(f => ({ where: f, text: code(f) }))
+  const dead = await deadModifiers(texts)
+  const onToken = tokenColourModifiers(texts)
+  const key = u => `${u.where}:${u.line}:${u.token}`
+  const tokenKeys = new Set(onToken.map(key))
+  for (const u of onToken) console.log(`  ${u.where}:${u.line}  ${u.token}  — a token-mapped colour takes no opacity modifier (Tailwind emits no rule); use the plain utility, or bg-[var(--token)] / a literal with the alpha you mean`)
+  for (const u of dead) if (!tokenKeys.has(key(u))) console.log(`  ${u.where}:${u.line}  ${u.token}  — emits no CSS; use an arbitrary value (/[0.NN]) or a step on the scale`)
+  const total = new Set([...dead, ...onToken].map(key)).size
+  console.log(`  ${total} dead modifier(s) across ${files.length} files (${onToken.length} on token-mapped colours: ${TOKEN_COLOURS.join(', ')}).\n`)
+  staticFails += total
 }
 
 /** rgba()/rgb()/#hex -> { rgb: [0..1 x3], a }. */
@@ -275,13 +351,29 @@ function parseColor(str) {
 }
 
 /** A declaration's value from a named CSS rule, or die loudly. */
+/** Substitute every `var(--token)` in a declaration value with the token's own
+ *  declared value, recursively. The surfaces are written as tokens
+ *  (`background: var(--surface-raised)`), and a model that could not follow one
+ *  would have to repeat the colour here as a literal, which is the stale-copy
+ *  failure this file's header exists to prevent. Dies if a token is not
+ *  declared EXACTLY once in index.css (two declarations would mean a scoped
+ *  override this audit does not model) or has a fallback argument. */
+function resolveVars(value, seen = []) {
+  return value.replace(/var\(\s*(--[\w-]+)\s*(,[^)]*)?\)/g, (_, name, fallback) => {
+    if (fallback) throw new Error(`audit: var(${name}${fallback}) carries a fallback; this audit reads the token only — model it`)
+    if (seen.includes(name)) throw new Error(`audit: ${name} refers to itself (${[...seen, name].join(' -> ')})`)
+    const all = [...css.matchAll(new RegExp(String.raw`(?:^|[\n;{])\s*${name}\s*:\s*([^;]+);`, 'g'))]
+    if (all.length !== 1) throw new Error(`audit: ${name} is declared ${all.length} times in ${CSS}; this audit reads exactly one — the audit is out of date, not passing`)
+    return resolveVars(all[0][1].trim(), [...seen, name])
+  })
+}
 function cssValue(selector, prop) {
   const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const rule = css.match(new RegExp(String.raw`(?:^|\n)\s*${esc}\s*\{([\s\S]*?)\n\s*\}`))
   if (!rule) throw new Error(`audit: rule ${selector} not found in ${CSS} — the audit is out of date, not passing`)
   const m = rule[1].match(new RegExp(String.raw`(?:^|;|\{)\s*${prop}\s*:\s*([\s\S]*?);`))
   if (!m) throw new Error(`audit: ${selector} no longer sets ${prop} — the audit is out of date, not passing`)
-  return m[1].replace(/\s+/g, ' ').trim()
+  return resolveVars(m[1].replace(/\s+/g, ' ').trim())
 }
 
 /** EVERY background layer's representative colour, bottom-layer LAST.
@@ -424,48 +516,126 @@ function cssPx(selector) {
 function rootToken(name) {
   const m = css.match(new RegExp(String.raw`\n\s*${name.replace(/[-]/g, '\\-')}\s*:\s*([^;]+);`))
   if (!m) throw new Error(`audit: ${name} is not defined in ${CSS} — the audit is out of date, not passing`)
-  return parseColor(m[1])
+  return parseColor(resolveVars(m[1].trim()))
 }
 
-/** The text colour an element's OWN tag sets: `text-white/NN`, or a token via
- *  `text-[color:var(--x)]`. Returns { rgb, a }. Dies when the tag sets neither,
- *  rather than guessing an inherited colour. */
+/** The text colour an element's OWN tag sets: `text-white/NN`, a token via
+ *  `text-[color:var(--x)]`, or a neutral-system utility (`text-ink-2`),
+ *  followed through tailwind.config.js to its token as `twFill` follows a
+ *  fill. Returns { rgb, a }. Dies when the tag sets none, or more than one of
+ *  the last kind, rather than guessing an inherited colour. */
 function twText(file, anchor) {
   const tag = tagOf(file, anchor)
   const tok = tag.match(/(?:^|[\s"'`{])text-\[color:var\((--[\w-]+)\)\]/)
   if (tok) return rootToken(tok[1])
   const w = tag.match(/(?:^|[\s"'`{])text-white\/(\d+)/)
   if (w) return { rgb: W, a: Number(w[1]) / 100 }
-  throw new Error(`audit: no text-white/N or text-[color:var(--…)] on the element anchored by "${anchor}" in ${file}`)
+  const ink = [...tag.matchAll(/(?:^|[\s"'`{])text-ink(?:-([23]))?(?=[\s"'`}])/g)]
+  if (ink.length === 1) {
+    const mapped = twConfig.theme?.extend?.colors?.ink?.[ink[0][1] ?? 'DEFAULT']
+    const v = typeof mapped === 'string' && mapped.match(/^var\((--[\w-]+)\)$/)
+    if (!v) throw new Error(`audit: tailwind maps text-ink${ink[0][1] ? `-${ink[0][1]}` : ''} to ${mapped}, not a var(--token) — the audit is out of date, not passing`)
+    return rootToken(v[1])
+  }
+  throw new Error(`audit: no text-white/N, text-[color:var(--…)] or single text-ink utility on the element anchored by "${anchor}" in ${file}`)
 }
 
-/** An arbitrary-colour fill on an element's own tag: `bg-[#rrggbb]/NN`. */
+/** The fill on an element's own tag, in one of the three forms the app writes
+ *  one in: `bg-[#rrggbb]/NN`; `bg-[var(--token)]`, read from the token
+ *  (which may itself be an rgba()); or a neutral-system utility
+ *  (`bg-surface-raised-2`), followed through tailwind.config.js to its token.
+ *  Exactly one fill may be present: two would leave CSS order, not this
+ *  reader, deciding which paints. */
 function twFill(file, anchor) {
-  const m = tagOf(file, anchor).match(/(?:^|[\s"'`{])bg-\[(#[0-9a-fA-F]{3,8})\]\/(\d+)/)
-  if (!m) throw new Error(`audit: no bg-[#…]/N on the element anchored by "${anchor}" in ${file}`)
-  return { rgb: hex(m[1]), a: Number(m[2]) / 100 }
+  const tag = tagOf(file, anchor)
+  const found = []
+  for (const m of tag.matchAll(/(?:^|[\s"'`{])bg-\[(#[0-9a-fA-F]{3,8})\]\/(\d+)(?=[\s"'`}])/g))
+    found.push({ rgb: hex(m[1]), a: Number(m[2]) / 100 })
+  for (const m of tag.matchAll(/(?:^|[\s"'`{])bg-\[var\((--[\w-]+)\)\](?=[\s"'`}])/g))
+    found.push(rootToken(m[1]))
+  for (const m of tag.matchAll(/(?:^|[\s"'`{])bg-(surface-(?:page|raised-2|raised))(?=[\s"'`}])/g)) {
+    const [group, ...rest] = m[1].split('-')
+    const mapped = twConfig.theme?.extend?.colors?.[group]?.[rest.join('-')]
+    const v = typeof mapped === 'string' && mapped.match(/^var\((--[\w-]+)\)$/)
+    if (!v) throw new Error(`audit: tailwind maps ${m[1]} to ${mapped}, not a var(--token) — the audit is out of date, not passing`)
+    found.push(rootToken(v[1]))
+  }
+  if (found.length !== 1) throw new Error(`audit: the element anchored by "${anchor}" in ${file} carries ${found.length} fills this audit can read (bg-[#…]/N, bg-[var(--token)] or bg-surface-*); it needs exactly one`)
+  return found[0]
 }
 
-// The page ink, derived from the app root's own utility rather than from CSS:
-// `.aurora-bg` sets only the radial tint layers, and the opaque base is
-// `bg-[#050505]` on the root element in App.tsx. Reading the wrong one is how a
-// backdrop model ends up off by the whole base colour, so this dies if the
-// utility moves rather than defaulting.
+/** The onboarding flow's text field, read from the field: the tag that
+ *  holds the "Other" answer's placeholder must carry the class that makes it
+ *  one of the flow's fields, and no fill or placeholder colour of its own;
+ *  its fill is then that class's rule's when the rule sets one, and the
+ *  app's field rule's when it does not, composited on the flow's own ink;
+ *  and its placeholder is the app's one placeholder colour. A field that
+ *  gains a utility or a rule this cannot follow stops the audit instead of
+ *  passing on a colour the field no longer has. */
+function onboardingField() {
+  const tag = tagOf(ONB, 'A podcast, a forum')
+  if (!/(?:^|[\s"'`{])onboarding-field(?=[\s"'`}])/.test(tag))
+    throw new Error(`audit: the "Other" field in ${ONB} no longer carries onboarding-field — the audit is out of date, not passing`)
+  const own = tag.match(/(?:^|[\s"'`{])((?:[\w-]+:)*(?:bg-|placeholder:)[^\s"'`}]*)/)
+  if (own)
+    throw new Error(`audit: the "Other" field in ${ONB} sets ${own[1]} on its own tag; this probe reads its fill and placeholder from the stylesheet — the audit is out of date, not passing`)
+  const FIELD = 'input.onboarding-field:not([type="range"])'
+  const APP_FIELD = 'input:not([type="range"]), select, textarea'
+  const rule = ruleBody(FIELD)
+  if (/\.onboarding-field[^{]*::placeholder/.test(css))
+    throw new Error(`audit: ${CSS} now has a placeholder rule for .onboarding-field; this probe reads the app's — the audit is out of date, not passing`)
+  const sets = (body, prop) => new RegExp(String.raw`(?:^|;|\{)\s*${prop}\s*:`).test(body)
+  const from = sets(rule, 'background') ? [FIELD, 'background'] : sets(rule, 'background-color') ? [FIELD, 'background-color'] : [APP_FIELD, 'background']
+  const fill = cssColor(from[0], from[1])
+  return {
+    fill: over(fill.rgb, fill.a, ONB_INK),
+    placeholder: cssColor('input::placeholder, textarea::placeholder', 'color'),
+  }
+}
+
+/** A rule's declarations, as written. Dies when the rule is gone. */
+function ruleBody(selector) {
+  const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const rule = css.match(new RegExp(String.raw`(?:^|\n)\s*${esc}\s*\{([\s\S]*?)\n\s*\}`))
+  if (!rule) throw new Error(`audit: rule ${selector} not found in ${CSS} — the audit is out of date, not passing`)
+  return rule[1]
+}
+
+// The page ink, derived from the app root's own utility rather than assumed:
+// the root element in App.tsx carries `bg-surface-page`, which Tailwind maps
+// to the --surface-page token. Reading the wrong base is how a backdrop model
+// ends up off by the whole base colour, so this dies if the utility moves off
+// the root or stops meaning that token, rather than defaulting.
 const INK = (() => {
-  const m = read('src/App.tsx').match(/min-h-screen bg-\[(#[0-9a-fA-F]{3,8})\]/)
-  if (!m) throw new Error('audit: app root no longer carries min-h-screen bg-[#…] — the audit is out of date, not passing')
-  return hex(m[1])
+  if (!/min-h-screen bg-surface-page[\s"]/.test(read('src/App.tsx')))
+    throw new Error('audit: app root no longer carries min-h-screen bg-surface-page — the audit is out of date, not passing')
+  const mapped = twConfig.theme?.extend?.colors?.surface?.page
+  if (mapped !== 'var(--surface-page)')
+    throw new Error(`audit: tailwind maps surface-page to ${mapped}, not var(--surface-page) — the audit is out of date, not passing`)
+  return rootToken('--surface-page').rgb
 })()
 
 // Panel fills, each named by the rule that owns it.
-const CONVO = backgroundLayers(cssValue('.convo-search', 'background'))
 const NAVSEARCH = backgroundLayers(cssValue('.stage-navsearch', 'background'))
+// What the top bar's text can sit on. Unscrolled, the bar is over the page
+// itself. Scrolled, content passes under it and the [data-scrolled] fill is
+// all that stands between the text and that content: judged over a white
+// frame, the worst there is for light text. The bar must be a single flat
+// colour there, or this model is not the one to trust.
+const NAV_SCROLLED = (() => {
+  const layers = backgroundLayers(cssValue('.stage-topnav[data-scrolled]', 'background'))
+  if (layers.length !== 1 || layers[0].length !== 1) throw new Error('audit: .stage-topnav[data-scrolled] is no longer one flat fill — model it, do not pass')
+  return layers[0][0]
+})()
+const onNavBar = () => [INK, over(NAV_SCROLLED.rgb, NAV_SCROLLED.a, W)]
+const onNavField = () => onNavBar().flatMap(base =>
+  [...NAVSEARCH].reverse().reduce((bgs, stops) => bgs.flatMap(bg => stops.map(st => over(st.rgb, st.a, bg))), [base]))
 // The page itself (Stage refresh, RS). The home rails used to sit on a glass
 // shelf (`.rail-container`'s fill, read here as RAIL and measured by nothing);
-// the shelf is gone, so their header text sits on `.aurora-bg` — three radial
-// tints over its own #050505 base. backgroundLayers keeps every tint at its
-// full stop, i.e. the lightest point of each, which is the worst case for
-// light text.
+// the shelf is gone, so their header text sits on `.aurora-bg`, which is the
+// flat page colour. Read from the rule all the same: if it ever gains a
+// layer, backgroundLayers keeps each at its full stop, i.e. its lightest
+// point, which is the worst case for light text.
 const PAGE = backgroundLayers(cssValue('.aurora-bg', 'background'))
 
 /** Composite layered fills onto the ink and return EVERY backdrop the element can
@@ -493,31 +663,21 @@ const ONB = 'src/components/OnboardingFlow.tsx'
 const RAIL_TSX = 'src/components/MediaRail.tsx'
 
 // The onboarding overlay is `fixed inset-0` with its OWN opaque base, so its
-// text does not sit on the app ink at all. Derived from the overlay's utility
-// for the same reason INK is derived from the root's: measuring onboarding text
-// against the wrong base is off by the whole colour. Dies if the utility moves.
+// text sits on that and not on whatever the app shows behind it. The base is
+// the page's own colour, by the same utility the app root carries; it is
+// read from the overlay all the same, for the reason INK is read from the
+// root: measuring onboarding text against the wrong base is off by the whole
+// colour. Dies if the utility moves off the overlay.
 const ONB_INK = (() => {
-  const m = read(ONB).match(/fixed inset-0 z-\[80\][^"]*bg-\[(#[0-9a-fA-F]{3,8})\]/)
-  if (!m) throw new Error('audit: onboarding overlay no longer carries its own bg-[#…] base — the audit is out of date, not passing')
-  return hex(m[1])
+  if (!/fixed inset-0 z-\[80\][^"]*[\s"]bg-surface-page[\s"]/.test(read(ONB)))
+    throw new Error('audit: onboarding overlay no longer carries bg-surface-page — the audit is out of date, not passing')
+  return rootToken('--surface-page').rgb
 })()
 
-// The search palette (Stage refresh audit-gap fix). Its secondary text sat at
-// 2.59:1 and 3.77:1 for as long as the palette existed and this script passed,
-// because this script measures ONLY the surfaces listed in SURFACES below and
-// the palette was never listed — the same structural blind spot this file's
-// header describes for the on-art audit and the vibe bar. Modelled, bottom-up:
-// the page's `.aurora-bg` (its tints show through both translucent layers),
-// the full-viewport scrim, then the panel's own fill; the scrim and panel are
-// read from the component. NOT modelled: the two decorative blobs between the
-// scrim and the panel, and whatever view is on screen beneath the scrim (hero
-// art, a backdrop, video). The panel passes about 10% of the blobs, and the
-// scrim and panel together about 1.5% of the view beneath; at full strength
-// that costs the near-threshold text about 0.06 (6.45 → ~6.39).
-const PAL = 'src/components/SearchPalette.tsx'
-const PAL_SCRIM = [[twFill(PAL, 'aurora-glass-overlay')]]
-const PAL_PANEL = [[twFill(PAL, 'stage-palette relative')]]
-const onPalette = () => stack(PAL_PANEL, PAL_SCRIM, PAGE)
+// The search page. (A separate palette used to be modelled here: a scrim, an
+// opaque panel and eight kinds of text on it. It was folded into this page,
+// whose own text is measured below, on the page and on its raised boxes.)
+const SEARCH = 'src/components/SearchView.tsx'
 
 // ── 1. Faint white text, everywhere, against a computed floor ────────────────
 //
@@ -555,20 +715,18 @@ const onPalette = () => stack(PAL_PANEL, PAL_SCRIM, PAGE)
 // text-purple-200/40); alpha stacked by a parent's opacity-*; class names
 // built at runtime; fills lighter than the floor surfaces (/50 holds 4.5:1 up
 // to about white/0.10); and translucent overlays over video. The party rail
-// (rgba(12,10,20,0.4)) and the mini dock (rgba(8,6,14,0.5)) sit on the
-// picture: over a white frame, /50 text measures 1.7 and 2.1:1, and even
-// full white only 2.7 and 3.8:1. /50 needs fills of about 0.85 and 0.83
-// there, near the opaque 0.92 the Subtle glow setting already uses, which is
-// a design decision rather than a contrast fix.
+// and the mini dock, which sit on the picture, were such overlays (over a
+// white frame their faint text measured about 2:1); both are now opaque
+// raised surfaces, the same as the panels measured below.
 
 const FLOOR_SURFACES = {
-  'page ink #050505': [INK],
-  '.aurora-bg (page tints)': stack(PAGE),
+  'page ink --surface-page': [INK],
+  '.aurora-bg (the page)': stack(PAGE),
   '.glass-panel on the page': stack(backgroundLayers(cssValue('.glass-panel', 'background')), PAGE),
   '.glass-card on the page': stack(backgroundLayers(cssValue('.glass-card', 'background')), PAGE),
   '.glass-card:hover on the page': stack(backgroundLayers(cssValue('.glass-card:hover', 'background')), PAGE),
-  'panel ink --surface-1': [rootToken('--surface-1').rgb],
-  'raised panel --surface-2': [rootToken('--surface-2').rgb],
+  'raised --surface-raised': [rootToken('--surface-raised').rgb],
+  'raised-2 --surface-raised-2': [rootToken('--surface-raised-2').rgb],
 }
 const THEME = require('tailwindcss/resolveConfig')(twConfig).theme
 const OPACITY_STEPS = Object.keys(THEME.opacity).map(Number).sort((a, b) => a - b)
@@ -593,98 +751,13 @@ const EXEMPT = [
     why: 'the notification panel\'s icon-only close button' },
   { file: 'src/App.tsx', anchor: "stat.tone === 'idle' ? 'bg-white/[0.04] text-white/40'", kind: 'non-text',
     why: 'a server stat tile\'s icon in its idle tone; the label and value beside it are the text' },
-  { file: 'src/App.tsx', anchor: 'text-white/35 text-[10px]">ⓘ</span>', kind: 'non-text',
+  { file: 'src/App.tsx', anchor: 'text-white/35 text-xs">ⓘ</span>', kind: 'non-text',
     why: 'the glyph that marks a stat tile as having a hover hint' },
-  // ── companion, browse ──
-  { file: 'src/companion/JoinScreen.tsx', anchor: "'border-[var(--glow-border)] bg-white/[0.04] text-white/30',", kind: 'decorative',
-    why: 'an empty code cell, which shows only a "·" slot marker; the heading above says what to enter' },
-  { file: 'src/components/BrowseView.tsx', anchor: '<span className="text-white/30 mx-1.5">•</span>', kind: 'decorative',
-    why: 'the bullet between the page subtitle and its count' },
-  { file: 'src/components/CalendarView.tsx', anchor: '<span className="text-white/30 mx-1.5">•</span>', kind: 'decorative',
-    why: 'the bullet between the page subtitle and its count' },
-  { file: 'src/components/BugReportModal.tsx', anchor: 'className="text-white/40 hover:text-rose-300 transition-colors disabled:opacity-50 self-start"', kind: 'non-text',
-    why: 'the attachment\'s icon-only "×" remove button' },
-  { file: 'src/components/MediaCardCinema.tsx', anchor: 'aria-hidden="true" className="text-white/20">', kind: 'decorative',
-    why: 'the film glyph a card shows where its poster is missing; the title is on the card' },
-  { file: 'src/components/MembersView.tsx', anchor: '<Icon name="users" size={28} className="text-white/25 mx-auto" />', kind: 'decorative',
-    why: 'the illustration above the members list\'s error message' },
-  { file: 'src/components/OnboardingFlow.tsx', anchor: 'transition-colors placeholder:text-white/35 focus:border-[#a855f7]"', kind: 'large',
-    why: 'the "Type your name" instruction, set at clamp(2rem, 6vw, 3rem) bold, which the size test cannot read (raised from /15)' },
-  // ── party ──
-  { file: 'src/components/PartyInvite.tsx', anchor: 'rounded-lg p-1.5 text-white/40 transition-colors hover:bg-white/[0.06] hover:text-white"', kind: 'non-text',
-    why: 'the invite\'s icon-only close button' },
-  { file: 'src/components/PartyPanel.tsx', anchor: "className={speaking ? 'text-emerald-300' : 'text-white/40'}>", kind: 'non-text',
-    why: 'the microphone that marks a participant on voice, at rest (it turns green while they speak)' },
-  { file: 'src/components/PartyShareCardModal.tsx', anchor: 'className="text-white/40 hover:text-white/80 text-sm transition-colors"', kind: 'non-text',
-    why: 'the share card\'s icon-only "✕" close button' },
-  { file: 'src/components/ProfileSwitcher.tsx', anchor: 'strokeWidth="2.5" className="text-white/40" aria-hidden="true">', kind: 'non-text',
-    why: 'the chevron that shows the profile button opens a menu' },
-  // ── requests, search, top bar ──
-  { file: 'src/components/RequestsView.tsx', anchor: "r.media_type === 'tv' ? 'tv' : 'film'} size={20} className=\"text-white/25\" />", kind: 'decorative',
-    why: 'the glyph a search result shows where its poster is missing; the title and "TV"/"Movie" are beside it' },
-  { file: 'src/components/RequestsView.tsx', anchor: "req.media_type === 'tv' ? 'tv' : 'film'} size={22} className=\"text-white/25\" />", kind: 'decorative',
-    why: 'the same glyph on a request row without a poster' },
-  { file: 'src/components/RequestsView.tsx', anchor: '<Icon name="download" size={48} className="mx-auto text-white/20 mb-4" />', kind: 'decorative',
-    why: 'the illustration above the empty requests list\'s message' },
-  { file: 'src/components/RequestsView.tsx', anchor: '{req.username && <span className="text-white/25">·</span>}', kind: 'decorative',
-    why: 'the dot between a request\'s requester and its date' },
-  { file: 'src/components/RequestsView.tsx', anchor: 'className="w-9 h-9 rounded-[10px] grid place-items-center text-white/45 bg-white/[0.04]', kind: 'non-text',
-    why: 'a request\'s icon-only delete button' },
-  { file: 'src/components/SearchPalette.tsx', anchor: '<span className="text-white/20 mx-1" aria-hidden="true">·</span>', count: 2, kind: 'decorative',
-    why: 'the dots between the key legend\'s entries' },
-  { file: 'src/components/SearchView.tsx', anchor: '<Icon name="search" size={48} className="mx-auto text-white/20 mb-4" />', kind: 'decorative',
-    why: 'the illustration above "No results found"' },
-  { file: 'src/components/TopNav.tsx', anchor: '<Icon name="search" size={16} className="text-white/35 flex-none" />', kind: 'non-text',
-    why: 'the magnifier that marks the phone sheet\'s field as search' },
-  { file: 'src/components/TopNav.tsx', anchor: '<Icon name="search" size={15} className="text-white/35 flex-none" />', kind: 'non-text',
-    why: 'the magnifier that marks the top bar\'s field as search' },
-  // ── member pages, voice, the match tool ──
-  { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="user" size={28} className="text-white/25 mx-auto" />', kind: 'decorative',
-    why: 'the illustration above a member page\'s error message' },
-  { file: 'src/components/UserProfileView.tsx', anchor: '<span className="text-white/20">&middot;</span>', kind: 'decorative',
-    why: 'the dot between the follower and following counts' },
-  { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="globe" size={12} className="text-white/40" />', kind: 'decorative',
-    why: 'the globe on a social link chip, which names the network in text' },
-  { file: 'src/components/UserProfileView.tsx', anchor: '<Icon name="eye" size={14} className="text-white/25" />', kind: 'decorative',
-    why: 'the eye before the hidden-history message, which says it in words' },
-  { file: 'src/components/VoicePill.tsx', anchor: 'text-white/45 hover:text-red-300 hover:bg-red-500/15 transition-colors"', kind: 'non-text',
-    why: 'the voice pill\'s icon-only leave button' },
-  { file: 'src/components/admin/ManualMatchModal.tsx', anchor: '<Icon name="film" size={20} className="text-white/25" />', kind: 'decorative',
-    why: 'the glyph a match candidate shows where its poster is missing' },
-  // ── detail ──
-  { file: 'src/components/detail/DetailHero.tsx', anchor: '{i > 0 && <span className="text-white/45" aria-hidden="true">·</span>}', kind: 'decorative',
-    why: 'the dots between the hero\'s metadata items' },
-  { file: 'src/components/detail/DetailRail.tsx', anchor: "n <= shown ? 'text-yellow-400' : 'text-white/35 hover:text-white/50',", kind: 'non-text',
-    why: 'an unfilled rating star; each star is a "rate N stars" button (raised from /25, about 2:1)' },
-  // ── admin ──
-  { file: 'src/components/admin/AdminView.tsx', anchor: "req.media_type === 'tv' ? 'tv' : 'film'} size={16} className=\"text-white/25\" />", kind: 'decorative',
-    why: 'the glyph a held request shows where its poster is missing' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: '{isCastRow && <span className="text-white/25 mr-1" aria-hidden="true">└</span>}', kind: 'decorative',
-    why: 'the tree corner on a cast receiver\'s row; an sr-only line says what the row is' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: 'className="text-white/40 hover:text-white" aria-label="Close">', kind: 'non-text',
-    why: 'the session diagnostic\'s icon-only close button' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: "${hostedChat ? 'text-white/30' : 'text-white/70'}", kind: 'disabled',
-    why: 'the Structured outputs label while its checkbox is disabled (hosted providers always use it)' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: 'className="p-1.5 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/[0.06] disabled:opacity-50', kind: 'non-text',
-    why: 'a user row\'s icon-only actions button' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: "color: empty ? 'text-white/40' : behind ? 'text-amber-400' : 'text-emerald-400',", kind: 'non-text',
-    why: 'the Skip Analysis tile\'s state icon with nothing analysed yet; the figures beside it are the text' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: '{hint && <span className="text-white/35">ⓘ</span>}', kind: 'non-text',
-    why: 'the glyph that marks a dashboard tile as having a hover hint' },
-  { file: 'src/components/admin/AdminView.tsx', anchor: 'mb-1 cursor-help">Memory <span className="text-white/35">ⓘ</span>', kind: 'non-text',
-    why: 'the same glyph on the Memory figure' },
+  // ── search ──
+  // (The requests page had five lines here: a glyph where a poster was
+  // missing, twice; an illustration; a dot; an icon-only delete. The page
+  // was rebuilt on the tokens and draws none of them.)
   // ── index.css ──
-  { file: 'src/index.css', anchor: '.media-card-cinema .card-overlay .co-meta .sep { color: rgba(255, 255, 255, 0.45); }', kind: 'non-text',
-    why: 'the dots between a card\'s meta items, set at 0.45 for 3:1 over the scrim on a bright poster (see the rule)' },
-  // ── deferred: the player, which a separate change was working in ──
-  { file: 'src/components/VideoPlayer.tsx', anchor: '<span className="text-white/40 text-xs">{a.codec}', kind: 'deferred',
-    why: 'an audio track\'s codec and channels in the track menu' },
-  { file: 'src/components/VideoPlayer.tsx', anchor: '{!loaded && <p className="text-white/40 text-sm">Loading…</p>}', kind: 'deferred',
-    why: 'the skip-marker editor\'s loading line' },
-  { file: 'src/components/VideoPlayer.tsx', anchor: '<span className="text-white/40 text-xs font-mono">', kind: 'deferred',
-    why: 'a skip marker\'s current value in the editor' },
-  { file: 'src/components/VideoPlayer.tsx', anchor: '<p className="text-white/30 text-[11px] mt-2 leading-snug">', kind: 'deferred',
-    why: 'the skip-marker editor\'s hint' },
 ]
 
 const EXEMPT_KINDS = { decorative: null, placeholder: null, disabled: null, deferred: null, 'non-text': 'large', large: 'large' }
@@ -849,42 +922,108 @@ const SURFACES = [
   // ── The referral step. A one-shot question with a Skip, so every control
   //    here has to be readable the FIRST time or the answer is noise. ──
   {
-    what: 'referral step body copy', where: `${ONB} (referral step)`,
-    color: W, alpha: () => twAlpha(ONB, 'It helps us know where to show up', 'text-white'),
-    px: 15.2, on: () => [ONB_INK],
+    what: 'referral step body copy (the question)', where: `${ONB} (referral step)`,
+    color: () => twText(ONB, 'data-referral-ask').rgb,
+    alpha: () => twText(ONB, 'data-referral-ask').a,
+    px: 17, on: () => [ONB_INK],
   },
   {
     // The plan's requirement in one assertion: Skip must not be a
     // low-contrast afterthought sitting next to a full-strength Continue.
     what: 'referral step "Skip this question"', where: `${ONB} (referral step)`,
-    color: W, alpha: () => twAlpha(ONB, 'Skip this question', 'text-white'),
+    color: () => twText(ONB, 'Skip this question').rgb,
+    alpha: () => twText(ONB, 'Skip this question').a,
     px: 14, on: () => [ONB_INK],
   },
   {
     what: 'referral "Other" field label', where: `${ONB} (referral step)`,
-    color: W, alpha: () => twAlpha(ONB, 'Where, specifically?', 'text-white'),
-    px: 12.8, on: () => [ONB_INK],
+    color: () => twText(ONB, 'data-referral-detail-label').rgb,
+    alpha: () => twText(ONB, 'data-referral-detail-label').a,
+    px: 13, on: () => [ONB_INK],
   },
   {
-    // On the field's own translucent fill, not bare ink — one composite deeper
-    // than it looks, which is the case eyeballing gets wrong.
+    // On the field's own fill, not the page, and read from the field
+    // itself: see onboardingField.
     what: 'referral "Other" field placeholder', where: `${ONB} (referral step)`,
-    color: W, alpha: () => twAlpha(ONB, 'A podcast, a forum', 'placeholder:text-white'),
-    px: 14,
-    on: () => [over(W, twAlpha(ONB, 'A podcast, a forum', 'bg-white'), ONB_INK)],
+    color: () => onboardingField().placeholder.rgb,
+    alpha: () => onboardingField().placeholder.a,
+    px: 17,
+    on: () => [onboardingField().fill],
   },
-  // ── The vibe search bar. THE case this script exists for. ──
+  // ── The search page's own field, where a phone types a title or a
+  //    description (the top bar has no field there). The text this script
+  //    was first written for was a search placeholder, so both of today's
+  //    are measured: this one on the field's own fill, read from its tag. ──
   {
-    what: 'vibe bar placeholder', where: `${APP} (.convo-search input)`,
-    color: W, alpha: () => twAlpha(APP, 'placeholder:text-white', 'placeholder:text-white'),
-    px: 14, on: () => stack(CONVO),
+    what: 'search page field placeholder', where: `${SEARCH} (page field)`,
+    color: () => cssColor('input::placeholder, textarea::placeholder', 'color').rgb,
+    alpha: () => cssColor('input::placeholder, textarea::placeholder', 'color').a,
+    px: 16,
+    on: () => { const f = twFill(SEARCH, 'role="search"'); return [over(f.rgb, f.a, INK)] },
   },
   {
-    what: 'vibe bar "Clear"', where: `${APP} (.convo-search)`,
-    color: W, alpha: () => twAlpha(APP, 'aria-label="Clear search"', 'text-white'),
-    px: 12, on: () => stack(CONVO),
+    // The line that offers the search by description, beside its button.
+    what: 'search page "These match the title."', where: `${SEARCH} (describe offer)`,
+    color: () => twText(SEARCH, 'data-search-describe').rgb,
+    alpha: () => twText(SEARCH, 'data-search-describe').a,
+    px: 14, on: () => [INK],
   },
-  // ── The nav search pill. Same shape, different fill. ──
+  // ── The empty search: "Not in your library yet", its opening sentence,
+  //    and the titles that can be requested (SearchRequest), whose rows sit
+  //    on a raised box. It was one hint line ("If that describes what you
+  //    want to watch…"); every text colour of what replaced it is here. ──
+  {
+    what: 'empty search: its opening sentence', where: `${CSS} (.search-none-lead)`,
+    color: () => cssColor('.search-none-lead', 'color').rgb,
+    alpha: () => cssColor('.search-none-lead', 'color').a,
+    px: 15, on: () => [INK],
+  },
+  {
+    what: 'empty search: the line above the list (looking, nothing found)', where: `${CSS} (.search-req-note)`,
+    color: () => cssColor('.search-req-note', 'color').rgb,
+    alpha: () => cssColor('.search-req-note', 'color').a,
+    px: 14, on: () => [INK],
+  },
+  {
+    what: 'empty search: the line under the list', where: `${CSS} (.search-req-foot)`,
+    color: () => cssColor('.search-req-foot', 'color').rgb,
+    alpha: () => cssColor('.search-req-foot', 'color').a,
+    px: 13, on: () => [INK],
+  },
+  ...['.search-req-facts', '.search-req-overview', '.search-req-state', '.search-req-state[data-tone="ok"]', '.search-req-refused', '.search-req-initial'].map(sel => ({
+    what: `a title that can be requested: ${sel}`, where: `${CSS} (${sel})`,
+    color: () => cssColor(sel, 'color').rgb,
+    alpha: () => cssColor(sel, 'color').a,
+    // The initial is 22px bold on its tile; the rest are 13px.
+    px: sel === '.search-req-initial' ? 22 : 13,
+    on: () => [sel === '.search-req-initial' ? rootToken('--surface-raised-2').rgb : rootToken('--surface-raised').rgb],
+  })),
+  // ── The requests page: every text colour of a row, on the page; the row
+  //    that opens the search page, on its raised fill; the initial that
+  //    stands in for a poster, on its tile. ──
+  ...['.req-meta', '.req-overview', '.req-status-note', '.req-note', '.req-wrong', '.req-confirm'].map(sel => ({
+    what: `requests page: ${sel}`, where: `${CSS} (${sel})`,
+    color: () => cssColor(sel, 'color').rgb,
+    alpha: () => cssColor(sel, 'color').a,
+    px: sel === '.req-note' ? 14 : 13, on: () => [INK],
+  })),
+  {
+    what: 'requests page: the row that opens the search page', where: `${CSS} (.req-ask)`,
+    color: () => cssColor('.req-ask', 'color').rgb,
+    alpha: () => cssColor('.req-ask', 'color').a,
+    px: 16, on: () => [rootToken('--surface-raised').rgb, rootToken('--surface-raised-2').rgb],
+  },
+  {
+    what: 'requests page: the initial on a poster\'s tile', where: `${CSS} (.req-initial)`,
+    color: () => cssColor('.req-initial', 'color').rgb,
+    alpha: () => cssColor('.req-initial', 'color').a,
+    px: 20, on: () => [rootToken('--surface-raised-2').rgb],
+  },
+  // ── The top bar. Its search field is where "describe a mood" lives, so
+  //    its placeholder is the text this script was first written for. The
+  //    bar is translucent and content scrolls under it, so each surface is
+  //    judged on the page AND on the scrolled bar over a white frame
+  //    (onNavBar / onNavField). ──
   {
     what: 'nav search input text', where: `${CSS} (.stage-navsearch input)`,
     // cssValue escapes the selector itself — passing it pre-escaped double-escapes
@@ -892,62 +1031,75 @@ const SURFACES = [
     // failure rather than a skip.
     color: () => parseColor(cssValue('.stage-navsearch input:not([type="range"])', 'color')).rgb,
     alpha: () => parseColor(cssValue('.stage-navsearch input:not([type="range"])', 'color')).a,
-    px: 12.5, on: () => stack(NAVSEARCH),
-  },
-  // ── The bar's submit chip: text on a tint on the bar on the ink. Three
-  //    composites deep, which is exactly the case eyeballing gets wrong. ──
-  {
-    what: 'vibe bar "↵ Search" chip', where: `${APP} (.convo-search)`,
-    color: () => hex('#f3e8ff'),                                   // purple-100
-    alpha: () => twAlpha(APP, 'aria-label="Search"', 'text-purple-100'),
-    px: 11,
-    on: () => stack(CONVO).map(bg => over(hex('#a855f7'), twAlpha(APP, 'aria-label="Search"', 'bg-purple-500'), bg)),
-  },
-  // ── The search palette. ──
-  {
-    what: 'palette query placeholder', where: `${PAL} (combobox)`,
-    color: W, alpha: () => twAlpha(PAL, 'placeholder="Search Aurora', 'placeholder-white'),
-    px: 16, on: onPalette,
+    px: 14, on: onNavField,
   },
   {
-    what: 'palette "Esc" hint', where: `${PAL} (header kbd)`,
-    color: () => twText(PAL, 'uppercase tracking-wider text-[color:').rgb,
-    alpha: () => twText(PAL, 'uppercase tracking-wider text-[color:').a,
-    px: 10, on: onPalette,
+    what: 'nav search placeholder', where: `${CSS} (.stage-navsearch input::placeholder)`,
+    color: () => parseColor(cssValue('.stage-navsearch input::placeholder', 'color')).rgb,
+    alpha: () => parseColor(cssValue('.stage-navsearch input::placeholder', 'color')).a,
+    px: 14, on: onNavField,
   },
   {
-    what: 'palette empty-state line', where: `${PAL} (empty query)`,
-    color: () => twText(PAL, 'Start typing to search').rgb,
-    alpha: () => twText(PAL, 'Start typing to search').a,
-    px: 16, on: onPalette,
+    what: 'nav search "⌘K" hint', where: `${CSS} (.stage-navsearch kbd)`,
+    color: () => parseColor(cssValue('.stage-navsearch kbd', 'color')).rgb,
+    alpha: () => parseColor(cssValue('.stage-navsearch kbd', 'color')).a,
+    px: 12,
+    // The hint has a fill of its own on top of the field's.
+    on: () => onNavField().flatMap(bg => backgroundLayers(cssValue('.stage-navsearch kbd', 'background'))[0].map(st => over(st.rgb, st.a, bg))),
   },
   {
-    what: 'palette "Try a title…" hint', where: `${PAL} (empty query)`,
-    color: () => twText(PAL, 'Try <span').rgb, alpha: () => twText(PAL, 'Try <span').a,
-    px: 12, on: onPalette,
+    what: 'nav destination, idle', where: `${CSS} (.stage-tab)`,
+    color: () => parseColor(cssValue('.stage-tab', 'color')).rgb,
+    alpha: () => parseColor(cssValue('.stage-tab', 'color')).a,
+    px: 15, on: onNavBar,
   },
   {
-    what: 'palette key legend', where: `${PAL} (empty query)`,
-    color: () => twText(PAL, 'justify-center gap-2 text-').rgb,
-    alpha: () => twText(PAL, 'justify-center gap-2 text-').a,
-    px: 11, on: onPalette,
+    what: 'phone tab bar label, idle', where: `${CSS} (.stage-tabbar-item)`,
+    color: () => parseColor(cssValue('.stage-tabbar-item', 'color')).rgb,
+    alpha: () => parseColor(cssValue('.stage-tabbar-item', 'color')).a,
+    px: 12,
+    // The tab bar's own fill over a white frame: content scrolls under it too.
+    on: () => { const bar = parseColor(cssValue('.stage-tabbar', 'background')); return [over(bar.rgb, bar.a, W)] },
   },
-  {
-    what: 'palette no-match line', where: `${PAL} (no results)`,
-    color: () => twText(PAL, 'No matches for "{query}"').rgb, alpha: () => twText(PAL, 'No matches for "{query}"').a,
-    px: 16, on: onPalette,
-  },
-  {
-    what: 'palette no-match hint', where: `${PAL} (no results)`,
-    color: () => twText(PAL, 'Check spelling or try').rgb, alpha: () => twText(PAL, 'Check spelling or try').a,
-    px: 12, on: onPalette,
-  },
-  {
-    what: 'palette result meta', where: `${PAL} (result row)`,
-    color: () => twText(PAL, '{m.year > 0 &&').rgb, alpha: () => twText(PAL, '{m.year > 0 &&').a,
-    px: 12, on: onPalette,
-  },
-  // ── The home rail header, on the page now that the shelf is gone (RS). ──
+  // ── The search page's own text (it took the palette's place): the line
+  //    that says what was found, the best match's facts and its line on
+  //    the raised row, the note beside "Titles", a collection's facts on
+  //    its raised row, and the second column's headings, rows and hint. ──
+  ...[
+    ['.search-status', 14, 'page'], ['.search-h2-note', 14, 'page'], ['.search-aside-h', 12, 'page'], ['.search-hint', 12, 'page'],
+    ['.search-recent-row', 15, 'page'], ['.search-action-row', 14, 'page'],
+    ['.search-best-facts', 14, 'raised'], ['.search-best-line', 14, 'raised'],
+    ['.search-colrow-facts', 12, 'raised'], ['.search-colrow-name', 15, 'raised'],
+  ].map(([sel, px, ground]) => ({
+    what: `search page: ${sel}`, where: `${CSS} (${sel})`,
+    color: () => cssColor(sel, 'color').rgb,
+    alpha: () => cssColor(sel, 'color').a,
+    px,
+    // A row to press is also drawn on its hover fill.
+    on: () => ground === 'raised'
+      ? [rootToken('--surface-raised').rgb, rootToken('--surface-raised-2').rgb]
+      : sel.endsWith('-row') ? [INK, rootToken('--surface-raised').rgb] : [INK],
+  })),
+  // ── The signed-out pages, on the page: the line under the heading, a
+  //    field's label, the "or" divider, the closing line and a refusal.
+  //    The system surfaces: a toast's words and its dismiss button on the
+  //    raised row (which is also what the update notice is), the scan bar's
+  //    count on its row, and what an empty My Library says. ──
+  ...[
+    ['.auth-lead', 15, 'page'], ['.auth-field label', 13, 'page'], ['.auth-or', 12, 'page'], ['.auth-foot', 14, 'page'],
+    ['.auth-error', 14, 'page'], ['.auth-bar-aside', 14, 'page'], ['.lib-empty-lead', 16, 'page'],
+    ['.toast', 14, 'raised-2'], ['.toast-x', 16, 'raised-2'], ['.toast-mark', 16, 'raised-2'],
+    ['.scanbar-row', 13, 'raised'], ['.scanbar-name', 13, 'raised'],
+  ].map(([sel, px, ground]) => ({
+    what: `signed out and system: ${sel}`, where: `${CSS} (${sel})`,
+    color: () => cssColor(sel, 'color').rgb,
+    alpha: () => cssColor(sel, 'color').a,
+    px,
+    on: () => ground === 'raised-2' ? [rootToken('--surface-raised-2').rgb] : ground === 'raised' ? [rootToken('--surface-raised').rgb] : [INK],
+  })),
+  // ── A rail's header, on the page: its title (which is also the "see all"
+  //    link when the rail has one, so there is no separate link text), the
+  //    one line under it, and the chevron that marks the title as a link. ──
   {
     what: 'rail title', where: `${CSS} (.rail-header .rail-title)`,
     color: () => cssColor('.rail-header .rail-title', 'color').rgb,
@@ -955,20 +1107,99 @@ const SURFACES = [
     px: cssPx('.rail-header .rail-title'), on: () => stack(PAGE),
   },
   {
-    what: 'rail subtitle', where: `${RAIL_TSX} (rail header)`,
-    color: () => twText(RAIL_TSX, 'break-words">{subtitle}').rgb,
-    alpha: () => twText(RAIL_TSX, 'break-words">{subtitle}').a,
-    px: 12, on: () => stack(PAGE),
+    what: 'rail subtitle / AI attribution', where: `${CSS} (.rail-header .rail-sub)`,
+    color: () => cssColor('.rail-header .rail-sub', 'color').rgb,
+    alpha: () => cssColor('.rail-header .rail-sub', 'color').a,
+    px: cssPx('.rail-header .rail-sub'), on: () => stack(PAGE),
   },
   {
-    what: 'rail "See All"', where: `${CSS} (.rail-header .rail-see-all)`,
-    color: () => cssColor('.rail-header .rail-see-all', 'color').rgb,
-    alpha: () => cssColor('.rail-header .rail-see-all', 'color').a,
-    px: cssPx('.rail-header .rail-see-all'), on: () => stack(PAGE),
+    // An icon, which needs only 3:1, held to the text threshold all the same:
+    // it is the one sign that the title can be pressed.
+    what: 'rail "see all" chevron, at rest', where: `${CSS} (.rail-header .rail-see-all .rail-chev)`,
+    color: () => cssColor('.rail-header .rail-see-all .rail-chev', 'color').rgb,
+    alpha: () => cssColor('.rail-header .rail-see-all .rail-chev', 'color').a,
+    px: 18, on: () => stack(PAGE),
+  },
+  // ── A card's caption sits on the page, under the art, never on it. ──
+  {
+    what: 'card caption title', where: `${CSS} (.media-card-cinema .cc-title)`,
+    color: () => cssColor('.media-card-cinema .cc-title', 'color').rgb,
+    alpha: () => cssColor('.media-card-cinema .cc-title', 'color').a,
+    px: cssPx('.media-card-cinema .cc-title'), on: () => stack(PAGE),
+  },
+  {
+    what: 'card caption facts', where: `${CSS} (.media-card-cinema .co-meta)`,
+    color: () => cssColor('.media-card-cinema .co-meta', 'color').rgb,
+    alpha: () => cssColor('.media-card-cinema .co-meta', 'color').a,
+    px: cssPx('.media-card-cinema .co-meta'), on: () => stack(PAGE),
+  },
+  // ── The only things drawn ON a poster: the action buttons. Their glyphs
+  //    are judged on the button's own fill over a WHITE poster, the worst
+  //    artwork for a dark translucent fill (a snowy backdrop, a white logo);
+  //    the scrim behind the buttons is not credited. ──
+  {
+    what: 'card action glyph (Add, More) over white art', where: `${CSS} (.media-card-cinema .card-act)`,
+    color: () => cssColor('.media-card-cinema .card-act', 'color').rgb,
+    alpha: () => cssColor('.media-card-cinema .card-act', 'color').a,
+    px: 20,
+    on: () => { const f = cssColor('.media-card-cinema .card-act', 'background'); return [over(f.rgb, f.a, W)] },
+  },
+  {
+    what: 'card Play glyph on its white button', where: `${CSS} (.media-card-cinema .card-act-play)`,
+    color: () => cssColor('.media-card-cinema .card-act-play', 'color').rgb,
+    alpha: () => cssColor('.media-card-cinema .card-act-play', 'color').a,
+    px: 18,
+    on: () => { const f = cssColor('.media-card-cinema .card-act-play', 'background'); return [over(f.rgb, f.a, W)] },
+  },
+  {
+    // The Play disc itself is white, so on white artwork the only thing
+    // that sets it apart is the scrim behind the buttons. A control's
+    // boundary needs 3:1 (1.4.11). Judged at the disc's TOP edge, where the
+    // scrim is weakest, with and without a progress bar under it.
+    what: 'card Play disc edge on white art (non-text)', where: `${CSS} (.media-card-cinema .card-actions)`,
+    color: () => cssColor('.media-card-cinema .card-act-play', 'background').rgb,
+    alpha: () => cssColor('.media-card-cinema .card-act-play', 'background').a,
+    px: 44, nonText: true,
+    on: () => scrimAtPlayTop().map(a => over([0, 0, 0], a, W)),
   },
 ]
 
-const need = s => (s.px >= 24 || (s.px >= 18.66 && s.bold)) ? 3.0 : 4.5
+/** The alpha of the actions scrim behind the top edge of the Play disc, for
+ *  each of the layer's two layouts (plain, and lifted clear of a progress
+ *  bar). Read from the layer's own rule: its height, its padding, the
+ *  disc's height and the gradient's stops, which must be black at some alpha
+ *  and run bottom to top, or this dies instead of measuring something else. */
+function scrimAtPlayTop() {
+  const layer = '.media-card-cinema .card-actions'
+  const px = (sel, prop) => {
+    const m = cssValue(sel, prop).match(/^([\d.]+)px$/)
+    if (!m) throw new Error(`audit: ${sel} ${prop} is not a px length this audit can place the Play disc with`)
+    return Number(m[1])
+  }
+  const h = px(layer, 'height'), disc = px('.media-card-cinema .card-act', 'height')
+  const pads = [px(layer, 'padding'), px(`${layer}.has-progress`, 'padding-bottom')]
+  const g = cssValue(layer, 'background').match(/^linear-gradient\(0deg,\s*(.+)\)$/)
+  if (!g) throw new Error(`audit: ${layer}'s background is no longer one bottom-to-top linear-gradient — model it, do not pass`)
+  const parts = g[1].split(/,(?![^(]*\))/).map(t => t.trim())
+  const stops = parts.map(t => {
+    const m = t.match(/^rgba\(0,\s*0,\s*0,\s*([\d.]+)\)\s+([\d.]+)%$/)
+    if (!m) throw new Error(`audit: ${layer}'s scrim stop "${t}" is not black at an alpha with a % position — model it, do not pass`)
+    return [Number(m[2]) / 100, Number(m[1])]
+  })
+  if (stops.length < 2 || stops.some((st, i) => i > 0 && st[0] < stops[i - 1][0])) throw new Error(`audit: ${layer}'s scrim stops are out of order`)
+  const at = t => {
+    if (t <= stops[0][0]) return stops[0][1]
+    for (let i = 1; i < stops.length; i++) {
+      const [p0, a0] = stops[i - 1], [p1, a1] = stops[i]
+      if (t <= p1) return a0 + (a1 - a0) * ((t - p0) / (p1 - p0))
+    }
+    return stops[stops.length - 1][1]
+  }
+  return pads.map(pad => at((pad + disc) / h))
+}
+
+// A control's boundary (1.4.11) needs 3:1; text needs 4.5:1 unless it is large.
+const need = s => (s.nonText || s.px >= 24 || (s.px >= 18.66 && s.bold)) ? 3.0 : 4.5
 const resolve = v => (typeof v === 'function' ? v() : v)
 
 let fails = 0

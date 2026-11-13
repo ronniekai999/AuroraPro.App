@@ -1,111 +1,66 @@
-// MediaRail — glassy horizontal rail of <MediaCardCinema> cards, shared by
-// HomeView (eager, in App) + BrowseView (lazy). Extracted from App.tsx
-// (2026-06-17 app split, Phase 2.4) so the lazy BrowseView chunk can reuse it
-// without reaching back into App. RailTint + railIconFor (title → {icon,tint}
-// resolver) are module-private — only MediaRail uses them.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
+// MediaRail — a titled horizontal row of <MediaCardCinema> cards, shared by
+// Tonight (eager, in App) and the lazy views. Its own module so a lazy view
+// can import it without pulling in App; the app keeps one copy either way.
+//
+// A rail's header is its title. When the rail has somewhere to "see all",
+// the title itself is that link. Under it sits at most one line: a plain
+// subtitle, or, for a rail the recommender built, the AI attribution (the
+// aurora dot and "Picked by Aurora", with the rail's reason after it). The
+// attribution is said once here, not on every card.
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { type Media } from '@/lib/types'
 
-// onPlay is still accepted for backward compatibility with callers
-// (HomeView etc.) but the new cinema card design no longer renders a
-// hover-only Play CTA — clicking the card opens detail where Play
-// is the primary CTA. Keeping the prop in the type avoids touching
-// every call site; ignoring it via destructure-rest avoids the
-// unused-var lint.
-// 2026-05-27 — Per-rail icon + chip tint mapping. Each rail's title
-// drives both the icon glyph and the chip color via railIconFor()
-// (defined just below MediaRail). When the caller doesn't supply an
-// `icon`/`tint` explicitly, MediaRail resolves them from the title;
-// when nothing matches, defaults to the generic compass + purple chip.
-// This keeps the dynamic Discover/anchor rails (AI-generated titles)
-// working without per-rail wiring at every call site — but note that
-// LLM-curated titles are exactly the ones MOST likely to drift from
-// the prefix patterns in railIconFor, so the fallback exists for that
-// case, not as a "rare exception."
-type RailTint = 'purple' | 'teal' | 'amber' | 'pink' | 'rose' | 'indigo'
+/** Card widths and the gap between cards, in px. The poster step is the
+ *  page-scroll unit; the CSS (`.rail-scroll`'s gap, the card's width
+ *  classes below) holds the same numbers. */
+const RAIL = {
+  poster: { card: 176, art: 264, cls: 'w-[176px]' },
+  landscape: { card: 256, art: 144, cls: 'w-[256px]' },
+  large: { card: 232, art: 348, cls: 'w-[232px]' },
+  gap: 20,
+} as const
 
-export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor, eagerCount = 0 }: {
+export function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, resumableIds, subtitle, aiPick, cardSubtitleFor, eagerCount = 0, size = 'default' }: {
   title: string
   items: Media[]
   onSelect: (m: Media) => void
+  // Play a card's title from its hover Play button. The handler resumes
+  // when the viewer has a position in the title; resumableIds says which
+  // cards that is, so their button reads "Resume".
   onPlay?: (m: Media) => void
+  resumableIds?: Set<number>
   aspect?: 'poster' | 'landscape'
-  // How many leading cards fetch their art eagerly. HomeView passes it for
-  // the first rail only — the one whose top row sits under the hero fold.
+  // How many leading cards load their art eagerly (a rail at the fold).
   eagerCount?: number
-  // 2026-06-05 (Home redesign D) — optional one-line "why it's here"
-  // subtitle under the rail title, and an "✨ AI PICK" chip beside the
-  // title for recommender-driven rails (discover / anchor). Both are
-  // additive: rails that don't pass them render exactly as before.
+  // One line under the title. With aiPick it follows "Picked by Aurora".
   subtitle?: string
+  // The recommender built this rail: its header carries the attribution.
   aiPick?: boolean
-  // Forward MediaCardCinema's quality/maturity badge opt-in so Home
-  // rail cards can show 4K/HDR chips (the mockup shows them).
-  showBadges?: boolean
-  // 2026-06-05 (Home redesign C) — per-card subtitle resolver (e.g. the
-  // Continue Watching "S2E4 · 23m left" line). Returns undefined to keep
-  // the default star/year/genre meta for that card.
+  // Per-card facts line override (Continue Watching's "S2E5 · 23m left").
   cardSubtitleFor?: (m: Media) => string | undefined
-  // 2026-05-27 — Per-card resume resolver. Caller passes a function
-  // that returns a click handler when the item has a Continue
-  // Watching match worth resuming (caller decides — typically only
-  // wired for the Continue Watching rail so partial-watches on
-  // other rails don't sprout resume pills). MediaRail invokes this
-  // per-card and forwards the result to MediaCardCinema's onResume.
-  resolveResume?: (m: Media) => (() => void) | undefined
-  // Phase 5.2 parity — right-click on a card opens the context
-  // menu (Mark Watched / Clear Progress / Add to Watchlist /
-  // Refresh Metadata for admins).
-  onCardContext?: (e: MouseEvent, m: Media) => void
-  // My Library — set of IDs currently saved by the user. When passed
-  // with onToggleLib, each card renders a top-left + button (purple ✓
-  // when already in the library). Optional so existing callers that
-  // don't care about library state stay unchanged.
+  // The card menu (right click, More, a long press). Required: it is the
+  // only way a keyboard or a touch screen adds, removes or resumes.
+  onCardContext: (e: MouseEvent, m: Media) => void
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
-  // QA 2026-05-25 — "See All" was a non-functional button (no onClick)
-  // that the QA report flagged as misleading because clicking it did
-  // nothing (and felt like a scroll glitch since the rail itself
-  // scrolls horizontally when you drag). Now: optional callback;
-  // when supplied the button is shown and clickable, when not the
-  // button is hidden entirely. AI-curated rails (no dedicated page
-  // for them) skip it; "Top Rated Movies" etc. wire it to navigate
-  // to the right browse view with the matching sort.
+  // Makes the title a link to the rail's full list.
   onSeeAll?: () => void
-  // Optional Icon name for the decorative glyph next to the rail
-  // title. When omitted, MediaRail resolves it from the title via
-  // railIconFor() — covers all known rail titles + falls back to
-  // 'compass' for unknown (dynamic AI-curated) ones. Explicit value
-  // wins; this keeps test setups + future one-off rails easy to wire.
-  icon?: string
-  // Chip tint that overrides whatever railIconFor would pick from the
-  // title. Same resolution rules as `icon`.
-  tint?: RailTint
+  // 'large': bigger posters and captions (the children's presentation).
+  size?: 'default' | 'large'
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
-  // Chevron paddles — the rail hides its scrollbar (.scrollbar-hide), so
-  // without these a plain-mouse user can only ever see the first
-  // viewport-width of cards: the vertical wheel scrolls the page and
-  // there is no other affordance. Hover/focus reveals a paddle per
-  // scrollable direction; each pages by ~90% of the visible width.
-  // Two primitive booleans (not one object) so React's built-in Object.is
-  // bail-out skips the re-render when neither edge changed — no hand-rolled
-  // equality check to keep in sync as the handler fires every scroll frame.
   const [canLeft, setCanLeft] = useState(false)
   const [canRight, setCanRight] = useState(false)
+  // The paddles and edge fades follow how far the row can still scroll.
   const updatePaddles = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
     const max = el.scrollWidth - el.clientWidth
-    // 2px slop — fractional scroll positions on zoomed/hidpi layouts
-    // never quite reach the exact max.
     setCanLeft(el.scrollLeft > 2)
     setCanRight(el.scrollLeft < max - 2)
   }, [])
-  // Layout effect so the right paddle is correct on the first paint rather
-  // than popping in one frame after mount.
   useLayoutEffect(() => {
     updatePaddles()
   }, [items, updatePaddles])
@@ -113,68 +68,49 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
     window.addEventListener('resize', updatePaddles)
     return () => window.removeEventListener('resize', updatePaddles)
   }, [updatePaddles])
+
+  const titleId = useId()
+  const dims = aspect === 'landscape' ? RAIL.landscape : size === 'large' ? RAIL.large : RAIL.poster
+  // A page is as many whole cards as fit in 90% of the row.
   const page = (dir: -1 | 1) => {
     const el = scrollRef.current
     if (!el) return
-    // Whole cards per page — card width plus the 18px rail gap — so the
-    // smooth scroll lands ON a snap point. Paging by 90% of the viewport
-    // landed mid-card and the (then mandatory) snap yanked it afterwards.
-    const step = (aspect === 'poster' ? 206 : 336) + 18
+    const step = dims.card + RAIL.gap
     const cards = Math.max(1, Math.floor((el.clientWidth * 0.9) / step))
     el.scrollBy({ left: dir * cards * step, behavior: 'smooth' })
   }
-  // Resolve icon + tint. Caller-supplied value wins; otherwise look
-  // up by title; otherwise the generic compass / purple chip.
-  const resolved = railIconFor(title)
-  const resolvedIcon = icon ?? resolved.icon
-  const resolvedTint = tint ?? resolved.tint
 
   return (
-    <section className="rail-container">
-      {/* 2026-06-05 (Home redesign D) — header now supports a stacked
-          title + subtitle and an inline "AI PICK" chip. When no subtitle
-          is passed the title row layout is unchanged. */}
+    // Named by its own heading, so the rail is one landmark with one name,
+    // not a label that repeats the h2 beside it.
+    <section className="rail-container" aria-labelledby={titleId}>
       <div className="rail-header">
-        <span className="rail-icon" data-tint={resolvedTint}><Icon name={resolvedIcon} size={16} /></span>
-        <div className="flex flex-col gap-0.5 min-w-0">
-          {/* flex-wrap + a nowrap chip: when title and chip do not fit on one
-              line (a phone, or a long LLM-written title) the chip drops BELOW
-              the title instead of being pushed past the rail's right edge. It
-              used to be pushed, and on a 390px phone "Hidden gems in your
-              library" + AI PICK widened the whole page to 407px — which also
-              clipped the right edge of the menu sheet and search palette,
-              because their `right-2` resolves against that widened viewport. */}
-          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-            <h2 className="rail-title">{title}</h2>
-            {aiPick && (
-              <span className="flex-none whitespace-nowrap inline-flex items-center gap-1 px-2 py-[2px] rounded-full bg-yellow-400/10 border border-yellow-400/30 text-yellow-300 text-[9.5px] font-bold tracking-[0.08em] uppercase">
-                <Icon name="sparkle" size={10} className="text-yellow-300" /> AI Pick
-              </span>
-            )}
-          </div>
-          {/* break-words for the same reason the title wraps: subtitles are
-              often LLM-written (Discover rail descriptions), and one long
-              unbroken token here widened a 320px page to 373px. */}
-          {subtitle && <span className="text-white/55 text-xs break-words">{subtitle}</span>}
-        </div>
-        <span className="rail-spacer" aria-hidden="true" />
-        {onSeeAll && (
-          <button onClick={onSeeAll} className="rail-see-all">
-            See All <Icon name="chevronRight" size={14} />
-          </button>
+        <h2 className="rail-title" id={titleId}>
+          {onSeeAll ? (
+            <button type="button" onClick={onSeeAll} className="rail-see-all" aria-label={`${title}, see all`}>
+              <span>{title}</span>
+              <Icon name="chevronRight" size={18} className="rail-chev" />
+            </button>
+          ) : title}
+        </h2>
+        {(aiPick || subtitle) && (
+          <p className="rail-sub">
+            {aiPick && <span className="rail-dot" aria-hidden="true" />}
+            <span className="rail-sub-text">
+              {aiPick ? (subtitle ? `Picked by Aurora: ${subtitle}` : 'Picked by Aurora') : subtitle}
+            </span>
+          </p>
         )}
       </div>
-      {/* data-can-left/right (Stage refresh, R2) expose the paddle state the
-          rail already tracks, so CSS can fade the edge where more cards wait. */}
-      <div className="rail-scroll-wrap" data-can-left={canLeft || undefined} data-can-right={canRight || undefined}>
+      <div
+        className="rail-scroll-wrap"
+        data-can-left={canLeft || undefined}
+        data-can-right={canRight || undefined}
+        style={{ '--rail-art-h': `${dims.art}px` } as React.CSSProperties}
+      >
         {canLeft && (
-          <button
-            type="button"
-            className="rail-paddle rail-paddle-left"
-            aria-label={`Scroll ${title} rail left`}
-            onClick={() => page(-1)}
-          >
-            <Icon name="chevronLeft" size={18} />
+          <button type="button" className="rail-paddle rail-paddle-left" aria-label={`Scroll ${title} rail left`} onClick={() => page(-1)}>
+            <Icon name="chevronLeft" size={20} />
           </button>
         )}
         <div ref={scrollRef} className="rail-scroll scrollbar-hide" onScroll={updatePaddles}>
@@ -183,103 +119,25 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
               key={item.id}
               item={item}
               eager={idx < eagerCount}
-              // Stable references, not per-item closures: the card calls
-              // these with its own item, so React.memo on MediaCardCinema
-              // can skip every card whose data did not change.
               onSelect={onSelect}
+              onPlay={onPlay}
               onCardContext={onCardContext}
               libraryIds={libraryIds}
               onToggleLib={onToggleLib}
-              // 2026-07-25 (Aurora Stage Phase 3) — 180→206 / 320→336. The
-              // art is the card now (no text shelf below it), so the poster
-              // carries the whole design and gets the room back.
-              className={aspect === 'poster' ? 'w-[206px]' : 'w-[336px]'}
+              className={dims.cls}
               aspect={aspect}
-              onResume={resolveResume?.(item)}
-              showBadges={showBadges}
+              size={size}
+              resumable={resumableIds?.has(item.id)}
               subtitle={cardSubtitleFor?.(item)}
             />
           ))}
         </div>
         {canRight && (
-          <button
-            type="button"
-            className="rail-paddle rail-paddle-right"
-            aria-label={`Scroll ${title} rail right`}
-            onClick={() => page(1)}
-          >
-            <Icon name="chevronRight" size={18} />
+          <button type="button" className="rail-paddle rail-paddle-right" aria-label={`Scroll ${title} rail right`} onClick={() => page(1)}>
+            <Icon name="chevronRight" size={20} />
           </button>
         )}
       </div>
     </section>
   )
-}
-
-/* 2026-05-27 — Resolve a rail's icon + chip tint from its title. Title
- * is the ONLY consistent identity for a rail (some are constructed
- * inline at the call site; some come back from the API; some are
- * AI-generated). Matching on title prefix means a single map covers
- * static rails ("Continue Watching", "Top Rated Movies") AND dynamic
- * variants ("Top Rated Sci-Fi", "Because you watched Severance").
- *
- * Match order matters — more specific patterns first. Unknown titles
- * fall through to the generic compass + purple chip, which keeps the
- * current default behavior intact.
- *
- * Tints come from index.css :root tokens; adding a new tint = one CSS
- * block + one entry here. Keep the palette tight (current: 6 colors)
- * so the homepage doesn't turn into a Skittles ad. */
-function railIconFor(title: string): { icon: string; tint: RailTint } {
-  const t = title.trim().toLowerCase()
-
-  // Continue Watching — purple clock. Only one rail uses this exact
-  // title, but the prefix match defends against any future variant
-  // (e.g. "Continue Watching (S2)").
-  if (t.startsWith('continue watching')) return { icon: 'clock', tint: 'purple' }
-
-  // Recently Added — teal sparkle. Fresh / new content cue.
-  if (t.startsWith('recently added')) return { icon: 'sparkle', tint: 'teal' }
-
-  // Top Rated — amber. Different glyph for movies vs shows so the
-  // icon also signals the content type at a glance.
-  if (t.startsWith('top rated movie')) return { icon: 'star', tint: 'amber' }
-  if (t.startsWith('top rated show') || t.startsWith('top rated tv')) {
-    return { icon: 'tv', tint: 'amber' }
-  }
-  // Catch-all for other "Top Rated ..." rails (e.g. "Top Rated Sci-Fi").
-  if (t.startsWith('top rated')) return { icon: 'star', tint: 'amber' }
-
-  // "Because you watched X" — anchor rails, pink heart for the
-  // recommendation-by-affinity cue.
-  if (t.startsWith('because you')) return { icon: 'heart', tint: 'pink' }
-
-  // "Trending" — rose flame. Reserved for future "Trending Now" rail.
-  if (t.startsWith('trending')) return { icon: 'zap', tint: 'rose' }
-
-  // Discover / AI-curated rails. Catches "Discover" + "For You" +
-  // server-stamped "Aurora …" rails (e.g. "Aurora Picks", "Aurora
-  // Recommends").
-  //
-  // Deep-debug fix: narrowed from `t.includes('aurora')` to a prefix
-  // match. A bare contains-check would mis-tint a future rail like
-  // "Northern Aurora Nature Docs" (movie title surfaced via search /
-  // genre rail) as Discover/indigo. Prefix is tight enough to catch
-  // the intended product-named rails without grabbing movie titles.
-  if (
-    t.startsWith('discover') ||
-    t.startsWith('for you') ||
-    t.startsWith('aurora ')
-  ) {
-    return { icon: 'sparkle', tint: 'indigo' }
-  }
-
-  // Library / Saved — placeholder for future Library page rails.
-  if (t.startsWith('saved') || t.startsWith('library') || t.startsWith('your library')) {
-    return { icon: 'heart', tint: 'pink' }
-  }
-
-  // Unknown / dynamic genre rail → default compass + purple. Same
-  // behavior as before the per-rail icon refactor.
-  return { icon: 'compass', tint: 'purple' }
 }

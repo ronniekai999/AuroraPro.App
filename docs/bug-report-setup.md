@@ -1,11 +1,12 @@
 # Bug Report Feature — Admin Setup
 
 The in-app "Report a Bug" feature lets authenticated Aurora users file
-GitHub issues directly from the SPA. A floating launcher in the bottom-
-right opens a modal with name / title / description fields plus an
-optional screenshot or short recording attachment. On submit, the
+GitHub issues directly from the SPA. "Report a bug", in the account
+menu (and on the Me page on a phone), opens a dialog with name / title /
+description fields plus an optional screenshot or short recording
+attachment. On submit, the
 Aurora server creates a labeled issue in your configured GitHub repo
-and links the user to it.
+and tells the user its number (not a link: the repo is usually private).
 
 The feature is **off by default**. Enabling it requires four env vars.
 
@@ -128,16 +129,43 @@ Restart Aurora to pick up the env changes.
 
 ## Step 3 — Verify
 
-Sign in to Aurora as any authenticated user. You should see a small
-"Report bug" pill in the bottom-right corner of any view. Clicking it
-opens the modal.
+Sign in to Aurora as any authenticated user. "Report a bug" is in the
+account menu at the top right, with Settings; on a phone it is a row on
+the Me page (the last tab). Every profile has it, a profile with a
+content limit included. Nothing floats over the page: if you see no such
+entry, the server is not taking reports (check the four variables and
+the restart).
+
+The dialog describes the page it is opened over: "Capture this page"
+draws that page, and the report records its address. From the account
+menu that is the page you are on. From the phone's Me page the app first
+goes back to the page you came from, and opens the dialog there. To check
+it: open Movies, scroll down, go to Me, press "Report a bug". You should
+be back on Movies where you were, with the dialog open, and the issue's
+"URL" line should read `/v2/movies`, not `/v2/me`.
+
+The same form is also offered on the screen the app shows when a page
+stops ("That did not load."), as "Report a problem", to a signed-in
+session on a server that takes reports. A report sent from there carries,
+at the end of its description, the line "What the app saw:" and, under
+it, what that screen shows there, each of its lines as an inline code
+span (so the tracker links and mentions nothing in them): the kind of
+failure; the error's message, when it has one; and the page's address
+(path and query), with the time and the build when they are known,
+together on the last line. These
+lines never hold the stack; the console log every report carries does
+hold the error, with the first lines of its stack (five at most). The
+description and these lines share the server's limit of 10,000 bytes,
+which the form counts (each line break as two). Its "URL" line is the
+page that stopped.
 
 To smoke-test the full flow:
 1. Fill in title + description
 2. Optionally attach a small PNG screenshot
-3. Submit
-4. Toast should show `Bug reported — issue #N created. <URL>`
-5. Click the URL to confirm the issue exists in your repo with labels
+3. Press "Send report"
+4. The dialog should say "Thanks, got it" with the issue's number, and a
+   toast should show `Bug reported as issue #N. Thank you.`
+5. Open that issue in your repo to confirm it exists with labels
    `bug` and `user-report`
 
 ## What gets stored where
@@ -241,7 +269,7 @@ use a Cloudflare Tunnel) to fix.
 ## Disabling
 
 Set `BUG_REPORT_ENABLED=false` (or unset all four vars) and restart.
-The launcher button disappears immediately on the next user session.
+The "Report a bug" entries disappear on the next user session.
 Already-filed issues remain in GitHub. Already-uploaded attachments stay
 on disk **indefinitely**: the janitor only runs while
 `BUG_REPORT_ENABLED=true`, so neither the TTL nor the byte budget applies
@@ -250,7 +278,7 @@ want the disk back.
 
 ## Capabilities across phases (all in current build)
 
-- **Phase 1:** flag, launcher button, modal, file upload from disk,
+- **Phase 1:** flag, the entry that opens the dialog, modal, file upload from disk,
   server endpoint, GitHub issue creation, attachment hosting, this
   doc.
 - **Phase 2:** "Capture this page" button in the modal (in-browser

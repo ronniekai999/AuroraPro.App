@@ -1,0 +1,10 @@
+{
+  "sha": "1814efddf64689a6a3874e203abf476efe4a2e60",
+  "verdict": "lows-only",
+  "summary": "Four commits: the title page says a failed read of its title in its own words; lib/failureWords.ts, one helper that turns a caught error and what was being attempted into the app's own sentence by the kind of failure, never the server's or the browser's text (nothing calls it yet; builders use it next); its fix round; and two comments that said the page behind the player is dimmed. Two passes by the independent reviewer, by reading: fix-first on the helper (every TypeError was said to be a lost connection, the app's own slips included; a 400, 409 or 422 was told 'just now' or 'try again'), then lows-only on this commit: a network failure is tagged where fetch rejects (lib/api.ts) and only that is a lost connection; refusals promise no retry. Left: an abort given a custom reason would be tagged as a lost connection (none exists in src; with the builder), an app error still says 'just now' (accepted), two nits.",
+  "reviewer": "fresh-context-agent-a4d2d468",
+  "findings": "3",
+  "diff_digest": "1558022375e101dcd6e604fa8e0b3116ea147d17d6e88ed78f1828579c0851e6",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T08:05:35Z"
+}

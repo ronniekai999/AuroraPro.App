@@ -1,0 +1,10 @@
+{
+  "sha": "0a9456bcfa4da873bd07f63b5585f00b412e518a",
+  "verdict": "lows-only",
+  "summary": "Phone companion (join screen, room, ambient colour, fix round: reactions the server accepts, kept draft) re-checked lows-only by its reviewer; bug report dialog closing on a profile switch re-checked lows-only by its reviewer. Follow-ups: chat log still read aloud on join, draft lost when reconnect gives up, past planned start wording; three bug report lows.",
+  "reviewer": "fresh-context-agents-a7626c36-ad83f58e",
+  "findings": "9",
+  "diff_digest": "622e466626d6e0b1e596046e112580f7890af71c3a05015bb52bd69f72370f37",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T23:22:44Z"
+}

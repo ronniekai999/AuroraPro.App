@@ -31,7 +31,7 @@ export function buildQuickChips(now: Date): QuickChip[] {
   for (const hour of [20, 21]) {
     const t = atLocalHour(now, hour, 0)
     if (t.getTime() >= cutoff) {
-      chips.push({ label: `Tonight · ${formatClock(t)}`, iso: t.toISOString() })
+      chips.push({ label: `${todayOrTonight(t)} · ${formatClock(t)}`, iso: t.toISOString() })
     }
   }
   const tomorrow = atLocalHour(now, 20, 1)
@@ -45,6 +45,21 @@ export function buildQuickChips(now: Date): QuickChip[] {
 
 function formatClock(d: Date): string {
   return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+}
+
+/** The word for a time that falls on today: "Tonight" from five in the
+ *  afternoon (local), "Today" before. The one place this is judged: every
+ *  surface that names a party's start goes through it, so an 8:00 AM start
+ *  is never "Tonight" on one of them and "Today" on another. */
+export function todayOrTonight(at: Date): 'Today' | 'Tonight' {
+  return at.getHours() >= 17 ? 'Tonight' : 'Today'
+}
+
+/** Whether a planned start has passed. A party still not started after it
+ *  is one whose start was blocked or that nobody came to; the server keeps
+ *  it for a while, longer while someone sits in its lobby. */
+export function startHasPassed(iso: string, now: Date): boolean {
+  return new Date(iso).getTime() <= now.getTime()
 }
 
 // inviteCodeFromLink extracts the 6-char party code from a notification's
@@ -71,18 +86,33 @@ export function localDateKey(iso: string): string {
 }
 
 // formatPartyTime renders a start instant for chips and bell rows:
-// "Tonight · 8:00 PM" / "Tomorrow · 8:00 PM" / "Fri, Aug 7 · 8:00 PM",
-// falling back to a plain date once it's more than a week out.
+// "Tonight · 8:00 PM" / "Today · 8:00 AM" / "Tomorrow · 8:00 PM" /
+// "Fri, Aug 7 · 8:00 PM", falling back to a plain date once it's more than
+// a week out.
 export function formatPartyTime(iso: string, now: Date): string {
   const t = new Date(iso)
   const clock = formatClock(t)
   const dayKey = localDateKey(iso)
-  if (dayKey === localDateKey(now.toISOString())) return `Tonight · ${clock}`
+  if (dayKey === localDateKey(now.toISOString())) return `${todayOrTonight(t)} · ${clock}`
   if (dayKey === localDateKey(new Date(now.getTime() + 24 * HOUR_MS).toISOString())) {
     return `Tomorrow · ${clock}`
   }
   const weekday = t.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
   return `${weekday} · ${clock}`
+}
+
+// A planned start as a line of its own, for a party that has NOT started:
+// "Starts Tonight · 8:00 PM", and once that time has passed, "Was planned
+// for Tonight · 8:00 PM". A party can sit unstarted past its time, and a
+// line that went on saying "Starts" then promised something already missed.
+export function plannedStartLine(iso: string, now: Date): string {
+  return `${startHasPassed(iso, now) ? 'Was planned for' : 'Starts'} ${formatPartyTime(iso, now)}`
+}
+
+// The same where the time stands alone, under an invitation: "Tonight ·
+// 8:00 PM", and once it has passed, "Was planned for Tonight · 8:00 PM".
+export function plannedStartLabel(iso: string, now: Date): string {
+  return startHasPassed(iso, now) ? `Was planned for ${formatPartyTime(iso, now)}` : formatPartyTime(iso, now)
 }
 
 // skipReasonCopy maps the send endpoint's stable skip reasons to the words

@@ -19,7 +19,7 @@ import {
   type UpcomingEpisode,
 } from '@/lib/api'
 import { localDateKey } from '@/lib/partyInvites'
-import { PageHeader } from '@/components/PageHeader'
+import { LibraryTools } from '@/components/LibraryHeader'
 import { Icon } from '@/components/Icon'
 
 interface Props {
@@ -130,6 +130,31 @@ function formatGroupDate(iso: string): string {
   return `${relative} · ${monthDay}`
 }
 
+/** The line at the header's right: the window on screen and how many
+ *  episodes fall in it. "Next 30 days · 9 episodes", "November 2026 · 1
+ *  episode", "Next 30 days · no upcoming episodes".
+ *
+ *  The month view FETCHES the days of the neighbouring months that pad its
+ *  grid, so its count is restricted to the month named: "May 2026 · 98
+ *  episodes" must not include late April and early June. */
+export function calendarSummary(viewMode: ViewMode, cursorMonth: Date, episodes: readonly { air_date: string }[]): string {
+  let counted = episodes.length
+  if (viewMode === 'grid') {
+    const monthStart = firstOfMonthUTC(cursorMonth).getTime()
+    // lastOfMonthUTC is the last day at 00:00 UTC; a day more is the
+    // exclusive end of the month.
+    const monthEnd = lastOfMonthUTC(cursorMonth).getTime() + 86_400_000
+    counted = episodes.filter(e => {
+      const t = new Date(e.air_date).getTime()
+      return t >= monthStart && t < monthEnd
+    }).length
+  }
+  const range = viewMode === 'list'
+    ? `Next ${LIST_WINDOW_DAYS} days`
+    : cursorMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' })
+  return `${range} · ${counted === 0 ? 'no upcoming episodes' : `${counted.toLocaleString()} episode${counted === 1 ? '' : 's'}`}`
+}
+
 export default function CalendarView({ onOpenMedia, currentUserId, onJoinParty }: Props) {
   // Preference-loaded view mode. Defaults to 'list' on first visit;
   // localStorage round-trip persists across sessions per browser.
@@ -186,7 +211,8 @@ export default function CalendarView({ onOpenMedia, currentUserId, onJoinParty }
       .then((eps) => { if (!cancelled) setEpisodes(eps) })
       .catch((e) => {
         if (!cancelled && e.name !== 'AbortError') {
-          setError(e instanceof Error ? e.message : 'Failed to load calendar')
+          // The page says it in words of its own (below); kept as a flag.
+          setError('failed')
         }
       })
     return () => { cancelled = true; ac.abort() }
@@ -250,73 +276,31 @@ export default function CalendarView({ onOpenMedia, currentUserId, onJoinParty }
   const groups = useMemoGroups(episodes)
   const partyGroups = usePartyGroups(partyEntries)
 
-  if (error) return <p className="text-red-300 p-8">{error}</p>
+  // In words, never the transport's own message.
+  if (error) return <><h1 className="sr-only">Upcoming</h1><p className="py-8 text-sm text-ink-2" role="alert">The calendar could not be loaded. Reload the page to try again.</p></>
 
   return (
     <div className="animate-fade-in">
-      <PageHeader
-        eyebrow={viewMode === 'list' ? 'Upcoming' : 'Month view'}
-        title="Calendar"
-        sub={episodes && (() => {
-            // QA BUG-004 — make the window explicit + leading in both
-            // views, in matching shape, so the count delta between
-            // List ("next 30 days") and Grid ("May 2026") is
-            // self-explanatory rather than surprising.
-            //
-            // The grid mode's FETCH window includes lead/trail days
-            // padding from adjacent months (so chips render on the
-            // full visible grid). For the subtitle COUNT we must
-            // restrict to the cursorMonth's actual boundaries —
-            // otherwise "May 2026 · 98 episodes" silently includes
-            // late-April and early-June airdates and is wrong.
-            let displayed = episodes
-            if (viewMode === 'grid') {
-              const monthStart = firstOfMonthUTC(cursorMonth).getTime()
-              // lastOfMonthUTC returns the LAST day at 00:00 UTC; +1d
-              // gives an exclusive upper bound covering the whole day.
-              const monthEnd = lastOfMonthUTC(cursorMonth).getTime() + 86_400_000
-              displayed = episodes.filter(e => {
-                const t = new Date(e.air_date).getTime()
-                return t >= monthStart && t < monthEnd
-              })
-            }
-            const rangeLabel = viewMode === 'list'
-              ? `Next ${LIST_WINDOW_DAYS} days`
-              : cursorMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' })
-            const epWord = `episode${displayed.length === 1 ? '' : 's'}`
-            // Returned as a fragment, not a template literal. This subline is
-            // mixed markup (a highlighted range label plus a separator dot)
-            // and PageHeader's `sub` is typed ReactNode precisely so it can be
-            // — the Phase 4 `[object Object]` bug was a JSX fragment forced
-            // through a string-typed prop.
-            return (
-              <>
-                <span className="text-white/85 font-medium">{rangeLabel}</span>
-                <span className="text-white/30 mx-1.5">•</span>
-                {displayed.length === 0
-                  ? 'no upcoming episodes from shows in your library'
-                  : `${displayed.length} ${epWord} from shows in your library`}
-              </>
-            )
-          })()}
-        action={
-          // The mockup's .lm-seg: a hard-edged two-up segment, not two pills
-          // in a rounded tray. Labels are "List" and "Month" — the old second
-          // label was "Calendar", which named the page rather than the mode
-          // it switches to.
-          <div className="stage-seg inline-flex" role="group" aria-label="Calendar view mode">
-            <button type="button" onClick={() => setViewMode('list')} aria-pressed={viewMode === 'list'}>
-              List
-            </button>
-            <button type="button" onClick={() => setViewMode('grid')} aria-pressed={viewMode === 'grid'}>
-              Month
-            </button>
-          </div>
-        }
-      />
+      {/* No heading block of its own: the Library header's row names the
+          page, and carries this summary and the List / Month control at its
+          right. */}
+      <h1 className="sr-only">Upcoming</h1>
+      <LibraryTools>
+        <p className="stage-libhead-note" role="status" data-calendar-summary="">
+          {episodes ? calendarSummary(viewMode, cursorMonth, episodes) : ''}
+        </p>
+        <div className="stage-seg flex" role="group" aria-label="Calendar view">
+          <button type="button" onClick={() => setViewMode('list')} aria-pressed={viewMode === 'list'} className="stage-seg-btn is-label">
+            List
+          </button>
+          <button type="button" onClick={() => setViewMode('grid')} aria-pressed={viewMode === 'grid'} className="stage-seg-btn is-label">
+            Month
+          </button>
+        </div>
+      </LibraryTools>
 
       {episodes === null ? (
-        <p className="text-white/50">Loading calendar…</p>
+        <p className="text-sm text-ink-2" role="status">Loading the calendar…</p>
       ) : viewMode === 'list' ? (
         <ListView
           episodes={episodes}
@@ -437,21 +421,21 @@ function PartyCalRow({ entry, onJoinParty }: { entry: PartyCalEntry; onJoinParty
     <button
       type="button"
       onClick={onJoinParty ? () => onJoinParty(entry.code) : undefined}
-      className="stage-calrow w-full text-left flex items-center !border-purple-500/35 bg-purple-600/[0.07]"
+      className="stage-calrow w-full text-left flex items-center !border-line bg-white/5"
       title={`Open the watch-party lobby (code ${entry.code})`}
     >
-      <span className="w-[44px] h-[44px] rounded-md flex-shrink-0 bg-purple-600/20 border border-purple-500/40 flex items-center justify-center" aria-hidden="true">
-        <Icon name="play" size={16} className="text-purple-200" />
+      <span className="w-[44px] h-[44px] rounded-md flex-shrink-0 bg-action-soft border border-line-strong flex items-center justify-center" aria-hidden="true">
+        <Icon name="play" size={16} className="text-ink" />
       </span>
       <span className="flex-1 min-w-0">
         <span className="flex items-center gap-2.5 flex-wrap">
-          <span className="stage-eptag !bg-purple-500/20 !text-purple-100">Watch party</span>
+          <span className="stage-eptag !bg-action-soft !text-ink">Watch party</span>
           <span className="text-white text-sm font-semibold min-w-0 truncate">{entry.title}</span>
         </span>
         <span className="block text-white/50 text-xs mt-1">{sub}</span>
       </span>
       {onJoinParty && (
-        <span className="flex-none px-3 py-1.5 rounded-lg bg-purple-600/25 border border-purple-500/50 text-purple-100 text-xs font-medium">
+        <span className="flex-none px-3 py-1.5 rounded-lg bg-action-soft border border-line-strong text-ink text-xs font-medium">
           Open lobby
         </span>
       )}
@@ -488,7 +472,7 @@ function EpisodeRow({ ep, onOpenMedia }: { ep: UpcomingEpisode; onOpenMedia: (id
             // Em-dash lead-in, matching the mockup's "— The Undertow": the
             // episode title reads as a continuation of the show title rather
             // than as a second, competing heading.
-            <span className="text-white/60 text-[11.5px] min-w-0 truncate">— {ep.episode_title}</span>
+            <span className="text-white/60 text-xs min-w-0 truncate">— {ep.episode_title}</span>
           )}
         </div>
         {ep.overview && (
@@ -672,7 +656,7 @@ function GridView({
           ISO/Europe). Audit L2. */}
       <div className="stage-calmonth grid text-center">
         {WEEKDAY_LABELS_ROTATED.map((label) => (
-          <div key={label} className="text-white/60 text-[9.5px] font-bold uppercase tracking-wider py-1">
+          <div key={label} className="text-white/60 text-xs font-bold uppercase tracking-wider py-1">
             {label}
           </div>
         ))}
@@ -727,7 +711,7 @@ function GridView({
                     has anything — a party-only day must not render blank
                     on a phone (2026-08 review). */}
                 {(hasEpisodes || cellParties.length > 0) && (
-                  <span className="text-[9.5px] text-purple-200 font-bold">{cellEpisodes.length + cellParties.length}</span>
+                  <span className="text-xs text-ink font-bold">{cellEpisodes.length + cellParties.length}</span>
                 )}
               </div>
               {/* Episode chips — up to 3, then "+N more".
@@ -745,7 +729,7 @@ function GridView({
                 {cellParties.slice(0, 2).map(p => (
                   <div
                     key={p.code}
-                    className="stage-calchip stage-calchip-p block !border-purple-400/60"
+                    className="stage-calchip stage-calchip-p block !border-line-strong"
                     title={`Watch party — ${p.title} · ${partyClock(p.startIso)}`}
                   >
                     ▶ {partyClock(p.startIso)} {p.title}
@@ -769,7 +753,7 @@ function GridView({
                   const shown = Math.min(cellEpisodes.length, cellParties.length > 0 ? 2 : 3)
                   const hidden = cellEpisodes.length - shown + Math.max(0, cellParties.length - 2)
                   return hidden > 0 ? (
-                    <div className="text-[9.5px] text-white/55 pl-1">
+                    <div className="text-xs text-white/55 pl-1">
                       +{hidden} more
                     </div>
                   ) : null

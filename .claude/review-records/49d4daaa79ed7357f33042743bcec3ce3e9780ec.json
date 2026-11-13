@@ -1,0 +1,10 @@
+{
+  "sha": "49d4daaa79ed7357f33042743bcec3ce3e9780ec",
+  "verdict": "lows-only",
+  "summary": "Sign-in, register and the system surfaces (toasts with Undo, update notice, scan bar, My Library empty state, top-bar touch targets, Escape rule, My Library write queue). Three passes by independent reviewers: fix-first (sign-in form below the fold 900-979px, Undo as a toggle, a wrong Escape order), fix-first (the title page's Escape exception too wide while a cast is minimised), then lows-only on this commit: a queued write dropped after a profile switch though the server would accept it (follow-up in hand), a documented window, a test doubted by reading (run by the coordinator: red 3 of 3 without its fix), and a race in the read that ends a failed queue (to be recorded as a known gap).",
+  "reviewer": "fresh-context-agent-a4d2d468",
+  "findings": "4",
+  "diff_digest": "06e8dc67bdf63076832a2881d7309b21829b1f0ea5cc6c927d2a7a04825ad41d",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T05:45:15Z"
+}

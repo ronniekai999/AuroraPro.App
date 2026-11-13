@@ -30,6 +30,13 @@ history rather than in the working tree once their decision has been made.
   and which apply none.
 - [`match-report.md`](match-report.md) — privacy-bounded recommender calibration
   report.
+- [`redesign-device-checks.md`](redesign-device-checks.md) — what the web
+  redesign could not exercise in a headless browser, to check on real phones,
+  tablets, TVs, cast receivers, other browsers and screen readers. Delete when
+  the checks are done.
+- [`redesign-known-items.md`](redesign-known-items.md) — gaps the web
+  redesign knowingly leaves, by screen, each judged acceptable by the review
+  of the work it belongs to. Delete an item when it is no longer true.
 - [`playback-casting-review-2026-09.md`](playback-casting-review-2026-09.md) —
   September 2026 bug review and phased remediation plan for playback,
   transcoding, casting, and watch-party sync, plus a technology-stack

@@ -1,0 +1,10 @@
+{
+  "sha": "2d0f93addbd1d72f5c5ec0cb636ff7bc2ba7db40",
+  "verdict": "clean",
+  "summary": "Follow-ups from review 13: e08ab60 (a party's 'You were just in' record stays with the profile that joined it; a failed first read of the rooms is said beside a room made meanwhile; a Join button's record survives a window blur; af0ecbf9: clean) and 2d0f93a (a Settings row knows its own last write; the quiet, danger and toggled ghost hovers skip disabled buttons; layout-effect refs; a8ce3c17: clean). Nits left: a list reorder can drop focus; a room made while the first read is out can vanish until the next read; the 'already saved from this device' wording can be wrong when another device sets the same limit.",
+  "reviewer": "fresh-context-agents-af0ecbf9-a8ce3c17",
+  "findings": "0",
+  "diff_digest": "dd09e379f91cf09f14dc3d367ab02347f8bbe60e6764352927a267b5e6cdac0a",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T17:59:15Z"
+}

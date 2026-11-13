@@ -87,6 +87,12 @@ export interface CompanionState {
   connected: boolean
   reconnecting: boolean
   status: CompanionConnStatus
+  /** The room's state has been applied on this connection. `connected`
+   *  and status 'connected' are set as the socket opens, before the server
+   *  has sent anything: the people, the chat's history and what is playing
+   *  arrive after, in one message. False again from a join and from a drop,
+   *  until the next one arrives. */
+  synced: boolean
   error: string | null
 }
 
@@ -101,6 +107,7 @@ const INITIAL_STATE: CompanionState = {
   connected: false,
   reconnecting: false,
   status: 'idle',
+  synced: false,
   error: null,
 }
 
@@ -112,7 +119,9 @@ export interface UseCompanion {
   // so awaiters can't see it in time — same contract as useParty.join).
   join: (code: string) => { ok: boolean; error?: string }
   leave: () => void
-  sendChat: (message: string) => void
+  /** Sends a chat message. False when it was not sent (nothing to send, or
+   *  the room socket is not open), so the caller keeps what was typed. */
+  sendChat: (message: string) => boolean
   sendReaction: (emoji: string) => void
   // Voice (delegated to the existing mesh controller).
   joinVoice: () => Promise<void>
@@ -245,6 +254,7 @@ export function useCompanion(): UseCompanion {
             prev.mediaItemId && prev.mediaItemId !== inner.media_item_id
               ? []
               : prev.recentReactions,
+          synced: true,
           error: null,
         }))
         break
@@ -382,7 +392,7 @@ export function useCompanion(): UseCompanion {
       voiceRef.current?.onRoomSocketDown()
 
       if (userInitiatedLeaveRef.current) {
-        setStatePatch({ connected: false, reconnecting: false, status: 'idle' })
+        setStatePatch({ connected: false, reconnecting: false, status: 'idle', synced: false })
         return
       }
 
@@ -392,6 +402,7 @@ export function useCompanion(): UseCompanion {
           connected: false,
           reconnecting: false,
           status: 'error',
+          synced: false,
           error: 'Lost connection to the party. Refresh to retry.',
         })
         return
@@ -399,7 +410,7 @@ export function useCompanion(): UseCompanion {
 
       const delay = RECONNECT_BACKOFF_MS[attempt]
       reconnectAttemptRef.current = attempt + 1
-      setStatePatch({ connected: false, reconnecting: true, status: 'reconnecting' })
+      setStatePatch({ connected: false, reconnecting: true, status: 'reconnecting', synced: false })
       reconnectTimerRef.current = setTimeout(() => {
         reconnectTimerRef.current = null
         // Refresh before reconnect — the WS upgrade authenticates via the
@@ -477,13 +488,13 @@ export function useCompanion(): UseCompanion {
     setState(INITIAL_STATE)
   }, [closeSocket])
 
-  const sendChat = useCallback((message: string) => {
+  const sendChat = useCallback((message: string): boolean => {
     const trimmed = message.trim()
-    if (!trimmed) return
+    if (!trimmed) return false
     const ws = roomWsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
     const out: OutboundRoomMessage = { type: 'chat', payload: { message: trimmed } }
-    try { ws.send(JSON.stringify(out)) } catch { /* defensive */ }
+    try { ws.send(JSON.stringify(out)); return true } catch { return false }
   }, [])
 
   const sendReaction = useCallback((emoji: string) => {

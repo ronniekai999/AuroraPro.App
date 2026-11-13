@@ -1,0 +1,10 @@
+{
+  "sha": "66921bd71fb6b7d097cc8b516b2adedfb7407e7d",
+  "verdict": "clean",
+  "summary": "Search: the follow-up to the review of requesting from the search page, one commit, re-checked by the same reviewer: all seven lows and three nits resolved as meant and nothing new. Try again shows it is retrying and announces a repeated failure; the page waits for the server's request settings before promising a request and reads them once; arriving matches are announced; focus is placed after each of three moves and the Request button stays focusable while its request is out; a request's answer is told to the app only while the tab still acts as whoever pressed; a refusal for requests being off says so. The status wording now comes from one table that matches what pending, processing and waiting-for-approval mean on the server. Read in a tree that also held the unfinished My requests page; applied here alone, with a tree identical to the commit read.",
+  "reviewer": "fresh-context-agent-a27d5c3e",
+  "findings": "0",
+  "diff_digest": "b2df8187ccf4edf2cabf65a92ff83273e75ad1ed6f4fcc595f381b33830a4aa9",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T22:42:12Z"
+}

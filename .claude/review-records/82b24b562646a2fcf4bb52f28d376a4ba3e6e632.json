@@ -1,0 +1,10 @@
+{
+  "sha": "82b24b562646a2fcf4bb52f28d376a4ba3e6e632",
+  "verdict": "lows-only",
+  "summary": "Phone companion follow-up (chat log live only after the room's state; draft kept across a failed reconnect; passed planned start), bug report dismissal (says when a report was not sent; startup is not a switch), and party-time wording at the source (today vs tonight; a passed planned start; the companion's time never clipped; no 'Connected again' on a first join): each re-checked lows-only by its reviewer. Lows left as known items: wording changes only on the next render; two paste cases; a picker pick after an unreadable binding not counted as a switch.",
+  "reviewer": "fresh-context-agents-a7626c36-ad83f58e",
+  "findings": "9",
+  "diff_digest": "9472a320b4bfd112dee8ae264cd1b1b942c4d6df9b4b4adfc288a4842b8d2a81",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T01:35:59Z"
+}

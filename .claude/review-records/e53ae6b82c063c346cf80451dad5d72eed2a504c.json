@@ -1,0 +1,10 @@
+{
+  "sha": "e53ae6b82c063c346cf80451dad5d72eed2a504c",
+  "verdict": "lows-only",
+  "summary": "Error screen follow-up: the screen cannot blank the page whatever was thrown (the panel fails alone; a static last resort with Reload); the description limit counted as the server counts it; collected lines sent inert as code spans, with no host in the page line; session sentences judged against the current state; a report sent during a dismissal reported as sent; the logo mark in the header. Lows-only on its first pass. Left: a screen that stopped signed out says 'another account' when someone signs in; the closure line is not re-judged; the refusal says 'characters' while counting bytes; the name field still counted in characters.",
+  "reviewer": "fresh-context-agent-af3dcdd5",
+  "findings": "4",
+  "diff_digest": "de3e64d9495dac8a4fa5f86f4a84dc788551e0610b071adae274284c0c37bea5",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T04:27:35Z"
+}

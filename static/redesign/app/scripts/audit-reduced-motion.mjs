@@ -164,8 +164,9 @@ for (const name of [...declared].sort()) {
     }
   }
   const covered = owners.some(sel => {
-    // EVERY class in the declaring selector, not just the first: `onbShine` is
-    // declared on `.onb-mosaic-shimmer .onb-shine` and nulled on `.onb-shine`.
+    // EVERY class in the declaring selector, not just the first: an animation
+    // can be declared on `.parent-state .child` and nulled on `.child` (the
+    // onboarding's poster shine was, while it existed).
     const classes = [...sel.matchAll(/\.[\w-]+/g)].map(m => m[0])
     if (classes.some(c => nullingSelectors.has(c))) return true
     // …and any class that shares an element with one of them in the markup.
@@ -264,9 +265,10 @@ if (!negZ.length) console.log('  no negative z-index rules.')
 for (const sel of negZ) {
   // The owner must be annotated with where its stacking context comes from. This
   // is a documentation-forcing check on purpose: whether a given ancestor is a
-  // stacking context is not decidable from the stylesheet alone (the vibe bar's
-  // comes from a `z-20` utility in App.tsx), so the check requires the author to
-  // have said, and fails when nobody has.
+  // stacking context is not decidable from the stylesheet alone (the halo of
+  // the vibe bar that used to sit on Home got its from a `z-20` utility in
+  // App.tsx), so the check requires the author to have said, and fails when
+  // nobody has.
   // The comment block IMMEDIATELY above the rule, not "somewhere in the previous
   // 1400 characters". The wide window auto-approved any negative-z rule authored
   // near an existing annotation — a review inserted `.brand-new-halo { z-index: -3 }`
@@ -483,9 +485,7 @@ const INLINE_COVERED = new Map([
   console.log('\n## Check 4 — infinite animations animate only transform and opacity')
   // Pre-existing, from before the rule; listed by name so anything NEW fails,
   // and checked for staleness so the list cannot outlive its reason.
-  const KNOWN = new Map([
-    ['onbShimmer', "the onboarding headline's background-clip:text gradient (#482); a fill that IS the text cannot move by transform. Reported for follow-up."],
-  ])
+  const KNOWN = new Map([])
   const COMPOSITOR = new Set(['transform', 'opacity'])
   const keyframeProps = new Map()
   for (const m of css.matchAll(/@keyframes\s+([\w-]+)\s*\{/g)) {
@@ -523,6 +523,120 @@ const INLINE_COVERED = new Map([
     if (!off) { bad++; console.log(`  ***     ${name} is listed as a known exception but no longer is one; remove it from KNOWN`) }
   }
   if (!bad) console.log('  every infinite animation is compositor-only (or a listed pre-existing exception).')
+  problems += bad
+}
+
+// ── Check 5 — view transitions are behind both "less motion" settings ─────
+// A view transition is animated by the BROWSER, on pseudo-elements, from
+// script: no `animation:` in index.css names it, so Checks 1 to 4 cannot see
+// one. Two settings ask for less motion here, the system's
+// (prefers-reduced-motion) and the app's own Reduce effects
+// (<html data-effects="reduced">), and each must remove it twice over:
+//   a. in the script: the name `startViewTransition`, in any form (a call,
+//      an optional call, a property read, a string), appears in ONE file of
+//      src, src/lib/posterTravel.ts, exactly as often as that file is known
+//      to need it (its feature test and its one call). The call sits in a
+//      top-level function with no other top-level declaration between its
+//      start and the call, behind an `if (…lessMotionAsked(…)…) { …return… }`
+//      before it; and lessMotionAsked asks both questions;
+//   b. in the stylesheet, parsed (postcss, so an enclosing at-rule is seen):
+//      the three animated pseudo-elements are stilled with
+//      `animation: none !important` inside a top-level
+//      `@media (prefers-reduced-motion: reduce)`, and again in top-level
+//      rules for `html[data-effects="reduced"]`.
+// There is no list of exceptions. What this still cannot see: a call made
+// through an alias that never spells the name (a function handed the
+// document's method by something else), and a guard that is an `if` with a
+// `return` but returns on the wrong answer.
+{
+  console.log('\n## Check 5 — view transitions are removed by both "less motion" settings')
+  const strip = src => src.replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' ')).replace(/(^|[^:'"`])\/\/[^\n]*/g, (m, lead) => lead + ' '.repeat(m.length - lead.length))
+  const HOME = path.join('src', 'lib', 'posterTravel.ts')
+  // The feature test (`typeof doc.startViewTransition`) and the call.
+  const EXPECTED = 2
+  const sources = []
+  const walk = dir => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name)
+      if (e.isDirectory()) walk(p)
+      else if (/\.(ts|tsx|js|jsx|mjs)$/.test(e.name) && !/\.test\.tsx?$/.test(e.name)) sources.push(p)
+    }
+  }
+  walk('src')
+  let bad = 0, named = 0
+  for (const file of sources) {
+    const code = strip(fs.readFileSync(file, 'utf8'))
+    const n = (code.match(/startViewTransition/g) ?? []).length
+    if (!n) continue
+    named += n
+    if (file !== HOME) {
+      bad++
+      console.log(`  ***     ${file} names startViewTransition (${n}x): view transitions are started from ${HOME} only, behind its guard.`)
+      continue
+    }
+    if (n !== EXPECTED) {
+      bad++
+      console.log(`  ***     ${file} names startViewTransition ${n} times, not ${EXPECTED} (its feature test and its one call): a second call, an alias or a bracket read needs this check changed with it.`)
+    }
+    const calls = [...code.matchAll(/\.startViewTransition\s*\(/g)]
+    if (calls.length !== 1) {
+      bad++
+      console.log(`  ***     ${file} has ${calls.length} direct calls of startViewTransition, not 1.`)
+      continue
+    }
+    const at = calls[0].index
+    const line = code.slice(0, at).split('\n').length
+    const tops = [...code.slice(0, at).matchAll(/^(?:export\s+)?(?:async\s+)?function\s+(\w+)/gm)]
+    const top = tops[tops.length - 1]
+    const between = top ? code.slice(top.index + top[0].length, at) : ''
+    if (!top || /^(?:export\s+)?(?:const|let|var|function|async|class)\b/m.test(between)) {
+      bad++
+      console.log(`  ***     ${file}:${line} starts a view transition outside the top-level function that guards it.`)
+      continue
+    }
+    if (!/\bif\s*\([^{}]*\blessMotionAsked\s*\([^{}]*\)\s*\{[^{}]*\breturn\b[^{}]*\}/.test(between)) {
+      bad++
+      console.log(`  ***     ${file}:${line} (${top[1]}) starts a view transition without an \`if (…lessMotionAsked(…)…) { …return… }\` before it: it would run under prefers-reduced-motion and under Reduce effects.`)
+    } else {
+      console.log(`  ok      ${file}:${line} (${top[1]}) returns before it starts one when less motion is asked`)
+    }
+  }
+  const viewNames = /view-transition-name\s*:\s*(?!none)[\w-]+/.test(css)
+  if (named || viewNames) {
+    // a. What "less motion asked" means, where it is defined.
+    const src = fs.existsSync(HOME) ? strip(fs.readFileSync(HOME, 'utf8')) : ''
+    const def = /export function lessMotionAsked\b[\s\S]*?\n}\n/.exec(src)?.[0] ?? ''
+    if (!def) { bad++; console.log(`  ***     ${HOME} no longer defines lessMotionAsked: this check is out of date, not passing.`) }
+    else {
+      if (!/prefers-reduced-motion:\s*reduce/.test(def)) { bad++; console.log('  ***     lessMotionAsked does not ask the system setting (prefers-reduced-motion: reduce).') }
+      if (!/data-effects/.test(def) || !/['"]reduced['"]/.test(def)) { bad++; console.log('  ***     lessMotionAsked does not ask the app\'s Reduce effects (data-effects="reduced").') }
+      if (/prefers-reduced-motion:\s*reduce/.test(def) && /data-effects/.test(def)) console.log('  ok      lessMotionAsked asks both settings')
+    }
+    // b. The stylesheet, parsed, under each setting.
+    const { default: postcss } = await import('postcss')
+    const sheet = postcss.parse(cssRaw)
+    const PSEUDOS = ['::view-transition-group(*)', '::view-transition-old(*)', '::view-transition-new(*)']
+    const stilled = rule => rule.nodes?.some(d => d.type === 'decl' && d.prop === 'animation' && d.value.trim() === 'none' && d.important)
+    const covered = new Set()
+    sheet.walkRules(rule => {
+      if (!stilled(rule)) return
+      const parent = rule.parent
+      const underSystem = parent?.type === 'atrule' && parent.name === 'media' && /^\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)$/.test(parent.params.trim()) && parent.parent?.type === 'root'
+      const atTop = parent?.type === 'root'
+      for (const sel of rule.selectors.map(x => x.trim())) {
+        for (const pseudo of PSEUDOS) {
+          if (underSystem && sel === pseudo) covered.add('system ' + pseudo)
+          if (atTop && sel === 'html[data-effects="reduced"]' + pseudo) covered.add('app ' + pseudo)
+        }
+      }
+    })
+    if (PSEUDOS.every(x => covered.has('system ' + x))) console.log('  ok      index.css stills the view-transition pseudo-elements inside a top-level @media (prefers-reduced-motion: reduce)')
+    else { bad++; console.log('  ***     index.css does not still ::view-transition-group/old/new(*) inside a top-level @media (prefers-reduced-motion: reduce) (animation: none !important on all three).') }
+    if (PSEUDOS.every(x => covered.has('app ' + x))) console.log('  ok      index.css stills them under Reduce effects, in top-level rules')
+    else { bad++; console.log('  ***     index.css does not still html[data-effects="reduced"]::view-transition-group/old/new(*) in top-level rules (animation: none !important on all three).') }
+  } else {
+    console.log('  no view transition is started and none is named.')
+  }
   problems += bad
 }
 

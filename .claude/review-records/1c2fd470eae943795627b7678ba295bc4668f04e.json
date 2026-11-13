@@ -1,0 +1,10 @@
+{
+  "sha": "1c2fd470eae943795627b7678ba295bc4668f04e",
+  "verdict": "lows-only",
+  "summary": "Settings (B4: sections with their own addresses, profiles and parental controls, your profile), two rounds by one fresh-context reviewer with the server handlers read. Round 1 at dfb6028 fix-first: the limit dropdown wrote on change, so one arrow key on the closed select saved a looser limit and typing N removed it, with only a limit on the watching profile confirmed; the destructive confirmations were inline swaps that dropped focus and announced nothing. Round 2 at 8809f45 lows-only: a limit is held until Save, any loosening and every removal asks first, the confirmations are the app's alert dialog with focus returned, a TV-Y7 tier was added and every label is checked against the server's ladder; lows: the profiles pane trusts its own copy of the list over the app's when older (a newly restricted session keeps rows and controls until a reload; the server refuses writes), loosening is judged against the row's possibly stale stored limit, focus is lost after Make default and Set or Change PIN, a delete dialog left open across a cross-tab switch onto the named profile deletes the acting profile. Routes and payloads match the server; the five removed settings have no reader; CLAUDE.md and docs/push.md edits true. Applied by cherry-pick; every Settings file byte-identical to the reviewed head, with App.tsx, index.css and CLAUDE.md differing only by another builder's unlanded work.",
+  "reviewer": "fresh-context-agent-a8ce3c17",
+  "findings": "5",
+  "diff_digest": "352cff97ab34bceec255b059bf515fbcdf485d5c1c58773e73b4f7a827202c99",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T04:33:47Z"
+}

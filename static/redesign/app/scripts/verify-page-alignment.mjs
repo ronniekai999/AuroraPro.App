@@ -64,32 +64,71 @@ function classesOf(file, marker) {
   }
   return hits[0]
 }
-const BROWSE_TB = classesOf('src/components/BrowseView.tsx', 'browse-toolbar')
-const ADMIN_TB = classesOf('src/components/admin/AdminView.tsx', 'stage-toolbar')
-const HERO_FOOT = classesOf('src/components/HeroSection.tsx', 'absolute bottom-0 left-0 right-0 z-20')
-const DETAIL_BODY = classesOf('src/components/DetailView.tsx', 'stage-gutter pt-9 pb-12')
-const DETAIL_GRID = classesOf('src/components/DetailView.tsx', 'lg:grid-cols-[216px_minmax(0,1fr)]')
-// DetailHero's text column. Added after a reviewer showed its token swap was
+// A Library grid is three page systems, one above the other: the Library's
+// header (the scope names, the count, sort and layout, the genres), which App
+// renders; under the title sort, the A to Z strip, which sticks under the top
+// bar; and the grid's own body. Each takes the gutter by itself, so each is
+// probed: they used to be one element (BrowseView's sticky toolbar, whose
+// restated gutter was Phase 11.4's stair-step).
+const LIB_HEAD = classesOf('src/components/LibraryHeader.tsx', 'stage-gutter stage-libhead')
+const BROWSE_BODY = classesOf('src/components/BrowseView.tsx', 'stage-gutter pt-6')
+const JUMP_BAR = classesOf('src/components/BrowseControls.tsx', 'stage-gutter stage-jumpbar')
+// The strip's row and its letters, as LetterStrip draws them: 27 buttons and
+// a status line at its longest. Where they do not fit one row the strip
+// wraps, and a title it scrolls to must still stop UNDER it: the page's
+// scroll padding takes the strip's height from --jumpbar-h, which
+// LetterStrip measures and publishes. This page publishes it the same way
+// (one line, below) and then checks that a scrolled-to target is not
+// covered. With the padding fixed at one row's height, as it first shipped,
+// the target's top and its focus ring sat about 22px under a two-row strip
+// between 768px and about 1040px.
+const JUMP_ROW = classesOf('src/components/BrowseControls.tsx', 'stage-jump flex')
+for (const text of ['className="stage-jump-btn"', 'className="stage-jump-status"', "root.style.setProperty('--jumpbar-h'"]) {
+  if (!fs.readFileSync('src/components/BrowseControls.tsx', 'utf8').includes(text)) {
+    throw new Error(`verify: BrowseControls.tsx no longer contains ${JSON.stringify(text)} — this check is out of date, not passing`)
+  }
+}
+const JUMP_LETTERS = ['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ']
+// The admin page's frame: a menu of sections beside (or, on a narrow screen,
+// above) the open section. It used to be a sticky full-bleed band of tabs.
+const ADMIN_SHELL = classesOf('src/components/admin/AdminShell.tsx', 'admin-shell')
+// Tonight's hero: its root and, inside it, the row that holds the title block
+// and the picks. The row is in the flow now (the root is a flex column that
+// sets it at the bottom), so the probe is built from both, as the page is.
+const HERO_SECTION = classesOf('src/components/HeroSection.tsx', 'flex-col justify-end overflow-hidden')
+const HERO_FOOT = classesOf('src/components/HeroSection.tsx', 'stage-gutter relative z-20')
+// The title page is one column: a gutter element that takes the page padding
+// and, inside it, an element that caps the measure. The hero's content row is
+// built the same way, and the two must agree.
+const DETAIL_BODY = classesOf('src/components/DetailView.tsx', 'stage-gutter pt-8 pb-16')
+const DETAIL_COL = classesOf('src/components/DetailView.tsx', 'stage-detail-col')
+// DetailHero's content row (poster, title, actions) and the gutter around it.
+// A probe on the hero exists because a reviewer once showed its token swap was
 // entirely uncovered: reverting `--page-pad-x` back to `--page-gutter` left a
 // 272px stair-step at 2560 and 912px at 3840 against the detail body it is
-// supposed to align with, and this check reported zero problems — in the very
-// commit whose message claims "both are asserted now".
-const HERO_TEXT = classesOf('src/components/detail/DetailHero.tsx', 'absolute bottom-7 z-10')
+// supposed to align with, and this check reported zero problems.
+const HERO_GUTTER = classesOf('src/components/detail/DetailHero.tsx', 'mt-auto stage-gutter')
+const HERO_ROW = classesOf('src/components/detail/DetailHero.tsx', 'stage-detail-herorow')
 
 const html = `<!doctype html><html><head><style>${css}</style>
 <style>body{margin:0}.probe{outline:0}</style></head><body>
 <div class="stage-topnav" id="nav">nav</div>
 <div class="min-h-screen">
   <div id="page" class="stage-page">
-    <div id="admintb" class="${ADMIN_TB}">admin toolbar</div>
+    <div id="adminshell" class="${ADMIN_SHELL}">admin shell</div>
   </div>
   <div id="rail" class="stage-gutter">rail</div>
-  <div class="${DETAIL_BODY}"><div id="detail" class="${DETAIL_GRID}"><div>poster</div><div id="detailmain">main</div></div></div>
-  <section style="position:relative;height:200px"><div id="herotext" class="${HERO_TEXT}">hero text</div></section>
-  <div id="browsetb" class="${BROWSE_TB}">browse toolbar</div>
-  <section style="position:relative;height:200px;overflow:hidden">
+  <div class="${DETAIL_BODY}"><div id="detail" class="${DETAIL_COL}"><div>synopsis</div><div>episodes</div></div></div>
+  <section style="position:relative;display:flex;flex-direction:column;min-height:200px"><div class="${HERO_GUTTER}"><div id="herotext" class="${HERO_ROW}"><div>poster</div><div style="flex:1">hero text</div></div></div></section>
+  <header id="libhead" class="${LIB_HEAD}">library header</header>
+  <div id="jumpbar" class="${JUMP_BAR}"><div class="${JUMP_ROW}">${JUMP_LETTERS.map(l => `<button type="button" class="stage-jump-btn">${l}</button>`).join('')}<span class="stage-jump-status">Loading titles to find W… 1,200 of 4,800</span></div></div>
+  <div id="browsegrid" class="${BROWSE_BODY}">browse grid</div>
+  <section class="${HERO_SECTION}">
     <div id="herofoot" class="${HERO_FOOT}">hero footer</div>
   </section>
+  <div style="height:1400px"></div>
+  <div id="jumptarget" style="height:60px">a title the strip scrolls to</div>
+  <div style="height:3000px"></div>
 </div></body></html>`
 
 // TWO passes: this environment's headless Chromium has ZERO-WIDTH overlay
@@ -107,7 +146,7 @@ const browser = await chromium.launch({ executablePath: EXE })
 const out = []
 const SCROLLBAR = 15
 for (const scrollbar of [0, SCROLLBAR]) {
-for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
+for (const width of [320, 390, 767, 768, 834, 1024, 1440, 1920, 2000, 2560, 3840]) {
   const page = await browser.newPage({ viewport: { width, height: 900 } })
   // Simulated classic scrollbar: narrow the layout viewport the way a
   // space-taking scrollbar does, so `100vw` and `100%` diverge exactly as they
@@ -120,11 +159,27 @@ for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
       const b = e.getBoundingClientRect(); const cs = getComputedStyle(e)
       return { left: +(b.left + parseFloat(cs.paddingLeft)).toFixed(1),
                right: +(b.right - parseFloat(cs.paddingRight)).toFixed(1),
-               boxLeft: +b.left.toFixed(1), boxRight: +b.right.toFixed(1) }
+               boxLeft: +b.left.toFixed(1), boxRight: +b.right.toFixed(1),
+               shown: cs.display !== 'none' }
     }
-    return { nav: box('nav'), detail: box('detail'), detailmain: box('detailmain'),
-             herotext: box('herotext'), rail: box('rail'), browsetb: box('browsetb'), herofoot: box('herofoot'),
-             admintb: box('admintb'), page: box('page'),
+    // The strip and a title it scrolls to. Measured last and undone, so the
+    // boxes above are read with the page at its top.
+    const cover = () => {
+      const bar = document.getElementById('jumpbar')
+      if (getComputedStyle(bar).display === 'none') return null
+      // As LetterStrip does it.
+      document.documentElement.style.setProperty('--jumpbar-h', `${Math.ceil(bar.getBoundingClientRect().height)}px`)
+      const target = document.getElementById('jumptarget')
+      target.scrollIntoView({ block: 'start' })
+      const b = bar.getBoundingClientRect(), t = target.getBoundingClientRect()
+      const out = { barTop: +b.top.toFixed(1), barBottom: +b.bottom.toFixed(1), barHeight: +b.height.toFixed(1), targetTop: +t.top.toFixed(1) }
+      window.scrollTo(0, 0)
+      document.documentElement.style.removeProperty('--jumpbar-h')
+      return out
+    }
+    const boxes = { nav: box('nav'), detail: box('detail'),
+             herotext: box('herotext'), rail: box('rail'), libhead: box('libhead'), jumpbar: box('jumpbar'), browsegrid: box('browsegrid'), herofoot: box('herofoot'),
+             adminshell: box('adminshell'), page: box('page'),
              // The LAYOUT viewport, not the window width. `100%` resolves against
              // this, and on a Chromium with classic 15px scrollbars they differ —
              // at 2560 the real inset would be 312.5 while the window width says
@@ -148,6 +203,7 @@ for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
              // scrollbar pass.
              vwWidth: window.innerWidth,
              docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth }
+    return { ...boxes, cover: cover() }
   })
   out.push({ width, scrollbar, ...r })
   await page.close()
@@ -167,19 +223,44 @@ const GUTTER = num(/--page-gutter:\s*(\d+)px/, '--page-gutter')
 const MOBILE = num(/min-width:\s*768px\)\s*\{\s*:root\s*\{\s*--page-pad-x:\s*(\d+)px/, 'the mobile --page-pad-x')
 let problems = 0
 for (const r of out) {
-  const keys = ['rail', 'browsetb', 'herofoot', 'page']
+  const keys = ['rail', 'libhead', 'jumpbar', 'browsegrid', 'herofoot', 'page']
   console.log(`\n── ${r.width}px${r.scrollbar ? `  (with a ${r.scrollbar}px classic scrollbar)` : ''}`)
   for (const k of keys) {
-    console.log(`   ${k.padEnd(9)} content ${String(r[k].left).padStart(6)} .. ${String(r[k].right).padStart(6)}   (width ${(r[k].right - r[k].left).toFixed(0)})`)
+    if (!r[k].shown) { console.log(`   ${k.padEnd(10)} not drawn`); continue }
+    console.log(`   ${k.padEnd(10)} content ${String(r[k].left).padStart(6)} .. ${String(r[k].right).padStart(6)}   (width ${(r[k].right - r[k].left).toFixed(0)})`)
   }
-  console.log(`   admintb   BOX     ${String(r.admintb.boxLeft).padStart(6)} .. ${String(r.admintb.boxRight).padStart(6)}`)
+  console.log(`   adminshell BOX    ${String(r.adminshell.boxLeft).padStart(6)} .. ${String(r.adminshell.boxRight).padStart(6)}`)
   console.log(`   nav       content ${String(r.nav.left).padStart(6)} .. ${String(r.nav.right).padStart(6)}`)
   console.log(`   detail    box     ${String(r.detail.boxLeft).padStart(6)} .. ${String(r.detail.boxRight).padStart(6)}`)
   console.log(`   herotext  box     ${String(r.herotext.boxLeft).padStart(6)} .. ${String(r.herotext.boxRight).padStart(6)}`)
 
   // 1. Every page system shares both content edges. This is the stair-step check.
   const ref = r[keys[0]]
+  // The A to Z strip is a wide screen's (a phone's row has no room for it):
+  // not drawn below md, where it has no edges to compare, and drawn from md
+  // up, where it is held to them like the rest.
+  const stripWanted = r.mqWidth >= 768
+  if (r.jumpbar.shown !== stripWanted) {
+    console.log(`   *** the A to Z strip is ${r.jumpbar.shown ? 'drawn' : 'not drawn'} at this width; it is a wide screen's (md and up) only`)
+    problems++
+  }
+  // Where it is drawn, a title it scrolls to stops under it, whatever the
+  // strip's height (it is two rows where 27 letters do not fit one).
+  if (stripWanted) {
+    const c = r.cover
+    if (!c) {
+      console.log('   *** the A to Z strip could not be measured against a scrolled-to title')
+      problems++
+    } else {
+      console.log(`   strip      ${c.barHeight}px tall, stuck at ${c.barTop}..${c.barBottom}; a title it scrolls to stops at ${c.targetTop}`)
+      if (c.targetTop < c.barBottom - 0.5) {
+        console.log(`   *** a title the A to Z strip scrolls to stops at ${c.targetTop}, under the strip (which ends at ${c.barBottom}): its top and its focus ring are covered`)
+        problems++
+      }
+    }
+  }
   for (const k of keys.slice(1)) {
+    if (k === 'jumpbar' && !stripWanted) continue
     if (r[k].left !== ref.left || r[k].right !== ref.right) {
       console.log(`   *** ${k} is misaligned with ${keys[0]}: ${r[k].left}..${r[k].right} vs ${ref.left}..${ref.right}`)
       problems++
@@ -209,35 +290,34 @@ for (const r of out) {
     problems++
   }
 
-  // 4. THE BLEED. `.stage-bleed` is what this phase adds, and it was measured,
-  //    printed, and never asserted — so removing it, or removing `.stage-gutter`
-  //    beside it, left four distinct 48px stair-steps between the admin toolbar
-  //    and every other page system, all green. The thing a commit introduces is
-  //    the last thing that should be uncovered.
-  //    Its CONTENT must line up with everything else, and its BOX must reach the
-  //    page edge: 0 while the gutter is the whole padding, and `inset - GUTTER`
-  //    once the cap is contributing (it bleeds to the capped page, not the viewport).
-  if (Math.abs(r.admintb.left - ref.left) > 0.5 || Math.abs(r.admintb.right - ref.right) > 0.5) {
-    console.log(`   *** admintb content ${r.admintb.left}..${r.admintb.right} != ${ref.left}..${ref.right}`)
+  // 4. THE ADMIN PAGE. Its frame (the menu of sections and the open section)
+  //    is the page's own column: both its content and its box start and end
+  //    where every other page system does, at every width. It was a full-bleed
+  //    band of tabs whose content had to line up while its box reached the
+  //    page edge; there is no band any more, so the box is held to the column
+  //    too. A frame that grew padding of its own, or a negative margin, would
+  //    put a stair-step between the admin page and the rest.
+  if (Math.abs(r.adminshell.left - ref.left) > 0.5 || Math.abs(r.adminshell.right - ref.right) > 0.5) {
+    console.log(`   *** admin shell content ${r.adminshell.left}..${r.adminshell.right} != ${ref.left}..${ref.right}`)
     problems++
   }
-  // 5. The TOP NAV, which is a fifth page system and was missed entirely by the
-  //    first version of this phase. Its inset is deliberately 18px tighter than
-  //    the page gutter below the cap, and must converge with it above — otherwise
-  //    the tabs sit at x=30 while every page they navigate to starts at x=320.
-  // Read, not restated — the same reason CAP/GUTTER/MOBILE are. This was left as a
-  // literal in the commit that removed the others, and it is the value this phase
-  // actually changed, so editing the CSS produced "expected 30" blaming the
-  // stylesheet when the script was the stale side.
-  const NAV_INSET = num(/\.stage-topnav\s*\{\s*padding:\s*0\s*max\((\d+)px/, "the nav's inset")
-  const NAV_MOBILE = MOBILE
-  const navExpected = r.mqWidth < 768 ? NAV_MOBILE : Math.max(NAV_INSET, (vw - CAP) / 2)
-  if (Math.abs(r.nav.left - navExpected) > 0.5) {
-    console.log(`   *** nav inset is ${r.nav.left}, expected ${navExpected}`)
+  if (Math.abs(r.adminshell.boxLeft - ref.left) > 0.5 || Math.abs(r.adminshell.boxRight - ref.right) > 0.5) {
+    console.log(`   *** admin shell box ${r.adminshell.boxLeft}..${r.adminshell.boxRight} is not the page's column ${ref.left}..${ref.right}`)
     problems++
   }
-  if (vw > CAP + 2 * GUTTER && Math.abs(r.nav.left - ref.left) > 0.5) {
-    console.log(`   *** past the cap the nav (${r.nav.left}) must track the page (${ref.left})`)
+  // 5. The TOP NAV, which is a fifth page system. It shares the page's own
+  //    horizontal padding, so its content must start on the same line as the
+  //    page's at EVERY width: phones, desktops and past the cap. (It used to
+  //    keep an inset of its own, 18px tighter than the gutter below the cap,
+  //    and only had to converge above it.) The declaration is read from the
+  //    built CSS as well as measured: a literal that happened to equal the
+  //    gutter at the widths tried here would pass the measurement and drift
+  //    the day the gutter changes.
+  if (!/\.stage-topnav\{[^}]*padding:0 var\(--page-pad-x\)/.test(css)) {
+    throw new Error("verify: .stage-topnav no longer sets padding: 0 var(--page-pad-x) in the built CSS — this check is out of date, not passing")
+  }
+  if (Math.abs(r.nav.left - ref.left) > 0.5 || Math.abs(r.nav.right - ref.right) > 0.5) {
+    console.log(`   *** the nav (${r.nav.left} .. ${r.nav.right}) must track the page (${ref.left} .. ${ref.right})`)
     problems++
   }
 
@@ -258,48 +338,27 @@ for (const r of out) {
   }
 
   // The bleed now reaches the VIEWPORT, not the capped page.
-  // 7. THE DETAIL HERO's text column must sit on the body's MAIN column, which is
-  //    the whole reason it reads the page token. Only meaningful at lg+, where the
-  //    poster column exists and the offset applies.
-  if (vw >= 1024 && Math.abs(r.herotext.boxLeft - r.detailmain.boxLeft) > 0.5) {
-    console.log(`   *** hero text starts at ${r.herotext.boxLeft}, detail's main column at ${r.detailmain.boxLeft}`)
+  // 7. THE DETAIL HERO's content row must sit on the body's column: the same
+  //    left edge AND the same right edge, at every width. The page is one
+  //    column, so there is no breakpoint below which this stops applying. A
+  //    row that kept measuring from the viewport while the body stopped at its
+  //    measure let the headline and the action row cantilever past the
+  //    synopsis they sit above, by up to a page width on an ultra-wide window.
+  if (Math.abs(r.herotext.boxLeft - r.detail.boxLeft) > 0.5) {
+    console.log(`   *** hero row starts at ${r.herotext.boxLeft}, the detail column at ${r.detail.boxLeft}`)
+    problems++
+  }
+  if (Math.abs(r.herotext.boxRight - r.detail.boxRight) > 0.5) {
+    console.log(`   *** hero row ends at ${r.herotext.boxRight}, the detail column at ${r.detail.boxRight}`)
     problems++
   }
 
-  // The bled box legitimately overruns the layout box by half a scrollbar,
-  // because `50vw` measures the viewport including it. That is the accepted cost
-  // of a true full-bleed band and is clipped by `body { overflow-x: hidden }`.
-  // What must NOT drift is the CONTENT, asserted above — and it no longer does,
-  // now that the padding is the margin's exact inverse rather than a
-  // viewport-space recomputation of the page inset.
-  const expectedBoxLeft = -(r.vwWidth - vw) / 2
-  if (Math.abs(r.admintb.boxLeft - expectedBoxLeft) > 0.5) {
-    console.log(`   *** admintb box starts at ${r.admintb.boxLeft}, expected ${expectedBoxLeft} — it is not bleeding`)
-    problems++
-  }
-  // 3. Horizontal overflow, stated as what it actually covers.
-  //
-  //    `documentElement.scrollWidth > clientWidth` is kept for gross overflow, but
-  //    it CANNOT see the bleed's overrun and never could: `50vw` includes a classic
-  //    scrollbar, so the band spills half a scrollbar past BOTH page edges, and the
-  //    simulated pass narrows `body` — which makes that a LEFT-side spill, and
-  //    left overflow is not scrollable in LTR. A real Chrome measures
-  //    scrollWidth 1275 vs clientWidth 1270 on /admin where this reported clean.
-  //
-  //    So assert the thing that is actually true and worth guarding: the overrun
-  //    exists, it is BOUNDED at half a scrollbar, and nothing else exceeds it. An
-  //    unbounded version would be a real defect; the bounded one is the documented
-  //    cost of a full-bleed band, and a reviewer confirmed nothing is clipped and
-  //    60 Tab presses never move scrollLeft off 0.
+  // 3. Horizontal overflow. No page system bleeds past the page any more (the
+  //    one that did, the admin's band of tabs, is gone, and with it the
+  //    half-scrollbar overrun a `50vw` band was allowed), so nothing may leave
+  //    the layout box at all: not the document, and none of the systems below.
   if (r.docOverflow) { console.log('   *** HORIZONTAL OVERFLOW'); problems++ }
-  const halfBar = (r.vwWidth - vw) / 2
-  const overrunL = -r.admintb.boxLeft
-  const overrunR = r.admintb.boxRight - vw
-  if (overrunL > halfBar + 0.5 || overrunR > halfBar + 0.5) {
-    console.log(`   *** the bled band overruns by ${overrunL}/${overrunR}, more than the ${halfBar} half-scrollbar it is allowed`)
-    problems++
-  }
-  for (const [k, b] of [['rail', ref], ['detail', r.detail], ['nav', r.nav]]) {
+  for (const [k, b] of [['rail', ref], ['detail', r.detail], ['nav', r.nav], ['admin shell', r.adminshell]]) {
     if (b.boxRight > vw + 0.5 || b.boxLeft < -0.5) {
       console.log(`   *** ${k} escapes the layout box: ${b.boxLeft}..${b.boxRight} vs 0..${vw}`)
       problems++

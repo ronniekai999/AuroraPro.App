@@ -1,0 +1,10 @@
+{
+  "sha": "4b279895fb28665d6d3e7eaf0ab779bcb26808db",
+  "verdict": "lows-only",
+  "summary": "Error screen and onboarding, the small follow-ups in two commits: a crash screen that stopped with nobody signed in says someone has signed in since; the reason a report panel closed is kept in the past tense; the form's limits, the name's included, are counted and named as the server counts them (bytes); a superseded onboarding build stops after its own write; the failure's sentence and its button are judged together from the live state. Two passes by an independent reviewer: fix-first (after a late landing the sentence said saved and offered Try again while the only button was Back to your details), then lows-only on this commit (it ran the three test files and the mutation): an older race where an age changed in the details while a first write is still out is refused on every Try again, and a capture note whose condition is narrower than what happens. Both are recorded as known items.",
+  "reviewer": "fresh-context-agent-af0e8c2d",
+  "findings": "2",
+  "diff_digest": "5a9117a6bce5631d45f357e3d7ed830c93360cee86bd878b4b9513d9d9040d1e",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T06:55:02Z"
+}

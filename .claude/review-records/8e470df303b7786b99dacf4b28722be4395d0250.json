@@ -1,0 +1,10 @@
+{
+  "sha": "8e470df303b7786b99dacf4b28722be4395d0250",
+  "verdict": "lows-only",
+  "summary": "Two commits over 6fac2d1, each checked by the fresh-context reviewer of its area. Player and party lows (1b63038; reviewer ab59ed55, third pass): lows-only; the short-window rules are scoped to the party's minimal face, the cast widgets are marked as the player's own for Escape, the fullscreen check reads the webkit name; remaining lows: under about 356px high the lane still meets the chip's row, a three-line title bar touches it, the lane audit's timeline height is a constant, the key sink has no test with both components mounted, the button's title doubles as a description. Resume record timing (8e470df, the orchestrator's one-line change after a full run failed once in App.cardMenu; reviewer aebb4273): lows-only; root cause confirmed (the record's ref was mirrored in a passive effect while the Resume label is drawn from state, so a press between the commit and the effect played from zero), the layout effect closes the window, the profile-switch reset still holds; low: LibraryView keeps the same passive mirror, where it gives a dead click. Player files byte-identical to the reviewed commit; index.css differs only by another builder's unlanded rules.",
+  "reviewer": "fresh-context-agents-ab59ed55-aebb4273",
+  "findings": "6",
+  "diff_digest": "6b254fc20d7c6c50b58d1a4e73ba7c5c0545fbfe65360cc1052df098c567c868",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-12T03:49:52Z"
+}

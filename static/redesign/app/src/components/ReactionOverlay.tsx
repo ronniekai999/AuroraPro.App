@@ -13,7 +13,9 @@
 // we don't have to round-trip a stylesheet edit for Phase 4.5.
 
 import { useEffect, useRef, useState } from 'react'
+import { pushEscapeLayer } from '@/lib/escapeLayers'
 import type { ReactionEvent } from '@/lib/party'
+import { QUICK_REACTIONS, drawnReaction } from '@/lib/reactions'
 
 const ANIM_DURATION_MS = 3000
 const SEEN_CAP = 200
@@ -100,9 +102,9 @@ export function ReactionOverlay({ events }: Props) {
       `}</style>
       <div
         aria-hidden="true"
-        // .stage-party-reactions confines the float area to the theater box
-        // while the theater is up, so reactions don't drift across the dimmed
-        // app either side of the picture.
+        // .stage-party-reactions confines the float area to the picture when
+        // the player is boxed, so reactions do not drift across the page or
+        // the party panel beside it.
         className="stage-party-reactions fixed pointer-events-none z-[65] inset-0 overflow-hidden"
         // 2026-05-27 (holistic deep-debug H1) — exclude from
         // BugReport screenshot capture. Floating emoji reactions
@@ -120,8 +122,8 @@ export function ReactionOverlay({ events }: Props) {
               textShadow: '0 2px 24px rgba(0,0,0,0.6)',
             }}
           >
-            {r.emoji}
-            <div className="text-[10px] text-white/70 text-center font-medium -mt-1">
+            {drawnReaction(r.emoji)}
+            <div className="text-[12px] text-white text-center font-semibold -mt-1">
               {r.username}
             </div>
           </div>
@@ -161,37 +163,95 @@ interface PickerProps {
   // internal open state was invisible to it and an open picker could fade
   // out mid-read in fullscreen.
   onOpenChange?: (open: boolean) => void
+  // "player": the trigger is one of the player's own bar buttons (48px, no
+  // fill on the picture). "dock": a 40px button with no fill of its own,
+  // for the party's mini dock, which is the fill. Default: a compact
+  // trigger with its own fill, for the party panel's composer.
+  variant?: 'compact' | 'player' | 'dock'
 }
 
-const QUICK_EMOJI = ['😂', '😱', '🔥', '❤️', '👏', '🤯', '😭', '💀', '🎉']
-
-export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', onOpenChange }: PickerProps) {
+export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', onOpenChange, variant = 'compact' }: PickerProps) {
   const [open, setOpen] = useState(false)
   const popoverAnchor = placement === 'left' ? 'left-0' : 'right-0'
   const popoverV = vertical === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'
   // Report open state up (VideoPlayer's auto-hide pin). Effect, not inline
-  // in the toggles: every state path — trigger toggle, emoji pick, any
-  // future dismiss — reports through one channel.
-  useEffect(() => { onOpenChange?.(open) }, [open, onOpenChange])
+  // in the toggles: every state path (trigger toggle, emoji pick, Escape,
+  // any future dismiss) reports through one channel.
+  //
+  // Only a CHANGE is reported, and the callback is read through a ref. Keyed
+  // on the callback itself, an inline arrow from the parent re-ran this after
+  // every one of the parent's renders: the player renders about five times a
+  // second while it plays, its callback re-arms the bars' hide timer on
+  // "closed", and so the bars never hid for anyone in a watch party.
+  const onOpenChangeRef = useRef(onOpenChange)
+  useEffect(() => { onOpenChangeRef.current = onOpenChange })
+  const reportedOpenRef = useRef(false)
+  useEffect(() => {
+    if (reportedOpenRef.current === open) return
+    reportedOpenRef.current = open
+    onOpenChangeRef.current?.(open)
+  }, [open])
+  // Unmounted while open (the party ended under it): the parent must not be
+  // left holding an "open" it will never hear closed.
+  useEffect(() => () => {
+    if (reportedOpenRef.current) onOpenChangeRef.current?.(false)
+  }, [])
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  // Closing takes the emoji buttons out of the document. When one of them
+  // had focus (a keyboard pick, Escape from inside the row), focus would fall
+  // to <body>; it goes back to the trigger. Focus that is somewhere else is
+  // left where it is.
+  const close = () => {
+    const hadFocus = !!popoverRef.current?.contains(document.activeElement)
+    setOpen(false)
+    if (hadFocus) triggerRef.current?.focus({ preventScroll: true })
+  }
+  // Escape closes the row of emoji and nothing else: not the player or the
+  // page (the app's own Escape handler is on window), and not a layer under
+  // this one (lib/escapeLayers gives each press to the newest).
+  const closeRef = useRef(close)
+  useEffect(() => { closeRef.current = close })
+  useEffect(() => {
+    if (!open) return
+    return pushEscapeLayer(() => closeRef.current())
+  }, [open])
   return (
-    <div className="relative">
+    <div className="relative flex-none">
       <button
+        ref={triggerRef}
+        type="button"
         onClick={() => setOpen(o => !o)}
-        className="px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
+        className={variant === 'player'
+          ? 'stage-tr-btn grid text-[20px]'
+          : variant === 'dock'
+            ? 'stage-minidock-reaction stage-hit44 w-10 h-10 grid place-items-center rounded-control text-[18px] hover:bg-action-soft data-[open]:bg-action-soft transition-colors'
+            : 'w-10 h-10 grid place-items-center rounded-control bg-action-soft text-[18px] hover:bg-white/[0.16] transition-colors'}
+        data-open={open || undefined}
+        aria-label="Send a reaction"
+        aria-expanded={open}
         title="Send a reaction"
       >
-        😂
+        <span aria-hidden="true">😂</span>
       </button>
       {open && (
-        <div className={`absolute ${popoverV} ${popoverAnchor} bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl px-2 py-2 flex flex-wrap justify-center gap-1 max-w-[min(90vw,288px)] z-20`}>
-          {QUICK_EMOJI.map(e => (
+        <div
+          ref={popoverRef}
+          role="group"
+          aria-label="Send a reaction"
+          className={`absolute ${popoverV} ${popoverAnchor} bg-surface-raised-2 rounded-control shadow-[0_24px_64px_rgba(0,0,0,0.6)] p-2 flex flex-wrap justify-center gap-1 w-[min(90vw,288px)] z-20`}
+        >
+          {/* The list is lib/reactions': each is one the server accepts, as
+              it is sent; what is drawn can differ (the heart). */}
+          {QUICK_REACTIONS.map(e => (
             <button
               key={e}
-              onClick={() => { onSend(e); setOpen(false) }}
-              className="text-2xl px-2 py-1 hover:bg-white/[0.08] rounded transition-colors"
-              aria-label={`React with ${e}`}
+              type="button"
+              onClick={() => { onSend(e); close() }}
+              className="w-12 h-12 grid place-items-center text-2xl rounded-control hover:bg-action-soft transition-colors"
+              aria-label={`React with ${drawnReaction(e)}`}
             >
-              {e}
+              {drawnReaction(e)}
             </button>
           ))}
         </div>

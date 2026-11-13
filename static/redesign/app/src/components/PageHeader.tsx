@@ -1,5 +1,4 @@
-// Aurora Stage Phase 6 — the shared page header, and the filter-pill row
-// that sits under it on Requests and My Library.
+// Aurora Stage Phase 6 — the shared page header.
 //
 // Option B repeats one header block on five screens (Requests, My Library,
 // Collections, Calendar, Search Results): an uppercase purple eyebrow, a 38px
@@ -28,7 +27,7 @@ interface PageHeaderProps {
   // into a template literal at the call site. Typing the prop as ReactNode is
   // what makes that mistake unrepresentable rather than merely discouraged.
   sub?: ReactNode
-  // Right-aligned action ("Request New", "+ New Collection"). Wrapped in a
+  // Right-aligned action (a page's one button, such as Together's). Wrapped in a
   // shrink-0 box here so a long title can never squeeze the button.
   action?: ReactNode
   className?: string
@@ -57,74 +56,10 @@ export function PageHeader({ eyebrow, title, sub, action, className }: PageHeade
         </h1>
         {sub && <div className="text-white/60 text-sm mt-1.5">{sub}</div>}
       </div>
-      {action && <div className="shrink-0">{action}</div>}
+      {/* max-w-full: never squeezed by the title, but never wider than the
+          page either, so an action of several buttons can wrap on a phone
+          instead of pushing the page sideways. */}
+      {action && <div className="shrink-0 max-w-full">{action}</div>}
     </div>
-  )
-}
-
-export interface FilterPillOption<T extends string> {
-  value: T
-  label: string
-  // Rendered in the pill's count chip. Omit for a pill that has no
-  // meaningful count (My Library's All/Movies/TV Shows before any filtering
-  // is applied, for instance) — the chip is then not rendered at all rather
-  // than showing a 0 that looks like an empty result.
-  count?: number
-}
-
-// The pill row from the mockup. Requests and My Library both had their own
-// near-identical copy of this markup; the divergence had already started
-// (Requests appended "(3)" as plain text inside the label, Library showed no
-// counts at all).
-//
-// <button aria-pressed> rather than role="tab": these filter the list below
-// them in place, they don't switch between panels, and tabs carry keyboard
-// expectations (arrow-key navigation, one tab stop for the whole set) that
-// this control does not implement. Toggle buttons are the honest role, and
-// .stage-fpill styles the selected state off aria-pressed so the visual and
-// the accessible state cannot drift apart.
-export function FilterPills<T extends string>({
-  options,
-  value,
-  onChange,
-  label,
-  className,
-}: {
-  options: readonly FilterPillOption<T>[]
-  value: T
-  onChange: (v: T) => void
-  // Names the group for screen readers ("Filter requests by status"). Without
-  // it the pills announce as six unrelated toggle buttons.
-  label: string
-  className?: string
-}) {
-  const active = options.find(o => o.value === value)
-  return (
-    <>
-      <div role="group" aria-label={label} className={cn('flex items-center gap-2 flex-wrap', className)}>
-        {options.map(o => (
-          <button
-            key={o.value}
-            type="button"
-            aria-pressed={value === o.value}
-            onClick={() => onChange(o.value)}
-            className="stage-fpill inline-flex"
-          >
-            {o.label}
-            {o.count !== undefined && <span className="c">{o.count}</span>}
-          </button>
-        ))}
-      </div>
-      {/* Changing a pill silently rewrites the list below it. Nothing moves
-          focus and nothing is announced, so a screen-reader user pressing
-          "Failed" gets no confirmation that anything happened — the pill's own
-          aria-pressed flip is only heard if they happen to still be on it.
-          sr-only live region carries the outcome. */}
-      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {active
-          ? `${label}: ${active.label}${active.count !== undefined ? `, ${active.count} shown` : ''}`
-          : ''}
-      </span>
-    </>
   )
 }

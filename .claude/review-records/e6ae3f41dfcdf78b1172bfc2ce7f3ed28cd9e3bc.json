@@ -1,0 +1,10 @@
+{
+  "sha": "e6ae3f41dfcdf78b1172bfc2ce7f3ed28cd9e3bc",
+  "verdict": "lows-only",
+  "summary": "The toast corner beside the party's open rail: from 640px the toasts and the update notice end 16px left of the rail (the notice's Reload was under it and toasts lay over its chat at tablet widths). The dock's independent reviewer built it and ran its own fixture at eight sizes and the audit against a mutated stylesheet: lows-only. A very long toast wraps tall in the 250px corner at 640px and a stack with the notice can leave the top of the window; the audit checks that the corner does not touch the rail, not the exact 16px. Both recorded as known items.",
+  "reviewer": "fresh-context-agent-a61707e9",
+  "findings": "2",
+  "diff_digest": "33164d5fdb22f5c57420b7b9291dd8c76ccd61c77d8d357a36642e65a8ab86e8",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T07:09:22Z"
+}

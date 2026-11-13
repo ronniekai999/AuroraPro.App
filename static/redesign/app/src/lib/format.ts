@@ -15,6 +15,22 @@ export function formatRequestDate(iso: string): string {
   return new Date(iso).toLocaleDateString()
 }
 
+// When a request was asked for, or arrived, as the requests page says it
+// after "asked" and "Added to the library": "today", "yesterday", "3 days
+// ago", then the day ("Nov 8", with the year when it is not this one). Not
+// formatRequestDate's "3h ago": the page says days, as the design does.
+export function formatRequestDay(iso: string, now = Date.now()): string {
+  const t = new Date(iso).getTime()
+  if (!t) return ''
+  const day = (ms: number) => { const d = new Date(ms); return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) }
+  const days = Math.round((day(now) - day(t)) / 86_400_000)
+  if (days <= 0) return 'today'
+  if (days === 1) return 'yesterday'
+  if (days < 7) return `${days} days ago`
+  const sameYear = new Date(t).getFullYear() === new Date(now).getFullYear()
+  return new Date(t).toLocaleDateString('en-US', sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
 const RESUME_THRESHOLD_MS = 5000
 
 // isResumable — true when a Continue Watching record represents
