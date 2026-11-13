@@ -222,9 +222,10 @@
     --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
     /* A title opened from a poster (index.css "Travel"): the poster's travel
        and the pages' cross-fade both take this long, and for this long plus
-       the frames the browser takes its pictures in, a press does nothing (a
-       captured root takes every press). Shorter than an entrance on
-       purpose: long enough to be seen as a cross-fade, and no longer. */
+       the frames the browser takes its pictures in, a press that begins
+       does nothing (a captured root takes every press). Shorter than an
+       entrance on purpose: long enough to be seen as a cross-fade, and no
+       longer. */
     --dur-travel: 200ms;
     /* A 1px top highlight that makes a dark glass surface read as lit from
        above. Folded into the --glow-halo tokens (G1) and used directly on the
@@ -4076,7 +4077,8 @@ html:has(.player-cast-widget) .stage-shell {
    other over them.
    THE COST, chosen by the owner: while a captured root's transition runs,
    Chromium sends every press to <html> whatever pointer-events says, so a
-   press in that time (Play, Back, a tab) does nothing. --dur-travel keeps
+   press that begins in that time (Play, Back, a tab) does nothing, even one
+   that ends after it. --dur-travel keeps
    that window short; docs/redesign-known-items.md (Motion) has the
    measured figure. The title page's own entrance (.animate-fade-in) is
    finished as it arrives, so the page is not faded twice. */

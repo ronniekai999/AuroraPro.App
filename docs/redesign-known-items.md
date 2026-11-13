@@ -116,14 +116,21 @@ Fix or file each item, and delete it here when it is no longer true.
   While the picker is open the chat ticker can be drawn over the card. No real
   cast session was rendered.
 - Motion: opening a title from a poster cross-fades the whole page into the
-  title page while the poster travels, and for the length of it a press does
+  title page while the poster travels, and a press that begins during it does
   nothing: with the page captured, Chromium sends every press to `<html>`.
   That is the owner's choice of trade-off. The window, from the press to the
   first press that lands on the title page, was measured in headless Chromium
   in the build container (software rendering, no GPU), with the 200 ms
-  `--dur-travel`: median about 360 ms at 1440x900 (326 to 411 over sixteen
-  opens) and 362 ms at 1024x768 (317 to 380 over six); every press in it went
-  to `<html>`. A 1 ms transition still cost about 155 ms there (the frames the
+  `--dur-travel` and presses whose down and up came together: median about 360
+  ms at 1440x900 (326 to 411 over sixteen opens) and 362 ms at 1024x768 (317
+  to 380 over six); every press in it went to `<html>`. A press is judged by
+  where it begins: one that begins inside the window is lost even when it ends
+  after it (its click goes to `<html>`: in one open the window was 369 ms, and
+  a tap that went down on Back at 324 ms and up at 478 ms did not reach it).
+  So a tap has to begin after the window, and what a person feels is about the
+  measured figure plus their own press, roughly 80 to 150 ms: with 100 ms
+  taps, Back was reached about 460 ms after the opening press (457 to 476 over
+  four opens). A 1 ms transition still cost about 155 ms there (the frames the
   browser takes its pictures in, and slow first frames in software), so a
   GPU-composited browser should do better; that was not measured. Only opens
   that travel cross-fade (from 1024px, a plain press on a loaded 2:3 poster);
@@ -136,10 +143,20 @@ Fix or file each item, and delete it here when it is no longer true.
   one frame before it lands. A poster inside a rail's faded edge travels
   without the fade. The motion audit cannot see a guard that asks the wrong
   way round, an alias, an animation given to a view-transition pseudo-element
-  from outside `index.css`, or a later rule that restores an animation other
-  than an `!important` one on a view-transition pseudo-element (which it
-  refuses). App's wiring of the travel has no test (jsdom has no view
-  transitions), and Firefox and Safari were not run.
+  from outside `index.css` or under a name written with a CSS escape, or a
+  later rule that restores an animation anywhere but on a view-transition
+  pseudo-element. On view-transition pseudo-elements in `index.css` it refuses
+  (Check 5c) any animation on `::view-transition-image-pair` or the
+  `::view-transition` overlay, which nothing stills; any `!important`
+  animation on a view-transition pseudo-element; and any `@view-transition`
+  rule. It reads them as a browser does: selectors, properties and at-rules in
+  any letter case, `-webkit-animation` and `-webkit-animation-name` as the
+  aliases they are, each rule by the declaration that wins its animation-name
+  (an `!important` one over any other, then the later), and a value it cannot
+  judge (a `var()`, `inherit`, `revert`) as an animation; and it checks that
+  reading against known answers on every run. App's wiring of the travel has
+  no test (jsdom has no view transitions), and Firefox and Safari were not
+  run.
 - Failure words: a step back can still be taken twice in the few milliseconds
   between a press on Back and the browser applying it. A request already out
   when a session ends still completes, and a toast it raises is shown to the

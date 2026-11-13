@@ -2826,8 +2826,8 @@ export default function App() {
     // always was, unless a plain press on this title's card is behind it and
     // the browser can draw that card's poster travelling to the title
     // page's while the two pages cross-fade. Then it runs one frame later,
-    // inside the browser's transition, and a press does nothing until that
-    // transition ends. Never while a player or a party's panel is over the page,
+    // inside the browser's transition, and a press that begins before that
+    // transition ends does nothing. Never while a player or a party's panel is over the page,
     // and only when the title page can draw its poster at once (its code is
     // here and the title has one).
     travelToTitle(m.id, open, { blocked: travelBlockedRef.current, arrives: detailModule !== null && !!m.poster })

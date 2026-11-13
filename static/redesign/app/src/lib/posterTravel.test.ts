@@ -432,17 +432,21 @@ describe('what travels: one name, on one element in each of the browser\'s two p
 // animations getAnimations hands back.
 describe('the title page fades in once', () => {
   const animation = (animationName: string, finish = vi.fn()) => ({ animationName, finish })
-  let entrance: ReturnType<typeof animation>, picture: ReturnType<typeof animation>, stuck: ReturnType<typeof animation>
+  let entrance: ReturnType<typeof animation>, picture: ReturnType<typeof animation>, stuck: ReturnType<typeof animation>, menu: ReturnType<typeof animation>
+  const animations = (id: string, list: unknown[]) => { (document.getElementById(id) as unknown as { getAnimations: () => unknown[] }).getAnimations = () => list }
   const titlePageWithEntrance = () => () => {
     titlePage(true)()
-    document.body.insertAdjacentHTML('afterbegin', '<div class="stage-detail animate-fade-in" id="entrance"></div><div class="animate-fade-in" id="stuck"></div>')
+    document.body.insertAdjacentHTML('afterbegin', '<div class="stage-detail animate-fade-in" id="entrance"><div class="animate-fade-in" id="stuck"></div></div><div class="animate-fade-in" id="menu"></div>')
     entrance = animation('fadeIn')
     // A picture's own fade as it loads is the picture's, not the page's.
     picture = animation('heroFadeIn')
-    // One the browser cannot finish (it throws): the open goes on.
+    // One inside the page the browser cannot finish (it throws): the open goes on.
     stuck = animation('fadeIn', vi.fn(() => { throw new DOMException('no', 'InvalidStateError') }))
-    ;(document.getElementById('entrance') as unknown as { getAnimations: () => unknown[] }).getAnimations = () => [entrance, picture]
-    ;(document.getElementById('stuck') as unknown as { getAnimations: () => unknown[] }).getAnimations = () => [stuck]
+    // Something arriving outside the title page (a menu) keeps its own.
+    menu = animation('fadeIn')
+    animations('entrance', [entrance, picture])
+    animations('stuck', [stuck])
+    animations('menu', [menu])
   }
 
   it('inside the transition its entrance is finished as it arrives, before the second picture', () => {
@@ -452,6 +456,7 @@ describe('the title page fades in once', () => {
     expect(entrance.finish).toHaveBeenCalledTimes(1)
     expect(stuck.finish).toHaveBeenCalledTimes(1)
     expect(picture.finish).not.toHaveBeenCalled()
+    expect(menu.finish).not.toHaveBeenCalled()
   })
 
   it('an open made at once, or without the callback, keeps its entrance: no cross-fade brings it in', async () => {

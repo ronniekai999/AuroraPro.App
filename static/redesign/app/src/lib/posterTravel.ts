@@ -11,7 +11,8 @@
 //
 // WHAT IT COSTS. A captured root takes every press for the length of the
 // transition: Chromium sends each hit to <html> while it runs, whatever
-// pointer-events says. So a press during it does nothing; the owner chose the
+// pointer-events says. So a press that begins during it does nothing, even
+// one that ends after it (its click goes to <html>); the owner chose the
 // cross-fade knowing that, and the transition is kept short to keep that
 // window short (--dur-travel). The title page's own entrance
 // (.animate-fade-in) is finished as it arrives, so it is not faded twice, once
@@ -69,6 +70,8 @@ export const TRAVELLING = 'data-title-travel'
 
 /** The title page's poster (DetailHero). */
 const DESTINATION = '[data-title-poster]'
+/** The title page itself (DetailView's root, which carries its entrance). */
+const TITLE_PAGE = '.stage-detail'
 /** Width from which the title page draws its poster (Tailwind's lg). */
 const POSTER_FROM = '(min-width: 64rem)'
 /** If the browser has not run the update callback by then, the open is
@@ -126,10 +129,11 @@ function travellingPicture(card: Element, doc: Document): HTMLImageElement | nul
 /** The title page's own entrance, finished as it arrives inside the
  *  transition: the cross-fade brings the page in, and the entrance run
  *  under it as well would fade its content twice (it would come up after
- *  its own background). Only the page entrance (`fadeIn`, .animate-fade-in);
- *  a picture's own fade as it loads is the picture's. */
+ *  its own background). Only the title page's (`fadeIn`, .animate-fade-in,
+ *  on the page or inside it): a menu or dialog arriving elsewhere keeps its
+ *  own, and a picture's own fade as it loads is the picture's. */
 function finishEntrances(doc: Document): void {
-  for (const el of doc.querySelectorAll('.animate-fade-in')) {
+  for (const el of doc.querySelectorAll(`${TITLE_PAGE}.animate-fade-in, ${TITLE_PAGE} .animate-fade-in`)) {
     // getAnimations flushes style first, so an entrance the change has just
     // mounted is there to finish. A browser without it has no transitions.
     for (const a of el.getAnimations?.() ?? []) {
