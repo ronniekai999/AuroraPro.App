@@ -5,8 +5,8 @@
 // would unmount the whole app and leave the user staring at a blank
 // white page with no way to recover except a hard refresh. This
 // component catches the throw, logs a stack to console (dev only),
-// and renders an inline fallback with a reload button so the user
-// gets a clear next step instead of an opaque void.
+// and renders the error screen (ErrorScreen) so the user gets a clear
+// next step instead of an opaque void.
 //
 // React 19 ships a useErrorBoundary hook but it's still in beta;
 // class components remain the documented stable way to implement
@@ -20,6 +20,7 @@
 import { Component } from 'react'
 import type { ErrorInfo, ReactNode } from 'react'
 import { announceStaleBundle, isStaleBundleError } from '@/lib/buildUpdate'
+import { ErrorScreen } from './ErrorScreen'
 
 interface Props {
   children: ReactNode
@@ -69,99 +70,12 @@ export class ErrorBoundary extends Component<Props, State> {
       return this.props.fallback(error, this.retry)
     }
 
-    // A chunk this page needs did not load. Usually Aurora was updated while
-    // the page was open (each deploy deletes the previous build's files), but
-    // a dropped connection reads the same, so the wording claims neither.
-    // Retrying cannot help either way, since the browser keeps the failed
-    // import, so the only way forward offered is a reload; the update notice
-    // is asked to check, and says so separately when it was a deploy.
-    const stale = isStaleBundleError(error)
-
-    // Default fallback. Kept inline + minimal so it doesn't depend
-    // on Tailwind classes, fonts, or other app chrome — it has to
-    // render even if the failure was in the styling layer. The values are
-    // the app's own tokens written out (--surface-page, --ink, --ink-2,
-    // --surface-raised): the page's colours, a white primary action and a
-    // quiet second one, as everywhere else. The stylesheet may be what
-    // failed, so they cannot be read from it.
-    return (
-      <div
-        role="alert"
-        style={{
-          minHeight: '100vh',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: '#0e0f11',
-          color: '#f4f4f5',
-          fontFamily: 'Inter, system-ui, sans-serif',
-          padding: '24px',
-        }}
-      >
-        <div style={{ maxWidth: 480, textAlign: 'center' }}>
-          <h1 style={{ margin: '0 0 12px', fontFamily: "'Bricolage Grotesque', system-ui, sans-serif", fontSize: 'clamp(28px, 6vw, 40px)', lineHeight: 1.05, fontWeight: 800, letterSpacing: '-0.02em' }}>
-            {stale ? "Part of Aurora couldn't load" : 'Aurora hit an unexpected error'}
-          </h1>
-          <p style={{ margin: '0 0 24px', fontSize: 16, color: '#b4b6bc', lineHeight: 1.5 }}>
-            {stale
-              ? 'This usually means Aurora was updated while this page was open, or the connection dropped. Reload to continue. Your data is safe.'
-              : 'Something went wrong rendering this page. Your data is safe — only the in-memory view is affected.'}
-          </p>
-          {import.meta.env.DEV && (
-            <pre
-              style={{
-                textAlign: 'left',
-                background: '#17181b',
-                color: '#b4b6bc',
-                padding: 12,
-                borderRadius: 12,
-                fontSize: 12,
-                overflow: 'auto',
-                marginBottom: 24,
-                maxHeight: 200,
-              }}
-            >
-              {error.message}
-              {error.stack && '\n\n' + error.stack}
-            </pre>
-          )}
-          <button
-            type="button"
-            onClick={() => window.location.reload()}
-            style={{
-              background: '#ffffff',
-              color: '#0e0f11',
-              border: 'none',
-              height: 48,
-              padding: '0 24px',
-              borderRadius: 999,
-              fontSize: 15,
-              cursor: 'pointer',
-              fontWeight: 600,
-              marginRight: 8,
-            }}
-          >
-            Reload page
-          </button>
-          {!stale && <button
-            type="button"
-            onClick={this.retry}
-            style={{
-              background: '#202226',
-              color: '#f4f4f5',
-              border: 'none',
-              height: 48,
-              padding: '0 20px',
-              borderRadius: 12,
-              fontSize: 15,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            Try again
-          </button>}
-        </div>
-      </div>
-    )
+    // The default: the app's error screen. What it shows and offers, and
+    // why it reads nothing from the tree it replaces, is in ErrorScreen.
+    // It has no "try again": drawing the same tree from the same state
+    // stops at the same place, and for a chunk that did not load the
+    // browser keeps the failed import, so the ways forward are a reload and
+    // a fresh start at Tonight.
+    return <ErrorScreen error={error} />
   }
 }

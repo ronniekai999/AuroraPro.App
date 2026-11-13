@@ -4,13 +4,14 @@
 //
 // One implementation, drawn inside whatever frames it: useBugReportForm
 // holds the form's state and does its work, BugReportFields draws the form,
-// and the frame (the dialog, BugReportModal) reads from the same state what
-// it needs to know: whether a send, a capture or a recording is under way,
-// and whether the report has been sent.
+// and the frame (the dialog, BugReportModal; the panel on the error screen,
+// ErrorScreen) reads from the same state what it needs to know: whether a
+// send, a capture or a recording is under way, and whether the report has
+// been sent.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { submitBugReport, type BugReportSubmitResult } from '@/lib/api'
+import { collectClientContext, submitBugReport, type BugReportSubmitResult } from '@/lib/api'
 import { Icon } from '@/components/Icon'
 
 
@@ -160,9 +161,22 @@ export interface BugReportFormOptions {
   // one did and nothing has been sent since: the form is going, and its
   // refusal with it, so the caller has to say that the report was not sent.
   onDismissed?: (unsent: string | null) => void
+  // What the page the form is on has already put in front of the person,
+  // and the report is to carry: `text` goes at the end of the description,
+  // as written, and `url` is the address the report names (the page the
+  // text is about, whatever the address bar has moved to since). The form
+  // says that it carries them (see the heads-up).
+  evidence?: BugReportEvidence
 }
 
-export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed = false, onDismissed }: BugReportFormOptions) {
+export interface BugReportEvidence { text: string; url: string }
+
+/** What is put between the person's description and the evidence. */
+const EVIDENCE_GAP = '\n\n'
+
+export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed = false, onDismissed, evidence }: BugReportFormOptions) {
+  // The description and the evidence share the server's limit.
+  const descriptionMax = Math.max(1, MAX_DESC_LEN - (evidence ? evidence.text.length + EVIDENCE_GAP.length : 0))
   const [name, setName] = useState(prefillName ?? '')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -926,8 +940,8 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       refuse(`Title exceeds ${MAX_TITLE_LEN} characters.`, 'title')
       return
     }
-    if (trimmedDesc.length > MAX_DESC_LEN) {
-      refuse(`Description exceeds ${MAX_DESC_LEN} characters.`, 'description')
+    if (trimmedDesc.length > descriptionMax) {
+      refuse(`Description exceeds ${descriptionMax} characters.`, 'description')
       return
     }
     clearError()
@@ -940,9 +954,11 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
     try {
       const result = await submitBugReport({
         title: trimmedTitle,
-        description: trimmedDesc,
+        description: evidence ? `${trimmedDesc}${EVIDENCE_GAP}${evidence.text}` : trimmedDesc,
         name: name.trim() || undefined,
         attachment: attachment ?? undefined,
+        // The page the evidence is about, not wherever the tab is now.
+        ...(evidence ? { context: { ...collectClientContext(), url: evidence.url } } : {}),
       }, ac.signal)
       // 2026-05-27 — Switch the modal body to the success view instead
       // of closing + opening the GitHub URL in a new tab. The repo is
@@ -985,6 +1001,7 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
     submittingRef, capturingRef, recordingRef, titleInputRef,
     handleStopRecording,
     // The fields' own.
+    descriptionMax, carriesEvidence: !!evidence,
     name, setName, title, setTitle, description, setDescription,
     attachment, attachmentPreviewURL,
     error, errorField, fieldRefusal, refilling, clearError, captureAnnounce,
@@ -1000,7 +1017,7 @@ export type BugReportFormState = ReturnType<typeof useBugReportForm>
  *  refusal and status lines, Cancel and Send. */
 export function BugReportFields({ form }: { form: BugReportFormState }) {
   const {
-    submitting, capturing, recording, titleInputRef,
+    submitting, capturing, recording, titleInputRef, descriptionMax, carriesEvidence,
     name, setName, title, setTitle, description, setDescription,
     attachment, attachmentPreviewURL,
     error, errorField, fieldRefusal, refilling, clearError, captureAnnounce,
@@ -1067,7 +1084,7 @@ export function BugReportFields({ form }: { form: BugReportFormState }) {
           id="bug-desc"
           value={description}
           onChange={e => { setDescription(e.target.value); if (errorField === 'description' || (refilling && fieldRefusal?.field === 'description')) clearError() }}
-          maxLength={MAX_DESC_LEN}
+          maxLength={descriptionMax}
           required
           aria-invalid={errorField === 'description'}
           aria-describedby={errorField === 'description' ? 'bug-error' : undefined}
@@ -1080,7 +1097,7 @@ export function BugReportFields({ form }: { form: BugReportFormState }) {
           className="w-full disabled:opacity-50 read-only:opacity-60 resize-y min-h-[120px]"
         />
         <p className="text-ink-2 text-xs mt-1 tabular-nums">
-          {description.length} / {MAX_DESC_LEN}
+          {description.length} / {descriptionMax}
         </p>
       </div>
 
@@ -1278,6 +1295,17 @@ export function BugReportFields({ form }: { form: BugReportFormState }) {
         console + network log (last few minutes) for triage. Sensitive
         URL params (tokens, passwords, API keys) are redacted before
         attaching, and bodies/headers are never captured.
+        {/* Said wherever it is sent: the page's own evidence. No promise
+            that a report leaves out what was watched; an address, an
+            error's text and the log's requests can each point at a title. */}
+        {carriesEvidence && (
+          <span data-evidence-note="">
+            {' '}This report also carries what the app saw, exactly as it is
+            shown on this page: the error's text, the page's address, the
+            time and the build. With the log, that can show which pages and
+            titles were open.
+          </span>
+        )}
         {attachment && (
           <>
             {' '}Screenshots and recordings may also show personal data

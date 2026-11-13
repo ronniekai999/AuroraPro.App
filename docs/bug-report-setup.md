@@ -144,6 +144,13 @@ it: open Movies, scroll down, go to Me, press "Report a bug". You should
 be back on Movies where you were, with the dialog open, and the issue's
 "URL" line should read `/v2/movies`, not `/v2/me`.
 
+The same form is also offered on the screen the app shows when a page
+stops ("That did not load."), as "Report a problem", to a signed-in
+session on a server that takes reports. A report sent from there carries,
+at the end of its description, what that screen shows under "What the
+app saw": the error's message (never its stack), the page's address, the
+time and the build. Its "URL" line is the page that stopped.
+
 To smoke-test the full flow:
 1. Fill in title + description
 2. Optionally attach a small PNG screenshot
