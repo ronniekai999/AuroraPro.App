@@ -2147,9 +2147,14 @@ Code: `lib/pageCapture.ts` (html-to-image), called by
 (in `audit:checks`: the built app under the production CSP, captures made
 through the form compared pixel by pixel with screenshots, mutation-tested)
 and `lib/pageCapture.test.ts`. The check runs the browser with font hinting
-off (its own fontconfig file) and leans on headless's hidden scrollbars: a
-visible scrollbar is drawn in the screenshot and not in the copy, and
-hinting changes system-font text in the copy (see the known gaps).
+and subpixel anti-aliasing off (its own fontconfig file and
+`--disable-lcd-text`) and leans on headless's hidden scrollbars: a visible
+scrollbar is drawn in the screenshot and not in the copy, and both font
+settings change the copy's text against the screen's (see the known gaps).
+The headless shell on the dev box is a wrapper that already passes
+`--font-render-hinting=none --disable-lcd-text`, and its fontconfig turns
+hinting off, which hid CI's failure there; the unwrapped
+`chrome-headless-shell.real` with a stock fontconfig reproduces CI.
 
 - The copy is laid out again inside an SVG image, which loads nothing. The
   families the document has loaded go in as data: URLs read with `fetch`
@@ -2190,16 +2195,20 @@ hinting changes system-font text in the copy (see the known gaps).
   before); an inner scroll box is drawn at its start (a rail scrolled
   sideways shows its first cards); a backdrop blur picks up a faint tint at
   its edges; fonts are matched by family only; checked in Chromium only,
-  not Safari or Firefox. Text in a system font (the system's monospace:
+  not Safari or Firefox. The copy's text is always greyscale: on a screen
+  whose text has subpixel (colour-fringed) anti-aliasing, as on CI's runner
+  and many Linux desktops, the capture's text lacks the fringes (CI failed
+  the error screen at 390px by 1.7% on that, its paragraph and buttons as
+  much as anything). Text in a system font (the system's monospace:
   the error screen's "What the app saw" block, party and device codes, some
   admin text; fallback glyphs such as CJK or symbols outside the embedded
   latin subsets) cannot be embedded, and on a Linux machine that hints its
-  fonts, at a device scale of 2, the copy (laid out at 1 and scaled up)
-  gives it other glyph widths than the screen: on CI's runner the error
-  screen's monospace lines ended early, 1.7% of that capture's pixels
-  differing. Every box keeps its size, so a line that came out wider could
-  wrap and be drawn over the text under it (not seen in today's app). The
-  check turns hinting off and does not see this. Laying the copy out at the
+  fonts medium or full, at a device scale of 2, the copy (laid out at 1 and
+  scaled up) gives it other glyph widths than the screen: the error
+  screen's monospace lines end early (2.2% of that capture). Every box
+  keeps its size, so a line that came out wider could wrap and be drawn
+  over the text under it (not seen in today's app). The check turns both
+  off and sees neither. Laying the copy out at the
   device scale (CSS `zoom`) was tried and made the embedded fonts' text
   differ instead. The check's font coverage leans on the Bricolage
   headings: where Inter is installed on the machine, a copy without

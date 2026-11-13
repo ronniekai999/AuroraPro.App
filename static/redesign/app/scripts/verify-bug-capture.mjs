@@ -49,23 +49,27 @@
 //   - The Bricolage headings pin the font embedding (where Inter is
 //     installed on the machine, the copy draws Inter text right with no
 //     fonts embedded; CI has none).
-//   - Font hinting is off: the browser is given a fontconfig file that
-//     turns it off (FONTCONFIG_FILE). Text in a system font (the error
-//     screen's "What the app saw" block is set in the system's monospace)
-//     cannot be embedded, and where the machine hints its fonts the copy,
-//     laid out at device scale 1 and scaled up, gives that text other glyph
-//     widths than the screen at device scale 2: on CI's runner the error
-//     screen at 390px differed by 1.7% (5.8% in one band), its monospace
-//     lines ending early. That is a real difference in the picture, on
-//     Linux machines that hint fonts, for system-font text only; it is a
-//     known gap in CLAUDE.md, and not what this check is for. Text in the
-//     app's own (embedded) fonts is drawn alike with hinting on or off.
+//   - Text is drawn without hinting and without subpixel (colour-fringed)
+//     anti-aliasing: the browser is given a fontconfig file that turns both
+//     off (FONTCONFIG_FILE) and `--disable-lcd-text`. The copy is an image,
+//     and its text is always greyscale, so on a machine whose fonts are drawn
+//     with subpixel anti-aliasing the screen's text has colour fringes the
+//     capture's has not: CI's runner (slight hinting, subpixel RGB) failed
+//     the error screen at 390px by 1.7% (5.8% in one band) on that, its
+//     paragraph and buttons as much as its monospace block. And where fonts
+//     are hinted harder (medium or full), text in a system font, which cannot
+//     be embedded (the error screen's "What the app saw" block is set in the
+//     system's monospace), is laid out in the copy at device scale 1 and
+//     scaled up, and its lines end early at scale 2. Both are real
+//     differences in the picture, written down as known gaps in CLAUDE.md,
+//     and not what this check is for. With both turned off, the screen and
+//     the copy draw text alike under every fontconfig tried.
 //
 // Run after a build (the audit chain does): node scripts/verify-bug-capture.mjs
 
 import { chromium } from 'playwright'
 import { createServer } from 'node:http'
-import { readFile, access, mkdtemp, writeFile } from 'node:fs/promises'
+import { readFile, access, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -383,22 +387,35 @@ async function openDialog(page, phone) {
   await page.getByRole('dialog').waitFor()
 }
 
-// Font hinting off for the browser (see the header): the machine's own
-// fontconfig, then a rule that assigns no hinting over whatever it set.
-const fontconfig = path.join(await mkdtemp(path.join(tmpdir(), 'aurora-bug-capture-fonts-')), 'fonts.conf')
+// Text drawn the same way on screen and in the copy (see the header): the
+// machine's own fontconfig, then a rule that assigns no hinting and no
+// subpixel (colour-fringed) anti-aliasing over whatever it set; and
+// Chromium told not to draw LCD text, which it can also decide for itself.
+const baseFontconfig = process.env.FONTCONFIG_FILE || '/etc/fonts/fonts.conf'
+if (!existsSync(baseFontconfig)) {
+  console.warn(`verify-bug-capture: no fontconfig at ${baseFontconfig}; the browser may run with no system fonts (set FONTCONFIG_FILE)`)
+}
+const fontconfigDir = await mkdtemp(path.join(tmpdir(), 'aurora-bug-capture-fonts-'))
+const fontconfig = path.join(fontconfigDir, 'fonts.conf')
 await writeFile(fontconfig, `<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 <fontconfig>
-  <include ignore_missing="yes">${process.env.FONTCONFIG_FILE || '/etc/fonts/fonts.conf'}</include>
+  <include ignore_missing="yes">${baseFontconfig}</include>
   <match target="pattern">
     <edit name="hinting" mode="assign"><bool>false</bool></edit>
     <edit name="hintstyle" mode="assign"><const>hintnone</const></edit>
     <edit name="autohint" mode="assign"><bool>false</bool></edit>
+    <edit name="rgba" mode="assign"><const>none</const></edit>
+    <edit name="lcdfilter" mode="assign"><const>lcdnone</const></edit>
   </match>
 </fontconfig>
 `)
 
-const browser = await chromium.launch({ executablePath: EXE, env: { ...process.env, FONTCONFIG_FILE: fontconfig } }).catch(err => {
+const browser = await chromium.launch({
+  executablePath: EXE,
+  args: ['--disable-lcd-text'],
+  env: { ...process.env, FONTCONFIG_FILE: fontconfig },
+}).catch(err => {
   console.error(`Could not launch Chromium (tried ${EXE ?? "Playwright's own browser"}) — set CHROMIUM_PATH or run: npx playwright install chromium`)
   throw err
 })
@@ -491,6 +508,7 @@ try {
 } finally {
   await browser.close()
   server.close()
+  await rm(fontconfigDir, { recursive: true, force: true })
 }
 
 if (failed) {
