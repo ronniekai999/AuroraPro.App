@@ -77,17 +77,17 @@ it('says an end that did not go through in the app\'s words', async () => {
   unmount()
 })
 
-// A persistent room with no live party: the hook knows the case from the
-// lookup's answer and says so in the field. Its words keep "persistent
-// room" while a caller still reads them.
-it('marks a persistent room with no live party, and keeps its words', async () => {
+// A room with no party running: the hook knows the case from the
+// lookup's answer and says so in the field; the sentence says who can
+// start one (only the room's owner can).
+it('marks a room with no party running, and says who can start one', async () => {
   vi.mocked(apiFetch).mockResolvedValue({ type: 'offline_room' })
   const { result, unmount } = renderHook(() => useParty(1, 3))
   let said: { ok: boolean; error?: string; reason?: string } | undefined
   await act(async () => { said = await result.current.join('ROOM42') })
   expect(said?.ok).toBe(false)
   expect(said?.reason).toBe('offline_room')
-  expect(said?.error).toMatch(/persistent room/)
+  expect(said?.error).toBe('Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.')
   unmount()
 })
 

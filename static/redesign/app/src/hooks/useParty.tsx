@@ -164,7 +164,7 @@ const MAX_REACTIONS = 100
  *  `reason`, beside it, is for code to branch on, never words:
  *  'invalid_code' for a code that is not six letters or digits;
  *  'signed_out' with nobody signed in; 'offline_room' for a code that names
- *  a persistent room with no live party; when the code's lookup failed, the
+ *  a room with no party running; when the code's lookup failed, the
  *  server's `error.reason` if it sent one, else `http_<status>` for a
  *  refusal ('http_404': no party holds that code now), or 'network' when no
  *  answer came. A failure after the lookup carries none. */
@@ -1247,12 +1247,11 @@ export function useParty(currentUserId?: number, actingProfileId: number | null 
       try {
         const info = await apiFetch<CodeInfo>(`/api/code/${encodeURIComponent(code)}/info`)
         // Backend distinguishes "active" (live party) from "offline_room"
-        // (persistent room with no live session). Only "active" is
-        // joinable — for "offline_room" surface a friendly message so
-        // the user knows to start the party from the room first.
+        // (a room with no party running). Only "active" is joinable. A
+        // room's party is started by the room's owner only
+        // (RoomHandler.StartParty), so that is who the person is sent to.
         if (info.type !== 'active') {
-          // The words keep "persistent room": a caller still reads that.
-          const error = 'That code is a persistent room; no live session right now.'
+          const error = 'Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.'
           setStatePatch({ joining: false, error })
           return { ok: false, error, reason: 'offline_room' }
         }

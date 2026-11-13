@@ -143,7 +143,7 @@ describe('the ways into a party', () => {
   // On a phone the code field is below every list: a refusal shown above
   // the lists was a screen or more away from the person who typed the code.
   it('joins with a typed code: six letters or digits, upper case, and says a refusal under the field it is about', async () => {
-    const onJoinParty = vi.fn<TogetherViewProps['onJoinParty']>().mockResolvedValueOnce({ ok: false, error: 'Invalid party code.' }).mockResolvedValueOnce({ ok: true })
+    const onJoinParty = vi.fn<TogetherViewProps['onJoinParty']>().mockResolvedValueOnce({ ok: false, error: 'Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.', reason: 'offline_room' }).mockResolvedValueOnce({ ok: true })
     render(<TogetherView {...props({ activeParties: [party()], onJoinParty })} />)
     const field = screen.getByLabelText('Party code, six letters or digits')
     const submit = screen.getByRole('button', { name: 'Join with this code' })
@@ -159,12 +159,12 @@ describe('the ways into a party', () => {
     submit.focus()
     fireEvent.click(submit)
     const alert = await screen.findByRole('alert')
-    expect(alert.textContent).toBe('Couldn’t join with that code: Invalid party code.')
+    expect(alert.textContent).toBe('Couldn’t join with that code: Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.')
     expect(onJoinParty).toHaveBeenCalledWith('ABC123')
     // Beside the field, tied to it, and said once: not also above the lists.
     expect(alert.closest('section')).toBe(field.closest('section'))
     expect(field).toHaveAttribute('aria-invalid', 'true')
-    expect(field).toHaveAccessibleDescription('Couldn’t join with that code: Invalid party code.')
+    expect(field).toHaveAccessibleDescription('Couldn’t join with that code: Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.')
     expect(screen.getAllByRole('alert')).toHaveLength(1)
     expect(document.querySelector('[data-join-error]')).toBeNull()
     // The code stays to be corrected, with the caret in it; a join that
@@ -182,16 +182,16 @@ describe('the ways into a party', () => {
 
   // A join can take seconds to be refused.
   it('does not pull the caret back to the code field from someone who has moved on', async () => {
-    let answer!: (r: { ok: boolean; error?: string }) => void
-    const onJoinParty = vi.fn(() => new Promise<{ ok: boolean; error?: string }>(resolve => { answer = resolve }))
+    let answer!: (r: { ok: boolean; error?: string; reason?: string }) => void
+    const onJoinParty = vi.fn(() => new Promise<{ ok: boolean; error?: string; reason?: string }>(resolve => { answer = resolve }))
     render(<TogetherView {...props({ activeParties: [party()], onJoinParty })} />)
     const field = screen.getByLabelText('Party code, six letters or digits')
     fireEvent.change(field, { target: { value: 'ABC123' } })
     fireEvent.click(screen.getByRole('button', { name: 'Join with this code' }))
     const elsewhere = screen.getByRole('button', { name: 'New room' })
     elsewhere.focus()
-    await act(async () => { answer({ ok: false, error: 'Invalid party code.' }) })
-    expect(await screen.findByRole('alert')).toHaveTextContent('Invalid party code.')
+    await act(async () => { answer({ ok: false, error: 'No party is using that code right now.', reason: 'http_404' }) })
+    expect(await screen.findByRole('alert')).toHaveTextContent('No party is using that code right now.')
     expect(elsewhere).toHaveFocus()
   })
 
@@ -218,7 +218,7 @@ describe('the ways into a party', () => {
   // live party: the page reads the reason, never the words.
   it.each([
     ['ended', { ok: false, error: 'No party is using that code right now.', reason: 'http_404' }],
-    ['a room with no live party', { ok: false, error: 'That code is a persistent room; no live session right now.', reason: 'offline_room' }],
+    ['a room with no live party', { ok: false, error: 'Nobody is watching in that room right now. Ask the person who made it to start a party there, then join again.', reason: 'offline_room' }],
     ['a code that is not a code', { ok: false, error: 'Party code must be 6 letters or digits.', reason: 'invalid_code' }],
   ])('stops offering a party that has %s', async (_case, refused) => {
     cacheLastParty({ code: 'LAST01', partyName: 'Friday crew', userId: 1, wasHost: false })
