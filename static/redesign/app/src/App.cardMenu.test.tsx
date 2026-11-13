@@ -91,6 +91,9 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
   /** The titles in the profile's library, as the server has them. */
   const saved = new Set([SAVED.id])
   const libraryReads = { n: 0 }
+  /** How the title page's own read of a title fails, when it does: with a
+   *  status and the server's words, or with the connection lost. */
+  const detail = { fails: null as null | { status: number; words: string } | 'network' }
   const parties: unknown[] = []
   const holds = new Map<string, Promise<void>>()
   const json = (body: unknown, status = 200) =>
@@ -153,6 +156,11 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
     if (p === `/api/media/${PRUNED.id}/seasons/0/episodes`) return json([{ id: 3060, season_id: 60, media_item_id: PRUNED.id, episode_number: 1, files: [{ id: 8060, resolution: '1080p' }] }])
     // The title page's own record of a title.
     const byId = p.match(/^\/api\/media\/(\d+)$/)
+    const fails = detail.fails
+    if (byId && fails) {
+      if (fails === 'network') throw new TypeError('Failed to fetch')
+      return json({ error: { code: fails.status, message: fails.words } }, fails.status)
+    }
     if (byId) {
       const it = [HALF, FRESH, SHOW, TWO, SPECIALS, PRUNED, AHEAD].find(x => x.id === Number(byId[1]))
       return it ? json(it) : json({ error: { code: 404, message: 'not found' } }, 404)
@@ -202,6 +210,8 @@ function stubServer({ bound = 1, role = 'user' } = {}) {
     releaseOneLibraryWrite() { libraryWrites.waiting.shift()?.() },
     /** How often the profile's library has been read. */
     get libraryReads() { return libraryReads.n },
+    /** The title page's read of a title fails from now on (see `detail`). */
+    failDetail(how: { status: number; words: string } | 'network') { detail.fails = how },
     hold(path: string) {
       let release!: () => void
       holds.set(path, new Promise<void>(done => { release = done }))
@@ -468,6 +478,24 @@ describe('every page that draws a card gives it the menu', () => {
     await act(async () => { await new Promise(done => setTimeout(done, 100)) })
     expect(screen.queryByText(/Couldn't/)).toBeNull()
     expect((await openMenu('Never Started')).rows).toContain('Add to My Library')
+  })
+
+  // The title page's read of a title failed, and the page printed the
+  // server's own words under the stars ("not found", a 5xx's text, "Failed
+  // to fetch"). It says it in its own: a 404 the same way whether the title
+  // is gone or above the profile's limit, anything else as a failure to load.
+  it.each([
+    ['a 404', { status: 404, words: 'not found' }, 'This title is not available.', /not found/],
+    ['a 500', { status: 500, words: 'pq: connection refused' }, 'Could not load this title\'s details just now.', /pq: connection refused/],
+    ['a lost connection', 'network' as const, 'Could not load this title\'s details just now.', /Failed to fetch/],
+  ])('the title page says %s in its own words', async (_how, how, says, raw) => {
+    const server = renderAt('/movies')
+    await screen.findAllByRole('button', { name: 'More actions for Never Started' }, find)
+    server.failDetail(how)
+    fireEvent.click(document.querySelector(`[data-media-id="${FRESH.id}"] .card-open`)!)
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: FRESH.title })).toBeInTheDocument(), find)
+    await screen.findByText(says, {}, find)
+    expect(screen.queryByText(raw)).toBeNull()
   })
 
   // Saved again by hand while "Removed … Undo" was still up, the title was

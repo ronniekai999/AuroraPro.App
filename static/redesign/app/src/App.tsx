@@ -72,6 +72,7 @@ import {
   listNotifications,
   markAllNotificationsRead,
   type AppNotification,
+  APIError,
 } from '@/lib/api'
 import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer'
 import { PartyPanel } from '@/components/PartyPanel'
@@ -1569,7 +1570,7 @@ export default function App() {
   // Which surface the player is presenting. 'theater' is the player in the
   // window: the picture edge to edge, or, in the boxed layout on a wide
   // window, set in beside the party panel. It is the only one that changes
-  // anything out here: the app behind it is dimmed and made inert.
+  // anything out here: the app behind it is made inert (not dimmed).
   // Fullscreen covers the viewport and minimized gives the page back, so
   // nothing behind them needs doing.
   const [playerSurface, setPlayerSurface] = useState<'theater' | 'fullscreen' | 'minimized' | null>(null)
@@ -4852,7 +4853,13 @@ export default function App() {
         }
       } catch (err) {
         if (cancelled || (err && (err as Error).name === 'AbortError')) return
-        setDetailError(err instanceof Error ? err.message : 'Failed to load details')
+        // Said in the page's own words, never the server's. A 404 does not
+        // say whether the title exists: under a rating ceiling a missing id
+        // and one above the ceiling get the same answer, and the page must
+        // not tell them apart either.
+        setDetailError(err instanceof APIError && err.status === 404
+          ? 'This title is not available.'
+          : 'Could not load this title\'s details just now.')
       } finally {
         if (!cancelled) setDetailLoading(false)
       }
