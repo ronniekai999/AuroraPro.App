@@ -25,11 +25,12 @@ import { Icon } from '@/components/Icon'
 // impact for screenshotting Aurora's pages is minimal. Lazy-loaded so
 // the chunk only ships when a user clicks Capture.
 
-// Match server-side limits (internal/api/feedback_handlers.go) so the
-// validation message is the same on both sides. The server counts bytes of
-// UTF-8 as it receives them, and a form's text goes out with every line
-// break as CR LF: so the form counts the same way (sentBytes), not in
-// JavaScript's string units.
+// The server's limits (internal/api/feedback_handlers.go), so that what the
+// form lets go the server takes. The server counts bytes of UTF-8 as it
+// receives them, and a form's text goes out with every line break as CR LF:
+// so the form counts the same way (sentBytes), not in JavaScript's string
+// units, and its counters say bytes. Its refusals say "too long" and no
+// number of characters, which bytes are not.
 const MAX_TITLE_LEN = 200
 const MAX_DESC_LEN = 10_000 // lowered from 50k per deep-debug #23
 const MAX_NAME_LEN = 100
@@ -202,7 +203,7 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
   // checks of the title and the description), with the refusal's words: it
   // holds only while those are the words on screen, so a later refusal
   // about something else (a capture that failed) is not pinned on a field.
-  const [fieldRefusal, setFieldRefusal] = useState<{ field: 'title' | 'description'; text: string } | null>(null)
+  const [fieldRefusal, setFieldRefusal] = useState<{ field: 'name' | 'title' | 'description'; text: string } | null>(null)
   const errorField = fieldRefusal && error === fieldRefusal.text ? fieldRefusal.field : null
   // Every refusal goes through here. One with the words already on screen
   // is taken down and put up again on the next frame: a live region whose
@@ -228,7 +229,7 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
   }
   useEffect(() => () => cancelAnimationFrame(refill.current), [])
   const clearError = () => { cancelRefill(); setError(null) }
-  const refuse = (text: string, field: 'title' | 'description' | null = null) => {
+  const refuse = (text: string, field: 'name' | 'title' | 'description' | null = null) => {
     cancelRefill()
     setFieldRefusal(field ? { field, text } : null)
     if (errorShown.current !== text) { setError(text); return }
@@ -952,11 +953,15 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       return
     }
     if (sentBytes(trimmedTitle) > MAX_TITLE_LEN) {
-      refuse(`Title exceeds ${MAX_TITLE_LEN} characters.`, 'title')
+      refuse('Title is too long.', 'title')
       return
     }
     if (sentBytes(trimmedDesc) > descriptionMax) {
-      refuse(`Description exceeds ${descriptionMax} characters.`, 'description')
+      refuse('Description is too long.', 'description')
+      return
+    }
+    if (sentBytes(name.trim()) > MAX_NAME_LEN) {
+      refuse('Your name is too long.', 'name')
       return
     }
     clearError()
@@ -1053,8 +1058,10 @@ export function BugReportFields({ form }: { form: BugReportFormState }) {
           id="bug-name"
           type="text"
           value={name}
-          onChange={e => setName(e.target.value)}
+          onChange={e => { setName(e.target.value); if (errorField === 'name' || (refilling && fieldRefusal?.field === 'name')) clearError() }}
           maxLength={MAX_NAME_LEN}
+          aria-invalid={errorField === 'name'}
+          aria-describedby={errorField === 'name' ? 'bug-error' : undefined}
           // Read-only, not disabled, while the report is sent: a disabled
           // field drops the focus it holds.
           readOnly={submitting}
@@ -1087,7 +1094,7 @@ export function BugReportFields({ form }: { form: BugReportFormState }) {
           className="w-full disabled:opacity-50 read-only:opacity-60"
         />
         <p className="text-ink-2 text-xs mt-1 tabular-nums">
-          {sentBytes(title)} / {MAX_TITLE_LEN}
+          {sentBytes(title)} / {MAX_TITLE_LEN} bytes
         </p>
       </div>
 
@@ -1116,7 +1123,7 @@ export function BugReportFields({ form }: { form: BugReportFormState }) {
           className="w-full disabled:opacity-50 read-only:opacity-60 resize-y min-h-[120px]"
         />
         <p className="text-ink-2 text-xs mt-1 tabular-nums">
-          {sentBytes(description)} / {descriptionMax}
+          {sentBytes(description)} / {descriptionMax} bytes
         </p>
       </div>
 

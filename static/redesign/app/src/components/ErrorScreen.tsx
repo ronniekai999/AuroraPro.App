@@ -78,10 +78,11 @@ function sessionNow(): Session {
   }
 }
 
-type Move = 'signed-out' | 'account' | 'profile'
+type Move = 'signed-out' | 'signed-in' | 'account' | 'profile'
 /** How the browser's session `now` differs from `then`, if it does. */
 function moveFrom(then: Session, now: Session): Move | null {
   if (now.userId === null) return then.userId === null ? null : 'signed-out'
+  if (then.userId === null) return 'signed-in'
   if (now.userId !== then.userId) return 'account'
   return now.profileId !== then.profileId ? 'profile' : null
 }
@@ -209,7 +210,7 @@ export function ErrorScreen({ error }: { error: unknown }) {
   }, [open])
 
   const moved = moveFrom(stoppedIn, access.session)
-  const switched = moved === 'account' || moved === 'profile' ? moved : null
+  const switched = moved === 'signed-out' ? null : moved
 
   return (
     <div
@@ -328,11 +329,13 @@ export function ErrorScreen({ error }: { error: unknown }) {
               onClose={() => setOpenedFor(null)}
               onSubmitted={(result) => { sentRef.current = result }}
               onDismissed={(unsent) => {
+                // Said in the past: the browser may move back while the
+                // line is still on the page.
                 const because = why === 'refused'
-                  ? 'the server is not taking reports now'
+                  ? 'the server stopped taking reports'
                   : why === 'signed-out'
-                    ? 'this browser has signed out'
-                    : `this browser is now on another ${why === 'account' ? 'account' : 'profile'}`
+                    ? 'this browser signed out'
+                    : `this browser moved to another ${why === 'account' ? 'account' : 'profile'}`
                 const sent = sentRef.current
                 const line = `The report was closed because ${because}`
                 setSaid(sent
@@ -373,7 +376,7 @@ function PanelFailed({ onClose }: { onClose: () => void }) {
 function ErrorReportPanel({ saw, access, switched, dismissed, onClose, onSubmitted, onDismissed }: {
   saw: AppSaw
   access: ReportAccess
-  switched: 'account' | 'profile' | null
+  switched: 'signed-in' | 'account' | 'profile' | null
   dismissed: boolean
   onClose: () => void
   onSubmitted: (result: BugReportSubmitResult) => void
@@ -389,7 +392,7 @@ function ErrorReportPanel({ saw, access, switched, dismissed, onClose, onSubmitt
     onDismissed,
     // What the page shows under "What the app saw", as it shows it.
     evidence: { text: saw.text, url: saw.page },
-    captureShows: 'A capture shows this page as it is now: the error and what the app saw. This panel is left out of it.',
+    captureShows: 'A capture shows the part of this page that is on screen now, without this panel.',
   })
   const { capturing, recording, submitting, submittedResult, titleInputRef } = form
   useEffect(() => { titleInputRef.current?.focus() }, [titleInputRef])
@@ -420,7 +423,9 @@ function ErrorReportPanel({ saw, access, switched, dismissed, onClose, onSubmitt
           )}
           {!submittedResult && switched && (
             <p data-error-report-switched="" style={{ margin: '8px 0 0', fontSize: 14, color: INK }}>
-              This browser has moved to another {switched} since this page stopped. A report is sent from the one it is on now.
+              {switched === 'signed-in'
+                ? 'Someone has signed in on this browser since this page stopped. A report is sent from that account.'
+                : `This browser has moved to another ${switched} since this page stopped. A report is sent from the one it is on now.`}
             </p>
           )}
         </div>

@@ -28,11 +28,14 @@ describe('ErrorBoundary', () => {
     // Nothing is asked of a server in these tests: the screen asks only
     // for a session, and these that sign in get no answer.
     vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise(() => {}))
+    // Where the app is: under its base path.
+    window.history.pushState({}, '', `${import.meta.env.BASE_URL}movies`)
   })
   afterEach(() => {
     vi.restoreAllMocks()
     document.head.querySelector('meta[name="aurora-build"]')?.remove()
     localStorage.clear()
+    window.history.pushState({}, '', '/')
   })
 
   it('draws the app when nothing has thrown', () => {
@@ -59,7 +62,8 @@ describe('ErrorBoundary', () => {
     const saw = document.querySelector('[data-app-saw]')!.textContent!.split('\n')
     expect(saw[0]).toBe('The page stopped while it was being drawn.')
     expect(saw[1]).toBe("Cannot read properties of undefined (reading 'map')")
-    expect(saw[2]).toMatch(/^Page: \/ · \S.*\d\d.* · build 1a2b3c4d5e$/)
+    expect(saw[2].startsWith(`Page: ${import.meta.env.BASE_URL}movies · `)).toBe(true)
+    expect(saw[2]).toMatch(/ · \S.*\d\d.* · build 1a2b3c4d5e$/)
     expect(saw).toHaveLength(3)
     expect(screen.getByText('If a new version was installed while this tab was open, a reload usually fixes it.')).toBeInTheDocument()
     // Two ways out, and no "try again": the same tree from the same state

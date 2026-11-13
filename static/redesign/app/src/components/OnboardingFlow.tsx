@@ -108,16 +108,16 @@ export function onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilin
   return patch
 }
 
-/** A seeds write the server refused as a bad request. Under a limit this
- *  flow has just written, that is how it refuses picks above the limit; it
- *  has no code of its own for it, so the refusal is confirmed by what the
- *  grid no longer offers (see recoverPicksUnderLimit). */
 /** Refusals of a profile write that carried a content limit which an age
  *  can avoid: the way on is back to the age. */
 function fixableInDetails(reason: string | null | undefined): boolean {
   return reason === 'last_unrestricted_profile' || reason === 'profile_restricted'
 }
 
+/** A seeds write the server refused as a bad request. Under a limit this
+ *  flow has just written, that is how it refuses picks above the limit; it
+ *  has no code of its own for it, so the refusal is confirmed by what the
+ *  grid no longer offers (see recoverPicksUnderLimit). */
 function refusedAsBadRequest(e: unknown): boolean {
   return e instanceof APIError && e.status === 400
 }
@@ -260,7 +260,10 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   }, [covered, focusStep])
 
   // --- loading screen state ---
-  const [error, setError] = useState<string | null>(null)
+  // The build's failure, kept as what failed rather than as words: what it
+  // says was saved is read from `landed` as it is drawn, so a write that
+  // lands after the failure was shown changes the sentence.
+  const [error, setError] = useState<{ failure: unknown; carriedLimit: boolean } | null>(null)
   // A build that failed in a way trying again cannot change, but a change
   // on the first step can: the failure then offers the way back there.
   // Set with every failure, and read only while one is shown.
@@ -712,6 +715,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
             landedRef.current = { profile: true, limit: patch.max_age_rating || landedRef.current.limit }
             setLanded(landedRef.current)
           }
+          // A build given up on stops at its own write: only the current
+          // build sends picks and warms the rails.
+          if (cancelled) return
           await saveOnboardingSeeds(selected, profileId ?? undefined)
           await Promise.race([
             getHeroPool(true, profileId ?? undefined).then(() => {}).catch(() => {}),
@@ -757,7 +763,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         // age can avoid: the way on is back to the first step.
         const reason = saved.profile ? null : refusalReason(failure)
         setFixInDetails(carriedLimit && fixableInDetails(reason))
-        setError(buildFailure(failure, saved, carriedLimit))
+        setError({ failure, carriedLimit })
       }
     })()
 
@@ -1265,7 +1271,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
 
         {error ? (
           <div className="mt-8">
-            <p role="alert" className="max-w-[560px] text-[15px] leading-snug text-danger-ink">{error}</p>
+            <p role="alert" className="max-w-[560px] text-[15px] leading-snug text-danger-ink">{buildFailure(error.failure, landed, error.carriedLimit)}</p>
             <div className="mt-4 flex flex-wrap gap-3">
               {fixInDetails
                 ? <button type="button" onClick={backToDetails} className="stage-btn stage-btn-primary">Back to your details</button>

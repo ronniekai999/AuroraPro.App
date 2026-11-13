@@ -156,7 +156,7 @@ describe('the error screen: who is offered a report', () => {
     await user.click(await screen.findByRole('button', { name: 'Report a problem' }))
     expect(api.getBugReportConfig).toHaveBeenCalledTimes(3)
     await waitFor(() => expect(panel()).toBeNull())
-    expect(said()).toBe('The report was closed because the server is not taking reports now.')
+    expect(said()).toBe('The report was closed because the server stopped taking reports.')
     expect(opener()).toBeNull()
   })
 
@@ -197,7 +197,7 @@ describe('the error screen: reporting the problem', () => {
     expect(aside.textContent).not.toMatch(/never includes/i)
     // What a capture shows is said for this page: not the app's library or
     // what was playing, which are gone.
-    expect(aside).toHaveTextContent('A capture shows this page as it is now: the error and what the app saw. This panel is left out of it.')
+    expect(aside).toHaveTextContent('A capture shows the part of this page that is on screen now, without this panel.')
     expect(aside.textContent).not.toMatch(/currently playing media/)
   })
 
@@ -260,19 +260,19 @@ describe('the error screen: reporting the problem', () => {
     const aside = await openPanel(user)
     await user.type(within(aside).getByLabelText(/^Title/), 'Collections will not open')
     const field = within(aside).getByLabelText(/^Description/)
-    const room = Number(aside.textContent!.match(/0 \/ (\d+)/)![1])
+    const room = Number(aside.textContent!.match(/0 \/ (\d+) bytes/)![1])
     // Two lines of accented words, filled to the last byte.
     const line = 'Élan café — the list stopped\n'
     let text = line.repeat(Math.floor(room / bytesSent(line)))
     text += 'x'.repeat(room - bytesSent(text))
     expect(bytesSent(text)).toBe(room)
     fireEvent.change(field, { target: { value: `${text}y` } })
-    expect(aside).toHaveTextContent(`${room + 1} / ${room}`)
+    expect(aside).toHaveTextContent(`${room + 1} / ${room} bytes`)
     await user.click(within(aside).getByRole('button', { name: 'Send report' }))
-    expect(within(aside).getByRole('alert')).toHaveTextContent(`Description exceeds ${room} characters.`)
+    expect(within(aside).getByRole('alert')).toHaveTextContent(`Description is too long.`)
     expect(api.submitBugReport).not.toHaveBeenCalled()
     fireEvent.change(field, { target: { value: text } })
-    expect(aside).toHaveTextContent(`${room} / ${room}`)
+    expect(aside).toHaveTextContent(`${room} / ${room} bytes`)
     await user.click(within(aside).getByRole('button', { name: 'Send report' }))
     await waitFor(() => expect(api.submitBugReport).toHaveBeenCalledTimes(1))
     const [sent] = api.submitBugReport.mock.calls[0] as [{ description: string }]
@@ -356,7 +356,7 @@ describe('the error screen: another tab changes who this browser is', () => {
     await fill(user)
     anotherTab(() => signedIn(MORGAN, 2))
     await waitFor(() => expect(panel()).toBeNull())
-    expect(said()).toBe('The report was closed because this browser is now on another profile.')
+    expect(said()).toBe('The report was closed because this browser moved to another profile.')
     expect(document.querySelector('[data-error-report-said]')).toHaveAttribute('role', 'status')
     expect(api.submitBugReport).not.toHaveBeenCalled()
     // The line that says why has the focus, so that it is what is read.
@@ -382,7 +382,7 @@ describe('the error screen: another tab changes who this browser is', () => {
     await within(aside).findByRole('alert')
     anotherTab(() => signedIn(MORGAN, 2))
     await waitFor(() => expect(panel()).toBeNull())
-    expect(said()).toBe('The report was closed because this browser is now on another profile, and it was not sent: Reports cannot be filed right now.')
+    expect(said()).toBe('The report was closed because this browser moved to another profile, and it was not sent: Reports cannot be filed right now.')
   })
 
   // A send that is out is not cut off: the report closes when it has
@@ -403,7 +403,7 @@ describe('the error screen: another tab changes who this browser is', () => {
     await act(async () => { land({ issue_url: '', issue_number: 43 }) })
     await waitFor(() => expect(panel()).toBeNull())
     // It was sent: the number is given, so that it is not filed again.
-    expect(said()).toBe('The report was closed because this browser is now on another profile. It had been sent, as issue #43.')
+    expect(said()).toBe('The report was closed because this browser moved to another profile. It had been sent, as issue #43.')
   })
 
   it('offers nothing once another tab has signed out, and says so', async () => {
@@ -414,7 +414,7 @@ describe('the error screen: another tab changes who this browser is', () => {
     expect(api.getBugReportConfig).toHaveBeenCalledTimes(2)
     anotherTab(() => signedIn(null))
     await waitFor(() => expect(panel()).toBeNull())
-    expect(said()).toBe('The report was closed because this browser has signed out.')
+    expect(said()).toBe('The report was closed because this browser signed out.')
     await act(async () => {})
     expect(opener()).toBeNull()
     expect(api.getBugReportConfig).toHaveBeenCalledTimes(2)
@@ -429,10 +429,38 @@ describe('the error screen: another tab changes who this browser is', () => {
     await openPanel(user)
     anotherTab(() => signedIn(ROBIN, 5))
     await waitFor(() => expect(panel()).toBeNull())
-    expect(said()).toBe('The report was closed because this browser is now on another account.')
+    expect(said()).toBe('The report was closed because this browser moved to another account.')
     await user.click(await screen.findByRole('button', { name: 'Report a problem' }))
     expect(document.querySelector('[data-error-report-switched]')).toHaveTextContent('This browser has moved to another account since this page stopped.')
     expect(screen.getByLabelText(/^Your name/)).toHaveValue('robin')
+  })
+
+  // The page stopped with nobody signed in: it was on no account, so it
+  // has not moved to another one.
+  it('says someone has signed in when the page stopped with nobody signed in', async () => {
+    const user = userEvent.setup()
+    signedIn(null)
+    crash()
+    await act(async () => {})
+    expect(opener()).toBeNull()
+    anotherTab(() => signedIn(MORGAN, 1))
+    await openPanel(user)
+    expect(document.querySelector('[data-error-report-switched]')).toHaveTextContent('Someone has signed in on this browser since this page stopped. A report is sent from that account.')
+    expect(document.body.textContent).not.toMatch(/another account/)
+  })
+
+  // The closure line is about what happened: it stays true when the browser
+  // goes back afterwards.
+  it('says why a report closed in the past, true after the browser goes back', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    crash()
+    await openPanel(user)
+    anotherTab(() => signedIn(MORGAN, 2))
+    await waitFor(() => expect(panel()).toBeNull())
+    anotherTab(() => signedIn(MORGAN, 1))
+    await act(async () => {})
+    expect(said()).toBe('The report was closed because this browser moved to another profile.')
   })
 
   // What the panel says is judged against the session the page stopped in,
@@ -474,7 +502,7 @@ describe('the error screen: another tab changes who this browser is', () => {
       window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT))
     })
     await waitFor(() => expect(panel()).toBeNull())
-    expect(said()).toBe('The report was closed because this browser has signed out.')
+    expect(said()).toBe('The report was closed because this browser signed out.')
     expect(opener()).toBeNull()
   })
 
@@ -495,7 +523,7 @@ describe('the error screen: another tab changes who this browser is', () => {
     expect(panel()).not.toBeNull()
     act(() => comeBack())
     await waitFor(() => expect(panel()).toBeNull())
-    expect(said()).toBe('The report was closed because this browser is now on another profile.')
+    expect(said()).toBe('The report was closed because this browser moved to another profile.')
   })
 
   // An answer is the session's that was asked for, and only for the stretch
@@ -588,13 +616,32 @@ describe('the bug report dialog carries no such evidence', () => {
     expect(over.length).toBe(5_001)
     expect(bytesSent(over)).toBeGreaterThan(10_000)
     fireEvent.change(field, { target: { value: over } })
-    expect(dialog).toHaveTextContent(`${bytesSent(over)} / 10000`)
+    expect(dialog).toHaveTextContent(`${bytesSent(over)} / 10000 bytes`)
     await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
-    expect(within(dialog).getByRole('alert')).toHaveTextContent('Description exceeds 10000 characters.')
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Description is too long.')
     expect(api.submitBugReport).not.toHaveBeenCalled()
     const fits = 'é'.repeat(5_000)
     expect(bytesSent(fits)).toBe(10_000)
     fireEvent.change(field, { target: { value: fits } })
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    await waitFor(() => expect(api.submitBugReport).toHaveBeenCalledTimes(1))
+  })
+
+  it('counts the name as the server does', async () => {
+    const user = userEvent.setup()
+    render(<BugReportModal prefillName="" onClose={() => {}} onSubmitted={() => {}} />)
+    const dialog = screen.getByRole('dialog')
+    await user.type(within(dialog).getByLabelText(/^Title/), 'A long name')
+    await user.type(within(dialog).getByLabelText(/^Description/), 'Cyrillic is two bytes a letter')
+    // 60 letters, 120 bytes: over the server's 100.
+    fireEvent.change(within(dialog).getByLabelText(/^Your name/), { target: { value: 'Ж'.repeat(60) } })
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Your name is too long.')
+    expect(within(dialog).getByLabelText(/^Your name/)).toHaveAttribute('aria-invalid', 'true')
+    expect(api.submitBugReport).not.toHaveBeenCalled()
+    fireEvent.change(within(dialog).getByLabelText(/^Your name/), { target: { value: 'Ж'.repeat(50) } })
+    expect(within(dialog).getByLabelText(/^Your name/)).toHaveAttribute('aria-invalid', 'false')
+    expect(within(dialog).queryByText('Your name is too long.')).toBeNull()
     await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
     await waitFor(() => expect(api.submitBugReport).toHaveBeenCalledTimes(1))
   })
@@ -604,10 +651,10 @@ describe('the bug report dialog carries no such evidence', () => {
     render(<BugReportModal prefillName="morgan" onClose={() => {}} onSubmitted={() => {}} />)
     const dialog = screen.getByRole('dialog')
     fireEvent.change(within(dialog).getByLabelText(/^Title/), { target: { value: 'é'.repeat(101) } })
-    expect(dialog).toHaveTextContent('202 / 200')
+    expect(dialog).toHaveTextContent('202 / 200 bytes')
     await user.type(within(dialog).getByLabelText(/^Description/), 'Long title')
     await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
-    expect(within(dialog).getByRole('alert')).toHaveTextContent('Title exceeds 200 characters.')
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Title is too long.')
     expect(api.submitBugReport).not.toHaveBeenCalled()
   })
 })

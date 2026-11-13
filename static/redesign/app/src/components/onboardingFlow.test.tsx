@@ -1029,6 +1029,11 @@ describe('onboarding: the build', () => {
       // Nothing is left to ask: the question goes, and the page says the
       // limit is set and the age can no longer change it.
       expect(question()).toBeNull()
+      // The build that sent the write was given up on: it stops at its
+      // write, and sends no picks nor warms the rails.
+      await pass(10_000)
+      expect(api.saveOnboardingSeeds).not.toHaveBeenCalled()
+      expect(api.getHeroPool).not.toHaveBeenCalled()
       expect(document.querySelector('[data-skip-keeps-limit]')).toHaveTextContent('Skipping leaves the limit set.')
       expect(api.skipOnboarding).not.toHaveBeenCalled()
       fireEvent.click(screen.getByRole('button', { name: 'Skip' }))
@@ -1036,6 +1041,31 @@ describe('onboarding: the build', () => {
       expect(question()).toBeNull()
       expect(api.skipOnboarding).toHaveBeenCalledTimes(1)
       expect(onDone).toHaveBeenCalledTimes(1)
+    })
+
+    // The failure's sentence says what was saved as it is drawn: a write
+    // that lands after the failure was shown changes it.
+    it('says what was saved once a given-up write lands under a later failure', async () => {
+      let answer!: { land: () => void }
+      api.updateProfile.mockReset()
+        .mockImplementationOnce(() => new Promise((resolve) => { answer = { land: () => resolve({}) } }))
+        .mockRejectedValueOnce(refusal(409, 'changed', 'profile_changed'))
+      vi.useFakeTimers()
+      flow()
+      await act(async () => {})
+      fireEvent.change(age(), { target: { value: '8' } })
+      fireEvent.click(next())
+      await act(async () => {})
+      for (const name of FIVE) fireEvent.click(tile(name))
+      fireEvent.click(next())
+      await act(async () => {})
+      await pass(20_100)
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+      await act(async () => {})
+      expect(screen.getByRole('alert').textContent).toBe('This profile was changed on another device a moment ago. Try again. Nothing was saved.')
+      await act(async () => { answer.land() })
+      expect(screen.getByRole('alert').textContent).toBe('Your name and avatar are saved, and this profile is now limited to titles up to PG and TV-Y7. Your picks could not be saved just now. Try again, or skip for now.')
+      expect(document.querySelector('[data-skip-keeps-limit]')).toHaveTextContent('Skipping leaves the limit set.')
     })
 
     it('asks the plain question when a given-up write fails after a Try again has failed too', async () => {
