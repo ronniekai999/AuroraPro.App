@@ -1,0 +1,10 @@
+{
+  "sha": "416644353267af4e8781318655f9570298cb78ae",
+  "verdict": "lows-only",
+  "summary": "My Library writes, two follow-up commits to the sign-in and system-surfaces review. A queued write is sent after a profile switch to its own profile (a local check had dropped an Undo the server accepts); in-flight marks are kept per profile and title (a title both profiles had saved could leave the second profile's list after a switch); a queued write is not sent after a sign-out. Two passes by the independent reviewer: lows-only, held because a sentence in CLAUDE.md was false until the marks were per profile; then lows-only on this commit: the owner ref one effect phase behind the other two (a suspicion from reading), the end-of-queue read's half of the owner check unpinned, and no test for the reverse case. All three are with the builder as a last small commit.",
+  "reviewer": "fresh-context-agent-a4d2d468",
+  "findings": "3",
+  "diff_digest": "e86b343022bd8b810a73181ed212991e9be1f247916c01b4f3b6fd02e69bf4f8",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T06:08:53Z"
+}
