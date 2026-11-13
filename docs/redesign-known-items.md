@@ -85,12 +85,11 @@ Fix or file each item, and delete it here when it is no longer true.
   request is out still warms the rails; back in the details while a first
   write is still out, an age changed to one that sets no limit is refused on
   every Try again once that write lands (Skip works; older than the redesign).
-- Error screen and the bug report form: a capture ("Capture this page") is
-  drawn without the app's fonts, so a large heading can wrap onto the text
-  under it (older than the redesign, on every page), and from the crash
-  screen's panel on a phone the lower part of the picture can be blank; the
-  note under the button says so, and a fix is suggested as its own change. "A
-  report is sent from that account" does not name the account.
+- Error screen and the bug report form: "A report is sent from that account"
+  does not name the account. (A capture drawn without the app's fonts, and
+  the blank lower part of a capture from the crash screen's panel on a phone
+  or from any scrolled page, are fixed: see "Capture this page" in
+  CLAUDE.md.)
 - Signed out, toasts and My Library writes: a My Library write that comes due
   after a switch to a profile with a content limit is refused by the server
   and lost with nothing said (after a switch to a profile without one it is

@@ -13,6 +13,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { failureWords } from '@/lib/failureWords'
 import { createPortal } from 'react-dom'
 import { collectClientContext, submitBugReport, type BugReportSubmitResult } from '@/lib/api'
+import { capturePage, type CaptureFrom } from '@/lib/pageCapture'
 import { Icon } from '@/components/Icon'
 
 
@@ -20,11 +21,11 @@ import { Icon } from '@/components/Icon'
 // html2canvas (last release Dec 2021, 1100+ open issues). html-to-image
 // uses SVG `<foreignObject>` to serialize the DOM and renders via a
 // HTMLImageElement → canvas pipeline; smaller bundle (~10 KB gzipped
-// vs html2canvas's ~50 KB) and modern Promise API. The trade-off is
-// that some CSS features render slightly differently — we capture only
-// the visible viewport via a fully-laid-out clone, so the practical
-// impact for screenshotting Aurora's pages is minimal. Lazy-loaded so
-// the chunk only ships when a user clicks Capture.
+// vs html2canvas's ~50 KB) and modern Promise API. The copy it draws is
+// laid out again in an image of its own, which takes what lib/pageCapture
+// gives it (the page's fonts, the place of what is left out, the scroll)
+// to come out as the page looks on screen. Lazy-loaded so the chunk only
+// ships when a user clicks Capture.
 
 // The server's limits (internal/api/feedback_handlers.go), so that what the
 // form lets go the server takes. The server counts bytes of UTF-8 as it
@@ -176,6 +177,11 @@ export interface BugReportFormOptions {
   // taken. Over the app that is whatever is on screen; a page of its own
   // says what it shows.
   captureShows?: string
+  // Where a capture is taken from (lib/pageCapture): where the window is on
+  // the page (the default, for the dialog, which is over the page), or the
+  // top of the page, for a frame in the page's flow that the window moves to
+  // when it opens (the error screen's panel).
+  captureFrom?: CaptureFrom
 }
 
 export interface BugReportEvidence { text: string; url: string }
@@ -191,7 +197,7 @@ export function sentBytes(value: string): number {
 /** What is put between the person's description and the evidence. */
 const EVIDENCE_GAP = '\n\n'
 
-export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed = false, onDismissed, evidence, captureShows }: BugReportFormOptions) {
+export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed = false, onDismissed, evidence, captureShows, captureFrom = 'window' }: BugReportFormOptions) {
   // The description and the evidence share the server's limit.
   const descriptionMax = Math.max(1, MAX_DESC_LEN - (evidence ? sentBytes(EVIDENCE_GAP + evidence.text) : 0))
   const [name, setName] = useState(prefillName ?? '')
@@ -413,14 +419,13 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
   //      fires first (deep-debug Phase 2 #8 — RAF is throttled to
   //      ~1/sec in backgrounded tabs and may never fire if the user
   //      switches away).
-  //   4. Call html-to-image's `toBlob` on document.body. We pass a
-  //      `filter` callback (analogue of html2canvas's
-  //      `ignoreElements`) that excludes any element with
-  //      `data-screenshot-exclude="true"`. The library serializes
-  //      via SVG `<foreignObject>` so the captured PNG already
-  //      matches what the user sees — no separate scale/window
-  //      args needed. Pixel ratio is auto-detected and capped here
-  //      to 2 so a 4K Retina display doesn't produce a >25 MB blob.
+  //   4. Draw the page through capturePage (lib/pageCapture), which
+  //      calls html-to-image's `toBlob` on document.body, the window's
+  //      size, and leaves out everything marked
+  //      `data-screenshot-exclude="true"` (this form's frame, toasts)
+  //      while keeping its place. Pixel ratio is auto-detected and
+  //      capped here to 2 so a 4K Retina display doesn't produce a
+  //      >25 MB blob.
   //   5. Result is a Blob (PNG by default). Build a File, set as
   //      attachment.
   //   6. Restore modal interactivity.
@@ -467,21 +472,9 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
         new Promise<void>(r => setTimeout(r, 200)),
       ])
       if (!mountedRef.current) return
-      // Deep-debug C1/H2 — bound the capture to the visible
-      // viewport. Without `width`/`height`/`canvasWidth`/
-      // `canvasHeight`, html-to-image captures `document.body`'s
-      // full layout-rect (often 8,000-30,000px on long-scroll
-      // Movies/Discover grids). At pixelRatio=2 that exceeds the
-      // 16384px canvas cap and produces an unusable squashed
-      // capture; it ALSO causes the library to re-fetch every
-      // off-screen <img> via its internal serialization (200+ TMDB
-      // poster requests on a typical grid). Bounding to viewport
-      // fixes both — capture is crisp, only visible images are
-      // re-fetched. `style.transform` shifts the cloned body by
-      // the current scroll offset so the visible portion lands at
-      // origin in the output canvas.
-      const vw = window.innerWidth
-      const vh = window.innerHeight
+      // Deep-debug C1/H2 — the capture is bounded to the window's size
+      // (capturePage); unbounded, html-to-image drew the body's whole
+      // height, past the canvas cap.
       // Deep-debug H3 — clamp pixelRatio to [1, 2]. Sub-1 ratios
       // happen on Windows browsers at < 100% display scale and
       // some Android Chrome configs; without the floor we'd
@@ -490,17 +483,18 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       const pixelRatio = Math.max(1, Math.min(window.devicePixelRatio || 1, 2))
       // Improvement #8 — capture-side defense-in-depth for sensitive
       // inputs. The sibling lane tags known sensitive *surfaces* with
-      // data-screenshot-exclude (the `filter` below drops those whole
-      // subtrees), but a stray password/secret field elsewhere on the
+      // data-screenshot-exclude (capturePage copies nothing inside those,
+      // and draws nothing of them), but a stray password/secret field elsewhere on the
       // page would otherwise be serialized in clear text into the PNG
       // — which becomes a public-ish GitHub attachment. html-to-image
       // rasterizes `input.value` (the live property), so CSS tricks
       // like -webkit-text-security don't help; we have to actually
       // blank the value for the duration of the rasterize, then
       // restore it. We also blank any input/textarea that is itself
-      // tagged data-screenshot-exclude (belt-and-suspenders for fields
-      // a surface tagged but the `filter` can't reach because the
-      // field is the captured node's ancestor, not a descendant).
+      // tagged data-screenshot-exclude: one in the page's flow is copied
+      // as an empty box that keeps its place (lib/pageCapture), and the
+      // copy of a field carries its value, so the value has to be gone
+      // before the copy is made, even though the box is not drawn.
       // Restored in the inner finally so a thrown toBlob still leaves
       // the user's typed values intact.
       const maskedInputs: Array<{ el: HTMLInputElement | HTMLTextAreaElement; value: string }> = []
@@ -515,41 +509,14 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       }
       let blob: Blob | null
       try {
-        // Deep-debug M1 — the `filter` predicate runs on every
-        // descendant including Text/Comment nodes (despite the
-        // library's TS signature claiming HTMLElement). The
-        // `instanceof HTMLElement` guard handles this correctly;
-        // simplifying to `!node.dataset.screenshotExclude` would
-        // crash on Text nodes whose `dataset` is undefined.
-        blob = await toBlob(document.body, {
-          pixelRatio,
-          width: vw,
-          height: vh,
-          canvasWidth: vw,
-          canvasHeight: vh,
-          style: {
-            transform: `translate(-${window.scrollX}px, -${window.scrollY}px)`,
-            transformOrigin: 'top left',
-          },
-          // Skip excluded elements (this dialog's overlay, toasts, the
-          // reaction overlay). True = keep, false = skip (inverse of
-          // html2canvas's ignoreElements).
-          filter: (node) =>
-            !(node instanceof HTMLElement
-              && node.dataset.screenshotExclude === 'true'),
-          // Deep-debug H1 — `skipFonts: true` prevents the library
-          // from re-fetching @font-face binaries. Aurora self-hosts its
-          // variable fonts (src/fonts/*.woff2 via @font-face), so without
-          // this every Capture click refetches those woff2 files — adds
-          // latency and needlessly re-embeds fonts. The DOM is
-          // already painted with the user's chosen font; the
-          // captured PNG matches what they see on screen via the
-          // browser's font cache (NOT via re-embedding the font in
-          // the SVG). Worst case on a system that hasn't loaded
-          // the font: capture falls back to the next stack font,
-          // which is fine for bug-report screenshots.
-          skipFonts: true,
-        })
+        // The page's fonts are written into the picture (they were
+        // skipped, on the belief that the browser's font cache would draw
+        // them: it does not, an SVG drawn as an image loads no fonts, and
+        // a large heading set in the fallback wrapped over the text under
+        // it). The files are read once a page load, from the browser's
+        // cache. See lib/pageCapture for this and the rest of what the
+        // picture is given.
+        blob = await capturePage(toBlob, { from: captureFrom, pixelRatio })
       } finally {
         // Restore the blanked values regardless of capture outcome.
         for (const { el, value } of maskedInputs) {

@@ -398,7 +398,12 @@ function ErrorReportPanel({ saw, access, switched, dismissed, onClose, onSubmitt
     onDismissed,
     // What the page shows under "What the app saw", as it shows it.
     evidence: { text: saw.text, url: saw.page },
-    captureShows: 'A capture leaves this panel out. On a narrow window it may show only part of the page.',
+    // The panel is in the page's flow, under the page's text on a narrow
+    // window, and opening it moves the window down to it: a capture from
+    // where the window is would be mostly the panel's empty place. It is
+    // taken from the top of the page instead.
+    captureFrom: 'top',
+    captureShows: 'A capture shows the top of this page at the size of the window, with the space this panel takes left empty.',
   })
   const { capturing, recording, submitting, submittedResult, titleInputRef } = form
   useEffect(() => { titleInputRef.current?.focus() }, [titleInputRef])
@@ -409,8 +414,9 @@ function ErrorReportPanel({ saw, access, switched, dismissed, onClose, onSubmitt
         aria-labelledby="error-report-title"
         aria-busy={capturing || submitting || recording}
         data-error-report=""
-        // Left out of a capture of the page, and out of sight while one is
-        // taken or the screen is recorded, as the dialog is.
+        // Left out of a capture of the page (its space is kept, and drawn
+        // empty), and out of sight while one is taken or the screen is
+        // recorded, as the dialog is.
         data-screenshot-exclude="true"
         style={{
           flex: '1 1 400px', maxWidth: 520, minWidth: 0, boxSizing: 'border-box', borderRadius: 20,

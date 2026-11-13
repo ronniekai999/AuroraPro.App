@@ -2140,6 +2140,44 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   notice; a dialog taller than the window keeps its focused button in view
   and lets the title scroll away.
 
+### "Capture this page" (web app)
+
+Code: `lib/pageCapture.ts` (html-to-image), called by
+`components/BugReportForm.tsx`. Pinned by `scripts/verify-bug-capture.mjs`
+(in `audit:checks`: the built app under the production CSP, captures made
+through the form compared pixel by pixel with screenshots, mutation-tested)
+and `lib/pageCapture.test.ts`.
+
+- The copy is laid out again inside an SVG image, which loads nothing. The
+  families the document has loaded go in as data: URLs read with `fetch`
+  (`cache: 'force-cache'`, allowed by connect-src 'self'), never
+  `skipFonts`: in a fallback face a large heading wrapped and was drawn
+  over the text under it. A file that cannot be read leaves its face out
+  of that capture and is tried again next time. The CSP is unchanged.
+- html-to-image shrinks every copied font size (`floor - 0.1px`);
+  `keepFontSizes` wraps `window.getComputedStyle` for the length of
+  `toBlob` so `font-size` reaches it unshrunk, and puts it back in
+  `finally`.
+- A `data-screenshot-exclude` part in the page's flow is copied as an empty
+  box drawn as nothing (nothing inside it is copied), so the page does not
+  move into its place; a fixed or absolutely placed one is left out. An
+  excluded field's box is copied, so the form's masking must blank its
+  value before the copy.
+- The copy's body is moved by the scroll with `position: relative` and
+  `top`/`left`, and `overflow: visible`, in the copy's own style sheet with
+  `!important`: the copied logical insets win over plain `top`/`left`, and
+  the body's `overflow-x: hidden` made it a window-high scroll box that cut
+  off the picture's lower part on every scrolled page. A transform would
+  carry window-fixed parts (the phone's tab bar) with the page; sticky
+  parts stick in the copy as on screen.
+- The error screen's panel captures from the top of the page
+  (`captureFrom: 'top'`; opening it moves a phone's window down to it), the
+  dialog from where the window is.
+- Known gaps: an image `fetch` cannot read under the CSP (TMDB posters on
+  the request pages) is drawn as nothing; an inner scroll box is drawn at
+  its top; a backdrop blur picks up a faint tint at its edges; fonts are
+  matched by family only; checked in Chromium only, not Safari or Firefox.
+
 ### Nullable database columns
 
 Go scalar fields use zero values as unknown sentinels. Queries projecting
