@@ -339,6 +339,31 @@ export class APIError extends Error {
   }
 }
 
+/** A request that got no answer at all: `fetch` itself rejected (the
+ *  network, DNS, a refused connection, CORS). Raised only by fetchOrLost,
+ *  never by a failure after an answer came, so lib/failureWords can say "the
+ *  server could not be reached" truthfully. A TypeError, as fetch's own
+ *  rejection is, and with its message, so code that read that shape before
+ *  (AuthView, DeviceApprovalView) reads it the same. An abort, or a
+ *  timeout's TimeoutError, is passed through as it was. */
+export class NetworkError extends TypeError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'NetworkError'
+  }
+}
+
+/** `fetch`, with a rejection that is not an abort turned into NetworkError. */
+async function fetchOrLost(input: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init)
+  } catch (err) {
+    const name = err && typeof err === 'object' ? (err as { name?: unknown }).name : undefined
+    if (name === 'AbortError' || name === 'TimeoutError') throw err
+    throw new NetworkError(err instanceof Error ? err.message : 'Failed to fetch', { cause: err })
+  }
+}
+
 /** A Retry-After header as whole seconds; undefined for none, a date, or junk. */
 function retryAfterSeconds(res: Response): number | undefined {
   const raw = res.headers.get('Retry-After')
@@ -463,7 +488,7 @@ export async function apiFetchResponse(path: string, opts: FetchResponseOpts = {
     }
     // deep-debug H10 — auth rides the httpOnly access cookie (same-origin
     // credentials below); no Authorization header is set from JS.
-    return fetch(path, {
+    return fetchOrLost(path, {
       method: opts.method || 'GET',
       headers,
       body: opts.body ?? undefined,
@@ -591,7 +616,7 @@ export async function login(username: string, password: string): Promise<User> {
 // expired access token) is refreshed and retried, once.
 export const WRONG_CURRENT_PASSWORD = 'current password is incorrect'
 export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
-  const send = () => fetch('/api/auth/change-password', {
+  const send = () => fetchOrLost('/api/auth/change-password', {
     method: 'POST',
     headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
@@ -726,7 +751,7 @@ export async function searchMedia(
   const res = await apiFetchResponse(`/api/media/search?${params.toString()}`, {
     signal,
   })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) throw new APIError(res.status, `HTTP ${res.status}`, null, retryAfterSeconds(res))
   const items = (await res.json()) as ServerMediaItem[]
   const modeHeader = res.headers.get('X-Search-Mode') || 'literal'
   return {
@@ -829,7 +854,7 @@ export async function recordRecommendationExposure(input: {
     }),
   })
   if (res.status === 202) return false
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  if (!res.ok) throw new APIError(res.status, `HTTP ${res.status}`, null, retryAfterSeconds(res))
   return true
 }
 
@@ -3620,7 +3645,7 @@ export async function submitBugReport(
         } before submitting again.`
       }
     }
-    throw new APIError(res.status, message, body)
+    throw new APIError(res.status, message, body, retryAfterSeconds(res))
   }
   return (await parseBody()) as BugReportSubmitResult
 }
