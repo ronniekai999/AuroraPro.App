@@ -76,6 +76,16 @@ describe('failureWords: the app\'s sentence by the kind of failure', () => {
     expect(failureWords(refused(404), 'start the party', own)).toBe('That is not available.')
   })
 
+  it('says a change refused while a database restore runs is paused, whatever was being done', () => {
+    const said = 'A database restore is running on this server. Try again once it has finished.'
+    expect(failureWords(refused(503, 'restore_running'), 'change the password')).toBe(said)
+    expect(failureWords(refused(503, 'restore_running'), 'approve this device')).toBe(said)
+    // A caller's own sentence for the reason still wins; the reason on
+    // another status is not this.
+    expect(failureWords(refused(503, 'restore_running'), 'x', { reason: { restore_running: 'Mine.' } })).toBe('Mine.')
+    expect(failureWords(refused(500, 'restore_running'), 'save the PIN')).toBe('Could not save the PIN just now.')
+  })
+
   it('reads the server\'s reason from its answer, and nothing from anything else', () => {
     expect(failureReason(refused(403, 'profile_restricted'))).toBe('profile_restricted')
     expect(failureReason(refused(403))).toBeNull()

@@ -48,28 +48,74 @@ order:
    `pg_restore` commits on their own, and database-level entries such as
    subscriptions or tablespaces), which has to be restored from the shell; and
    a file with no tables, which is no backup of Aurora.
-3. **Restore** (`restoring`). One `psql` session runs one transaction: it
-   drops every table, view, sequence, type and function in the `public` schema
-   that is not owned by an extension, and then runs what `pg_restore` writes
-   for the file. Aurora sends the `COMMIT` itself, and only after `pg_restore`
-   has finished without an error, everything it wrote has reached `psql`, and
-   the restore has not been stopped. **Until then nothing is changed**: any
-   failure, a stop or restart of Aurora, a crash, a lost connection or the
-   time limit rolls the whole transaction back, and the database is left as
-   it was.
+3. **Restore** (`restoring`). Signing in and changes to sign-in details are
+   paused first (below), and the restore waits up to 10 seconds for any
+   already under way; if one is still running then, the restore does not
+   start and nothing is changed. Then one `psql` session runs one transaction:
+   it drops every table, view, sequence, type and function in the `public`
+   schema that is not owned by an extension, and then runs what `pg_restore`
+   writes for the file. Just before the end it ends the other connections
+   that are waiting for it (below). Aurora sends the `COMMIT` itself, and only
+   after `pg_restore` has finished without an error, everything it wrote has
+   reached `psql`, and the restore has not been stopped. **Until then nothing
+   is changed**: any failure, a stop or restart of Aurora, a crash, a lost
+   connection or the time limit rolls the whole transaction back, and the
+   database is left as it was.
+
+That promise holds for a backup Aurora made. A file crafted to hold its own
+`COMMIT` or `ROLLBACK` can end the transaction part way, and its outcome can
+then be misreported (a failure called rolled back after a partial commit, or a
+partial load called restored); one that leaves a `COPY` open swallows Aurora's
+`COMMIT` (rolled back, reported as unknown). Only an admin can upload a file,
+and an admin can empty the database anyway; restore only backups you trust.
 
 While the restore's transaction runs, it holds a lock on every table it has
-dropped, so everything else that reads the database waits for it: **pages and
-sign-ins hang until the restore ends**, and some fail after a minute. They see
-the restored data once it commits (or the old data, if it rolled back). Two
-more things follow from the one transaction:
+dropped, so everything else that reads the database waits for it: **pages hang
+until the restore ends** (those with a time limit fail after a minute; the
+Admin page's restore status read has none and waits until the end). A request
+still waiting when the restore commits is ended (below); one waiting when it
+rolls back goes on with the old data.
 
+- **Signing in is paused.** From just before the transaction begins until the
+  restore ends, the routes that create or change a session or a sign-in
+  detail answer at once with `503` and the reason `restore_running`, which
+  the web app says plainly: signing in, creating an account, renewing a
+  session, signing in or linking through a provider, the device pairing's
+  poll and approval, changing the password, unlinking a provider, setting a
+  profile PIN and changing a role. A device being paired keeps polling. A
+  pairing approved before a restore that succeeds is dropped: the device
+  starts again with a new code. Without this, a sign-in that waited on the
+  restore went on after it with the OLD database's user id, and after a
+  restore from another install's backup that id can be someone else's.
+- **Waiting writes are ended.** Anything else that waited on the restore (a
+  progress save, a list change, a page's read) would go on after the `COMMIT`
+  against the restored data, with the ids it had read before. Just before the
+  `COMMIT`, while it still holds the locks, the restore ends every other
+  connection of this database that is waiting on it
+  (`pg_terminate_backend`): that request fails (the web app says it could not
+  load or save just now; a retry works), and Aurora opens a new connection. A
+  connection Aurora's database user may not end (a superuser's `psql`) is
+  left and logged as a warning; the restore commits anyway. A request that
+  starts waiting in the moment between that and the `COMMIT` (well under a
+  second) still goes on against the restored data.
+- **Scans and metadata work.** A library scan, enrichment or other background
+  job that is running when the restore commits carries on with the ids it
+  read before, into the restored data, until Aurora restarts. Start a restore
+  when no library scan is running (the scan bar shows one) and restart Aurora
+  as soon as it succeeds; after a restore from another install's backup, scan
+  the libraries again after that restart.
 - **Free disk space.** The old data's files are kept until the transaction
   commits, so the database needs room for both copies (and their write-ahead
-  log) while the restore runs.
+  log) while the restore runs. Nothing checks that first. A restore that runs
+  out of space fails and rolls back; if PostgreSQL itself cannot write its log
+  it stops and restarts (every connection drops, Aurora's included), and the
+  files the restore had written may stay on disk until removed by hand.
 - **Waiting for other work.** The drops wait up to 30 seconds for any other
   transaction using a table to finish. Past that the restore fails, rolled
-  back, saying so (`lock timeout`); try again when the server is quieter.
+  back, saying so (`lock timeout`); try again when the server is quieter. A
+  write that meets the drops half way can deadlock with them, and PostgreSQL
+  then aborts one of the two: that request, or the restore (rolled back; run
+  it again).
 
 From the end of the upload, the restore runs on the server to its end, whatever
 happens to the browser that started it: a reload, a closed tab, a lost
@@ -78,7 +124,7 @@ stopped `pg_restore` part way and left the database empty, with nothing to say
 so.) The whole restore after the upload has 60 minutes.
 
 **Everyone is signed out by a restore that succeeds**, the admin who started it
-included: backups hold no sessions. Each browser finds out at its next token
+included: backups hold no sessions, and no sign-in can add one while it runs. Each browser finds out at its next token
 refresh, within about 15 minutes; until then a page can still load, but
 anything that checks the session (the Admin page among them) is refused. Sign
 in again with an account from the backup. A restore that fails signs nobody
@@ -111,7 +157,7 @@ The two reads behind these:
 
 | Route | Who | Notes |
 | --- | --- | --- |
-| `GET /api/admin/restore/status` | an admin session not acting as a restricted profile | The session checks read the database, so while a restore's transaction runs this read waits for it (and can fail after a minute), and after one that succeeds it is refused until you sign in again. |
+| `GET /api/admin/restore/status` | an admin session not acting as a restricted profile | The session checks read the database, so while a restore's transaction runs this read waits for it, with no time limit, until the restore ends; after one that succeeds it is refused until you sign in again. |
 | `GET /api/restore/status` | whoever holds the restore's ticket (`X-Aurora-Restore-Ticket`) | No session needed, and no database. The ticket is the 32-to-128-character secret the upload carried; the server keeps only its SHA-256. Any other value, and a ticket a newer restore has replaced, gets the same 404. |
 
 Both answer:
@@ -120,7 +166,7 @@ Both answer:
 | --- | --- |
 | `state` | `none` (no restore since Aurora started), `running`, `succeeded`, `failed` |
 | `step` | `checking` or `restoring`: where a running restore is, or where a failed one stopped |
-| `database` | `unchanged`, `restored`, or `unknown`. Until the restore commits, and after any failure, it is `unchanged`: the transaction rolled back. `unknown` only when the restore was cut off as it committed (`psql` ended after Aurora sent the `COMMIT` and before it said how that ended), or on an internal error: the database then holds either what it held before or the whole backup, never a mix |
+| `database` | `unchanged`, `restored`, or `unknown`. Until the restore commits, and after any failure, it is `unchanged`: the transaction rolled back. `unknown` only when Aurora could not learn whether its `COMMIT` took effect (`psql` ended after Aurora sent it and before it said how that ended, or said nothing), or on an internal error after the check: for a backup Aurora made, the database then holds either what it held before or the whole backup, never a mix |
 | `file`, `started_at`, `finished_at` | the uploaded file's name, and when the restore began and ended |
 | `restart_required` | a restore has succeeded since Aurora started; a later restore that is refused does not clear it |
 | `message` | the server's account of a finished restore: the same text its request was, or would have been, answered with. The admin read only: it can quote `pg_restore`'s or `psql`'s output, which can include a row of the table that failed, and the ticket read has no session behind it |
@@ -152,7 +198,9 @@ restore has to be run again.
   sudo systemctl start aurora-update.timer
   ```
 
-  `install.sh` and `redeploy.sh` wait the same way.
+  `install.sh` and `redeploy.sh` wait the same way, unless run with
+  `AURORA_SKIP_DRAIN=1` or `--no-drain` (and `redeploy.sh --no-restart` does
+  not restart at all).
 - **The 60-minute limit.** Larger databases should be restored from the shell
   (below).
 
@@ -178,6 +226,22 @@ not what you want.
 **Aurora restarted during a restore** (no record survives): the same applies.
 Unless the restart came just as the restore was committing, the old data is
 there.
+
+## Known limits
+
+- An upload refused at once (programs too old, another restore running) can
+  reach the browser as a dropped connection rather than the refusal, while
+  the browser is still sending a large file.
+- Aurora reads PostgreSQL's English `ERROR:` lines to tell a failed `COMMIT`
+  from an unknown one; a server whose messages are in another language reports
+  a failed `COMMIT` as `unknown` (check the data, as above).
+- Access tokens are not tied to a database: one issued before a restore
+  stays usable for its lifetime (15 minutes by default), and most routes check
+  only the user id and token version it names. After a restore from another
+  install's backup that id can be someone else's, so a browser signed in
+  before it may act as that account until its token runs out (the routes that
+  read the session, the Admin page among them, refuse it). Restarting Aurora
+  does not end such tokens.
 
 ## Restoring from the shell
 

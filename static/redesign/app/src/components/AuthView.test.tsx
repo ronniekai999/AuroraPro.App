@@ -410,6 +410,15 @@ describe('what a refusal says', () => {
     expect(refusalSays(refused(code, server), true)).toEqual({ says: page, field })
   })
 
+  it('says a sign-in or an account refused while a database restore runs is paused, not failed', () => {
+    const restoring = new APIError(503, 'a database restore is running; signing in and changes to sign-in details are paused until it ends',
+      { error: { code: 503, reason: 'restore_running', message: 'a database restore is running' } })
+    expect(refusalSays(restoring, false)).toEqual({ says: 'A database restore is running on this server, so signing in is paused until it has finished.', field: null })
+    expect(refusalSays(restoring, true)).toEqual({ says: 'A database restore is running on this server, so accounts cannot be made until it has finished.', field: null })
+    // Another 503 (a proxy's) is the general sentence.
+    expect(refusalSays(new APIError(503, 'Service Unavailable', null), false)).toEqual({ says: 'Could not sign in just now. Try again in a moment.', field: null })
+  })
+
   it('says a rate limit is one, whatever its words, and a request that got no answer is the connection', () => {
     expect(refusalSays(refused(429, 'rate limit exceeded, try again later'), false)).toEqual({ says: 'Too many tries. Wait a moment and try again.', field: null })
     expect(refusalSays(refused(429, 'slow down'), true)).toEqual({ says: 'Too many tries. Wait a moment and try again.', field: null })
@@ -522,7 +531,7 @@ describe('a database restore this browser started', () => {
     answer(json(200, { state: 'running', step: 'restoring', database: 'unchanged', file: 'aurora-backup.dump', started_at: '2026-11-13T15:00:00Z', restart_required: false }))
     await open()
     const note = await screen.findByRole('region', { name: 'A restore is running' })
-    expect(note).toHaveTextContent('Until it has finished, Aurora waits for it: pages and sign-ins hang, and some fail after a minute.')
+    expect(note).toHaveTextContent('Until it has finished, Aurora waits for it: pages hang (some fail after a minute) and signing in is paused.')
     cleanup()
     await open('/', status({ has_users: false }))
     expect(await screen.findByRole('region', { name: 'A restore is running' })).toBeInTheDocument()
@@ -546,7 +555,7 @@ describe('a database restore this browser started', () => {
     answer(json(200, { state: 'failed', step: 'restoring', database: 'unknown', file: 'aurora-backup.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:10:00Z', restart_required: false, message: 'psql ended without reporting whether the COMMIT took effect' }))
     await open()
     const note = await screen.findByRole('region', { name: 'Aurora cannot tell whether the restore from aurora-backup.dump went through' })
-    expect(note).toHaveTextContent('the database holds either what it held before or the whole backup, never a mix')
+    expect(note).toHaveTextContent('the database holds either what it held before or the backup')
     // The server's own text is for the Admin page only.
     expect(note).not.toHaveTextContent('COMMIT took effect')
   })

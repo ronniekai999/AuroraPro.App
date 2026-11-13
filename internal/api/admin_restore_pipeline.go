@@ -11,6 +11,7 @@ package api
 //	BEGIN; SET LOCAL ...;             (restorePreamble)
 //	<the wipe: restoreWipeSQL>
 //	<pg_restore's output>
+//	<end the sessions waiting on it>  (restoreEndWaitersSQL)
 //	\warn ... committing; COMMIT; \warn ... committed   (restoreCommitBlock)
 //
 // The commit block is written by this process, and only once pg_restore has
@@ -42,9 +43,15 @@ package api
 // subscriptions, tablespaces, foreign servers, procedural languages and
 // security labels, which Aurora's dumps never hold. pg_dump never writes
 // VACUUM, CREATE INDEX CONCURRENTLY or a transaction statement of its own. A
-// crafted archive can still hold any SQL in an allowed entry, a COMMIT
-// included; only an admin can upload one, and an admin can restore an empty
-// database anyway.
+// crafted archive can still hold any SQL in an allowed entry: a COMMIT or a
+// ROLLBACK of its own ends this transaction part way (a COMMIT keeps what was
+// done so far, and a later failure is then reported as rolled back when it was
+// not; after a ROLLBACK the rest, and this file's COMMIT, run outside any
+// transaction and are reported as restored), and a `COPY ... FROM stdin` with
+// no end swallows the commit block (rolled back, reported unknown). So the
+// one-transaction promise holds for a backup Aurora made, not for any file.
+// Only an admin can upload one, and an admin can restore an empty database
+// anyway.
 //
 // psql meta-commands. psql obeys backslash commands wherever they appear
 // outside quotes, and an archive's object definitions are copied into the
@@ -60,13 +67,24 @@ package api
 // Locks. The wipe takes an ACCESS EXCLUSIVE lock on every table it drops and
 // the transaction holds them until it ends, so the server's own queries on
 // those tables (the admin guard's session read included) wait rather than
-// fail, and run against the restored data, or the old data after a rollback,
-// once it ends: writes that waited (progress, activity, a scan's inserts)
-// land on the restored data. The wipe waits at most restoreLockTimeout for
-// each lock (a long query or an open transaction elsewhere): past it, or on a
-// deadlock, the restore fails and rolls back, with the old data. The old
-// tables' files stay on disk until the COMMIT, so the database needs room for
-// both copies meanwhile.
+// fail. A query that waited goes on once the transaction ends, against the
+// restored data (or the old data after a rollback), with whatever it read
+// before: a write keyed by the old database's ids would land in the restored
+// one. So just before the COMMIT, still holding the locks, the restore's
+// session ends every other session of this database that waits on it
+// (restoreEndWaitersSQL): their statements fail, and the server's pool opens
+// new connections. One that starts waiting after that scan and before the
+// COMMIT completes still lands; the routes that make or change sessions and
+// credentials do not rely on this, since they are closed for the whole
+// transaction (admin_restore_gate.go). A scan or enrichment that is running
+// carries on after the COMMIT with ids it read before (see the runbook). The
+// wipe waits at most restoreLockTimeout for each lock (a long query or an open
+// transaction elsewhere): past it, or on a deadlock, the restore fails and
+// rolls back, with the old data. The old tables' files stay on disk until the
+// COMMIT, so the database needs room for both copies meanwhile; nothing checks
+// that first, and a disk that fills while PostgreSQL writes its log can make
+// it stop and restart (every connection ends; the restore's files may stay
+// behind).
 
 import (
 	"bytes"
@@ -113,6 +131,8 @@ type restoreTools struct {
 	pgRestore   string
 	psql        string
 	lockTimeout time.Duration
+	// endWaiters replaces restoreEndWaitersSQL when set (tests).
+	endWaiters string
 }
 
 func (t restoreTools) pgRestoreBin() string {
@@ -298,14 +318,67 @@ func (t restoreTools) checkTOC(ctx context.Context, path string) (string, string
 // come at the end of the stream: the next start then waited in its
 // migrations. With it the session is gone, and its transaction rolled back,
 // within a second or two of the statement noticing.
+//
+// It is set only where the server takes it (restoreSetIfSupported): a server
+// older than PostgreSQL 14 has no such setting, and PostgreSQL 14 on a
+// platform without POLLRDHUP (anything but Linux) and 15 and later on Windows
+// refuse any value but 0. Set plainly, it failed every restore there.
 func restorePreamble(lockTimeout time.Duration) string {
 	return fmt.Sprintf("BEGIN;\n"+
 		"SET LOCAL lock_timeout = '%dms';\n"+
 		"SET LOCAL statement_timeout = 0;\n"+
 		"SET LOCAL idle_in_transaction_session_timeout = 0;\n"+
-		"SET LOCAL client_connection_check_interval = '1s';\n"+
+		"%s\n"+
 		"SET LOCAL client_min_messages = warning;\n"+
-		"%s\n", lockTimeout.Milliseconds(), restoreWipeSQL)
+		"%s\n", lockTimeout.Milliseconds(), restoreSetIfSupported("client_connection_check_interval", "1s"), restoreWipeSQL)
+}
+
+// restoreSetIfSupported is a SET LOCAL that cannot abort the transaction: a
+// server that refuses the setting (unknown to its version, or a value its
+// platform cannot honour) leaves it as it was. name and value are constants
+// of this file, never input.
+func restoreSetIfSupported(name, value string) string {
+	return "DO $aurora_set$ BEGIN\n" +
+		"  PERFORM set_config('" + name + "', '" + value + "', true);\n" +
+		"EXCEPTION WHEN OTHERS THEN NULL;\n" +
+		"END $aurora_set$;"
+}
+
+// restoreWaiterFilter picks this database's other sessions that wait on a
+// lock the restore's own session holds: every query that meets a table it
+// dropped. pg_blocking_pids rather than wait_event_type = 'Lock' alone: a
+// session waiting on something else (another transaction's row) is left
+// alone, and one already queued for the lock that has not yet reported its
+// wait is still picked.
+const restoreWaiterFilter = "datname = current_database() AND pid <> pg_backend_pid() AND pg_backend_pid() = ANY (pg_blocking_pids(pid))"
+
+// restoreEndWaitersSQL ends the sessions restoreWaiterFilter picks, from the
+// restore's own session after the load and before the COMMIT, so that it
+// still holds the locks. A session that is ended processes its termination as
+// it wakes, before its statement goes on, so nothing it was waiting to write
+// lands. pg_terminate_backend may signal sessions of this database's own role,
+// which are the server's; one it may not end (a superuser's psql, a background
+// worker) is skipped with a warning, and an error anywhere in it is caught: it
+// cannot abort the transaction, so the restore commits whatever it could end.
+var restoreEndWaitersSQL = restoreEndWaitersBlock(restoreWaiterFilter, "pg_terminate_backend(waiting)")
+
+// restoreEndWaitersBlock builds restoreEndWaitersSQL; tests put a failing
+// terminate or filter in, to show that neither can fail the restore.
+func restoreEndWaitersBlock(filter, terminate string) string {
+	return "DO $aurora_end_waiters$\n" +
+		"DECLARE waiting int; ended int := 0;\n" +
+		"BEGIN\n" +
+		"  FOR waiting IN SELECT pid FROM pg_stat_activity WHERE " + filter + " LOOP\n" +
+		"    BEGIN\n" +
+		"      IF " + terminate + " THEN ended := ended + 1; END IF;\n" +
+		"    EXCEPTION WHEN OTHERS THEN\n" +
+		"      RAISE WARNING 'aurora-restore: could not end session %, which waits on the restore: %', waiting, SQLERRM;\n" +
+		"    END;\n" +
+		"  END LOOP;\n" +
+		"  IF ended > 0 THEN RAISE WARNING 'aurora-restore: ended % session(s) waiting on the restore', ended; END IF;\n" +
+		"EXCEPTION WHEN OTHERS THEN\n" +
+		"  RAISE WARNING 'aurora-restore: could not end the sessions waiting on the restore: %', SQLERRM;\n" +
+		"END $aurora_end_waiters$;\n"
 }
 
 // restorePsqlArgs are psql's arguments for the restore's one session. -X: no
@@ -319,11 +392,13 @@ func restorePsqlArgs(connURL string) []string {
 	return []string{"-X", "--quiet", "--no-password", "--set", "ON_ERROR_STOP=on", "-f", "-", connURL}
 }
 
-// restoreCommitBlock is the only COMMIT the transaction ever gets, with the
-// two lines psql prints around it (to stderr, unbuffered) so this process
-// knows whether psql reached it and whether it took effect.
-func restoreCommitBlock(marker string) string {
-	return "\n\\warn aurora-restore committing " + marker + "\n" +
+// restoreCommitBlock is the only COMMIT the transaction ever gets, after
+// endWaiters (restoreEndWaitersSQL), with the two lines psql prints around it
+// (to stderr, unbuffered) so this process knows whether psql reached it and
+// whether it took effect.
+func restoreCommitBlock(marker, endWaiters string) string {
+	return "\n" + endWaiters +
+		"\\warn aurora-restore committing " + marker + "\n" +
 		"COMMIT;\n" +
 		"\\warn aurora-restore committed " + marker + "\n"
 }
@@ -564,7 +639,11 @@ func (t restoreTools) replace(ctx context.Context, connURL string, env []string,
 	// TestTheCommitGuardHoldsWhenTheRestoreIsStopped.
 	commitSent := false
 	if streamErr == nil && ctx.Err() == nil {
-		if _, err := io.WriteString(stdin, restoreCommitBlock(marker)); err != nil {
+		endWaiters := t.endWaiters
+		if endWaiters == "" {
+			endWaiters = restoreEndWaitersSQL
+		}
+		if _, err := io.WriteString(stdin, restoreCommitBlock(marker, endWaiters)); err != nil {
 			streamErr, psqlStopped = fmt.Errorf("psql stopped reading before the commit: %w", err), true
 		} else {
 			commitSent = true
@@ -590,7 +669,8 @@ func (t restoreTools) replace(ctx context.Context, connURL string, env []string,
 	committing, committed, failedAfterCommitting := prog.state()
 	switch {
 	case committed:
-		return replaceOutcome{committed: true}
+		// stderr: psql's warnings (the sessions it ended), for the log.
+		return replaceOutcome{committed: true, stderr: psqlStderr}
 	case committing && !failedAfterCommitting:
 		return replaceOutcome{unknown: true, stderr: stderr,
 			cause: "psql ended after it sent the COMMIT and before it reported how the COMMIT ended (" + errText(psqlErr) + ")"}

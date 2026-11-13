@@ -268,6 +268,16 @@ describe('failures said beside what failed', () => {
     expect(alertLines(await screen.findByRole('alert'))).toEqual(['A backup or restore is already running. Try again when it has finished.', 'The server said: another backup or restore is already in progress'])
   })
 
+  it('words the restore panel with its code names set off by spaces', async () => {
+    const user = userEvent.setup()
+    fetchAnswer = async () => json(503, { error: 'unavailable' })
+    const view = await openSection(user, 'Backup and restore')
+    // JSX drops the space at a line break next to an element.
+    const text = view.container.textContent ?? ''
+    expect(text).toContain('so pause aurora-update.timer first for a large backup. Legacy .sql.gz backups need to be restored via the command line: gunzip < file.sql.gz | psql $DATABASE_URL.')
+    expect(text).toContain('Once the file has been checked and until the restore ends, Aurora waits for it: pages hang (some fail after a minute) and signing in is paused.')
+  })
+
   it('says a restore that failed was rolled back unless it was cut off as it committed, and keeps it in the panel once the dialog is put down', async () => {
     const user = userEvent.setup()
     fetchAnswer = async url => url === '/api/admin/restore'

@@ -312,14 +312,17 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
         </p>
         <p className="text-ink-2 text-xs mb-4 leading-relaxed">
           Once the file is uploaded, the restore runs on the server to its end whether or not this
-          page stays open, and this browser shows how it went: here, or on the sign-in page. Clearing
-          the old data and loading the backup are one transaction: if anything fails, the restore rolls
-          back and the database is left as it was. While it runs, Aurora waits for it: pages and sign-ins
-          hang, and some fail after a minute. The server needs free disk space for a second copy of the
-          data meanwhile. Restarting Aurora stops it, and it then has to be run again; an automatic update
-          waits up to five minutes for it and then restarts anyway, so pause <code>aurora-update.timer</code>
-          first for a large backup. Legacy <code>.sql.gz</code> backups need to be restored via the
-          command line: <code>gunzip &lt; file.sql.gz | psql $DATABASE_URL</code>.
+          page stays open, and this browser shows how it went: here, or on the sign-in page. For a backup
+          made by Aurora, clearing the old data and loading the backup are one transaction: if anything
+          fails, the restore rolls back and the database is left as it was. Once the file has been checked
+          and until the restore ends, Aurora waits for it: pages hang (some fail after a minute) and signing
+          in is paused. The server needs free disk space for a second copy of the data meanwhile, and
+          nothing checks that first. Start it when no library scan is running: one that is carries on into
+          the restored data. Restarting Aurora stops a restore, and it then has to be run again; an
+          automatic update waits up to five minutes for it and then restarts anyway, so
+          pause <code>aurora-update.timer</code> first for a large backup.
+          Legacy <code>.sql.gz</code> backups need to be restored via the command
+          line: <code>gunzip &lt; file.sql.gz | psql $DATABASE_URL</code>.
         </p>
         {showRecord && <RestoreRecordNote record={record} server={restoreServerLine(record.status)} className="mb-4" />}
         <div className="flex gap-3 flex-wrap items-center">
@@ -378,10 +381,11 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
         accounts, profiles, libraries, watch history, lists and settings. What is there now cannot be brought
         back except from another backup. Once the file is uploaded the restore runs on the server to its end:
         reloading or closing this tab does not stop it, and this browser shows how it went, here or on the
-        sign-in page. Until it ends Aurora waits for it, and pages and sign-ins hang. Restarting Aurora stops
-        it (nothing is then changed, and it has to be run again), and so does an automatic update that has
-        waited five minutes for it: pause aurora-update.timer first for a large backup. If it fails, the
-        database is left as it was. Everyone is signed out by it. Restart Aurora once it has succeeded.
+        sign-in page. Once the file has been checked and until the restore ends, Aurora waits for it: pages
+        hang and signing in is paused. Restarting Aurora stops it (nothing is then changed, and it has to be
+        run again), and so does an automatic update that has waited five minutes for it: pause
+        aurora-update.timer first for a large backup. If it fails, the database is left as it was. If it
+        succeeds, everyone is signed out; restart Aurora then.
       </ConfirmDialog>
     </div>
   )

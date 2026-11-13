@@ -294,10 +294,10 @@ describe('a restore that outlives its page', () => {
     const d = await screen.findByRole('alertdialog')
     await user.click(within(d).getByRole('button', { name: 'Restore database' }))
     await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
-    await act(async () => { answerRestore(json(500, { error: { code: 500, message: 'psql ended after it sent the COMMIT and before it reported how the COMMIT ended (signal: killed), so the database holds either what it held before or the backup, never a mix — check which before going on' } })) })
+    await act(async () => { answerRestore(json(500, { error: { code: 500, message: 'psql ended after it sent the COMMIT and before it reported how the COMMIT ended (signal: killed), so the database holds either what it held before or the backup — check which before going on' } })) })
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
     const note = await screen.findByRole('region', { name: 'Aurora cannot tell whether the restore from aurora.dump went through' })
-    expect(note).toHaveTextContent('the database holds either what it held before or the whole backup, never a mix')
+    expect(note).toHaveTextContent('the database holds either what it held before or the backup')
     expect(view.container).not.toHaveTextContent('Unless it was cut off as it was being committed, the database was not changed.')
   })
 

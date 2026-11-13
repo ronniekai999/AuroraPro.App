@@ -254,8 +254,19 @@ func TestTheRestoreArgumentsLeaveTheCommitToAurora(t *testing.T) {
 	if !strings.HasPrefix(strings.TrimSpace(pre), "BEGIN;") || strings.Contains(pre, "COMMIT") {
 		t.Errorf("the preamble must open the transaction and never commit it:\n%s", pre)
 	}
-	if !strings.Contains(pre, "client_connection_check_interval") {
-		t.Error("the preamble does not set client_connection_check_interval: a killed psql's session keeps its locks until its statement ends")
+	if !strings.Contains(pre, restoreSetIfSupported("client_connection_check_interval", "1s")) {
+		t.Error("the preamble does not set client_connection_check_interval where the server takes it: a killed psql's session keeps its locks until its statement ends")
+	}
+	// Plainly set, it failed every restore on a server that refuses it
+	// (PostgreSQL 13, 14 off Linux, Windows).
+	if strings.Contains(pre, "SET LOCAL client_connection_check_interval") {
+		t.Error("the preamble sets client_connection_check_interval plainly; a server that refuses it would fail the restore")
+	}
+	// The sessions waiting on the restore are ended before the COMMIT, in
+	// the same stream.
+	block := restoreCommitBlock("m1", restoreEndWaitersSQL)
+	if i, j := strings.Index(block, "pg_terminate_backend"), strings.Index(block, "COMMIT;"); i < 0 || j < 0 || i > j {
+		t.Errorf("the commit block does not end the waiting sessions before its COMMIT:\n%s", block)
 	}
 }
 

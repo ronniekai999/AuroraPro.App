@@ -672,8 +672,13 @@ func (h *AdminHandler) runRestoreRecorded(tmpPath string, run *restoreRun) (res 
 			slog.Error("restore panicked", "panic", p)
 			res = restoreResult{
 				httpStatus: http.StatusInternalServerError,
-				message:    "the restore stopped on an internal error; the database holds either what it held before or the backup, never a mix — check which before going on",
+				message:    "the restore stopped on an internal error; the database holds either what it held before or the backup — check which before going on",
 				database:   restoreDBUnknown,
+			}
+			// Still checking: nothing had touched the database.
+			if h.restores.status().Step == string(restoreStepChecking) {
+				res.message = "the restore stopped on an internal error while it checked the file; the database was NOT modified"
+				res.database = restoreDBUnchanged
 			}
 		}
 		h.restores.finish(run, res, time.Now().UTC())
@@ -729,13 +734,41 @@ func (h *AdminHandler) runRestore(tmpPath string, run *restoreRun) restoreResult
 	// pgConnEnv.
 	connURL, pgEnv := pgConnEnv(h.databaseURL)
 	h.restores.step(run, restoreStepRestoring, restoreDBUnchanged)
+
+	// Close the routes that make or change sessions and credentials until
+	// the restore ends (admin_restore_gate.go), and wait for the ones already
+	// running: one that waited on the transaction's locks would land in the
+	// restored data with the old database's ids. A request that does not
+	// finish in time keeps the restore from starting.
+	drain := h.sessionDrain
+	if drain <= 0 {
+		drain = restoreSessionDrain
+	}
+	drained := h.sessionGate.shutAndDrain(ctx, drain)
+	defer h.sessionGate.open()
+	if !drained {
+		if ctx.Err() != nil {
+			slog.Warn("restore stopped before its transaction began (database NOT modified)", "ctx_err", ctx.Err())
+			return restoreResult{httpStatus: http.StatusInternalServerError, message: stopped() + " before it changed anything; the database was NOT modified",
+				step: restoreStepRestoring, database: restoreDBUnchanged}
+		}
+		msg := fmt.Sprintf("the restore did not start: a sign-in or a change to sign-in details was still running after %d seconds; try again — the database was NOT modified", int(drain.Seconds()))
+		slog.Warn("restore not started: session routes did not drain (database NOT modified)", "wait", drain)
+		return restoreResult{httpStatus: http.StatusInternalServerError, message: msg, step: restoreStepRestoring, database: restoreDBUnchanged}
+	}
+
 	out := programs.replace(ctx, connURL, pgEnv, tmpPath)
 	switch {
 	case out.committed:
-		slog.Info("restore succeeded — Aurora MUST be restarted to use new data")
+		slog.Info("restore succeeded — Aurora MUST be restarted to use new data", "psql_notes", out.stderr)
+		// In-memory state naming the old database's rows (pending device
+		// pairings) goes before the session routes open again.
+		for _, fn := range h.onRestored {
+			fn()
+		}
 		return restoreResult{ok: true, message: restoreSucceededMessage, database: restoreDBRestored}
 	case out.unknown:
-		msg := out.cause + ", so the database holds either what it held before or the backup, never a mix — check which before going on"
+		msg := out.cause + ", so the database holds either what it held before or the backup — check which before going on"
 		if ctx.Err() != nil {
 			msg = stopped() + " as it committed; " + msg
 		}

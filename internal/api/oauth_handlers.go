@@ -1132,6 +1132,19 @@ window.location.replace(dest);
 // renderError shows a user-facing error page with a "back to sign-in"
 // link. Used for any OAuth-flow failure that the user might retry.
 func (h *OAuthHandler) renderError(w http.ResponseWriter, message string) {
+	h.renderErrorStatus(w, http.StatusBadRequest, message)
+}
+
+// renderRestoreRunning answers a callback that comes while a database restore
+// runs (admin_restore_gate.go), before it touches the database: its sign-in
+// transaction stays as it was and expires on its own.
+func (h *OAuthHandler) renderRestoreRunning(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Retry-After", "60")
+	h.renderErrorStatus(w, http.StatusServiceUnavailable,
+		"A database restore is running on this server, so signing in is paused. Try again once it has finished.")
+}
+
+func (h *OAuthHandler) renderErrorStatus(w http.ResponseWriter, status int, message string) {
 	const errorHTML = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Sign-in failed</title>
 <style>
@@ -1147,7 +1160,7 @@ body{background:#0c0a18;color:#f4f0ff;font-family:system-ui,sans-serif;display:f
 
 	tpl, err := template.New("oauth-error").Parse(errorHTML)
 	if err != nil {
-		http.Error(w, message, http.StatusBadRequest)
+		http.Error(w, message, status)
 		return
 	}
 	// Override the strict `/api/*` CSP. The error page has no inline
@@ -1161,7 +1174,7 @@ body{background:#0c0a18;color:#f4f0ff;font-family:system-ui,sans-serif;display:f
 			"frame-ancestors 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusBadRequest)
+	w.WriteHeader(status)
 	_ = tpl.Execute(w, map[string]string{"Message": message})
 }
 

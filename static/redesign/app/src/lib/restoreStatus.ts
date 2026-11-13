@@ -30,8 +30,9 @@ export interface RestoreStatus {
   step?: 'checking' | 'restoring'
   /** What it has done to the database, as far as the server can tell: the
    *  wipe and the load are one transaction, so it is unchanged until that
-   *  commits, and `unknown` only when the restore was cut off as it
-   *  committed. */
+   *  commits, and `unknown` only when Aurora could not learn whether the
+   *  COMMIT took effect (psql cut off as it committed, or an internal error
+   *  in the transaction's step). */
   database?: 'unchanged' | 'unknown' | 'restored'
   file?: string
   started_at?: string
@@ -195,14 +196,14 @@ export function restoreWords(st: RestoreStatus): RestoreWords | null {
     case 'running':
       return st.step === 'checking'
         ? { title: 'A restore is running', urgent: false, says: `Aurora is checking ${file} before it changes anything. The restore goes on on the server whether or not this page is open.` }
-        : { title: 'A restore is running', urgent: true, says: `Aurora is replacing its database with ${file}. Until it has finished, Aurora waits for it: pages and sign-ins hang, and some fail after a minute. Do not restart Aurora meanwhile: that stops the restore, which then changes nothing and has to be run again. It goes on on the server whether or not this page is open.` }
+        : { title: 'A restore is running', urgent: true, says: `Aurora is replacing its database with ${file}. Until it has finished, Aurora waits for it: pages hang (some fail after a minute) and signing in is paused. Do not restart Aurora meanwhile: that stops the restore, which then changes nothing and has to be run again. It goes on on the server whether or not this page is open.` }
     case 'succeeded':
       return { title: 'Restart Aurora now', urgent: true, says: `The database was restored from ${file}${timeOf(st.finished_at)}. Until Aurora is restarted, it goes on working from what it held before the restore. Sign-ins from before the restore have ended: sign in again with an account from the backup.` }
     case 'failed':
       if (st.database === 'unchanged') {
         return { title: `The restore from ${file} did not go through`, urgent: false, says: `The database was not changed.${earlier}` }
       }
-      return { title: `Aurora cannot tell whether the restore from ${file} went through`, urgent: true, says: 'It stopped as it was being committed, so the database holds either what it held before or the whole backup, never a mix. Check which on the server before going on; if it holds the backup, restart Aurora.' }
+      return { title: `Aurora cannot tell whether the restore from ${file} went through`, urgent: true, says: 'It ended without Aurora learning whether it took effect, so the database holds either what it held before or the backup. Check which on the server before going on; if it holds the backup, restart Aurora.' }
     default:
       return null
   }

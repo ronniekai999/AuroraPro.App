@@ -2031,8 +2031,10 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   sentences with their statuses (`ANSWERS`, against
   `internal/api/auth_handlers.go`), never a word inside one: matched on
   "password", a 500 "failed to hash password" told its viewer how long a
-  password must be. A 429 is "too many tries" whatever its words; every 5xx
-  and anything unknown is "could not ... just now", about no field. Nothing
+  password must be. A 429 is "too many tries" whatever its words; a 503
+  with the reason `restore_running` says a database restore is running and
+  signing in (or making an account) is paused; every other 5xx and anything
+  unknown is "could not ... just now", about no field. Nothing
   checks the list against the Go source: a reworded server sentence falls
   back to that line. A refusal puts the focus in the field it is about (the
   form's first when none), and going between the two pages puts it on the
@@ -2108,7 +2110,9 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
 - A failure is said in the app's own words, chosen by its kind, never the
   server's or the browser's text (`lib/failureWords`: lib/api's
   `NetworkError` for a request that got no answer, `APIError`'s status and
-  `error.reason`; an abort says nothing). "Just now" is said only of a 5xx,
+  `error.reason`; an abort says nothing). A 503 `restore_running` (the
+  session and credential routes while a restore runs) says a restore is
+  running, whatever was being done. "Just now" is said only of a 5xx,
   a lost connection and the app's own failure; a 404 says the same whether
   or not the thing exists. The server's text is for the Admin page only, as
   a secondary line (`serverSaidForAdmin`); what is not yet on the helper
@@ -2232,9 +2236,14 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   with `--single-transaction`, which commits at the end of its input whatever
   became of `pg_restore` (`restorePsqlArgs` is the one place its arguments
   are built). Any failure, a stop, a crash or a lost connection rolls back:
-  `database` is `unchanged`. `unknown` only when psql ended after the COMMIT
-  was sent and before it reported the result (markers `\warn`ed after it
-  decide), or on a recovered panic. Safety rests on `pg_restore
+  `database` is `unchanged`. `unknown` only when Aurora cannot learn whether
+  its COMMIT took effect: psql ended after it was sent and before it reported
+  the result (markers `\warn`ed around it decide), psql reported nothing, or
+  a panic after the check (one while checking is `unchanged`). All of this is
+  for a backup Aurora made: a crafted archive can hold its own COMMIT or
+  ROLLBACK in an allowed entry (a partial commit, then misreported as rolled
+  back or as restored) or an unterminated `COPY ... FROM stdin` that swallows
+  the commit block (rolled back, reported `unknown`). Safety rests on `pg_restore
   --restrict-key` (psql obeys backslash commands in the stream; without the
   `\restrict` pair a crafted archive could run shell commands): a missing or
   older client is refused before the upload is read (`ready`, a 500 that says
@@ -2246,14 +2255,45 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   restores it without an error: an empty database would have committed), and
   one it cannot read in full. While the transaction runs it holds ACCESS
   EXCLUSIVE locks on everything it dropped, so the rest of the server waits:
-  requests hang (the session lookup fails at 60 s; the token-version check
-  has no deadline once its 60 s cache lapses), and they can take every pool
-  connection until the restore ends. The old table files stay until COMMIT,
-  so the disk needs room for both copies. The wipe waits 30 s for locks
-  (`restoreLockTimeout`), then fails, rolled back. `SET LOCAL
-  client_connection_check_interval = '1s'` frees a killed psql's locks
-  within about a second (the long statements, the vector index build and the
-  foreign keys, come last). A stop sends SIGINT before the committing marker
+  requests hang (those under a route's 60 s `middleware.Timeout` fail then;
+  the others, `GET /api/admin/restore/status` among them, wait until the
+  restore ends), and they can take every pool connection meanwhile. A query
+  that waited goes on after the COMMIT against the restored data with what
+  it read before, so a write keyed by the old database's ids lands there.
+  Two things stop that. Just before the COMMIT, from its own session (still
+  holding the locks), the restore ends every other session of the database
+  that its locks block (`restoreEndWaitersSQL`: `pg_terminate_backend` over
+  `pg_stat_activity` filtered by `pg_blocking_pids` containing its own pid,
+  which also catches a waiter queued but not yet reporting its wait); each
+  terminate and the scan as a whole sit in plpgsql exception blocks, so one
+  the role may not end (a superuser's, logged as a warning) or any error
+  cannot abort the transaction, and it commits. The app has no connection
+  that waits on a lock by design (no LISTEN, no dedicated connections; three
+  short `pg_advisory_xact_lock` waits), and pgxpool destroys a terminated
+  connection on release and opens another: the request in flight fails (a
+  500, or a 504 under a route timeout), a background job logs and moves on.
+  A session that starts waiting between that scan and the COMMIT still
+  lands. So the routes that make or change sessions and credentials do not
+  rely on it: they are closed for the whole transaction
+  (`admin_restore_gate.go`: login, register, refresh, the OAuth callback,
+  the device poll and approval, change-password, unlink, PIN writes and role
+  changes answer 503 `restore_running`; the restore shuts the gate after
+  the check and waits up to `restoreSessionDrain`, 10 s, for those already
+  past it, else does not start; the gate opens when the restore ends), and
+  a restore that commits drops the in-memory device grants (`OnRestored`),
+  which name the old database's user id and token version. The old table
+  files stay until COMMIT, so the disk needs room for both copies; nothing
+  checks first, and a disk full while PostgreSQL writes its WAL makes it
+  PANIC and restart (every connection drops; the transaction's new files may
+  be orphaned). The wipe waits 30 s for locks (`restoreLockTimeout`), then
+  fails, rolled back; a write that meets the wipe half way can deadlock with
+  it, and PostgreSQL aborts one of the two. `client_connection_check_interval
+  = '1s'` frees a killed psql's locks within about a second (the long
+  statements, the vector index build and the foreign keys, come last); it is
+  set through `restoreSetIfSupported` (a plpgsql block that swallows the
+  error), since PostgreSQL 13 lacks it and 14 off Linux, and Windows on
+  every version, refuse a non-zero value: set plainly it failed every
+  restore there. A stop sends SIGINT before the committing marker
   (SIGKILL after 15 s), and leaves a COMMIT already sent up to 60 s; the
   programs run in their own process groups (`Setpgid`), signalled as groups,
   and on Linux `restoreProcs.wait` (waitid with WNOWAIT) keeps a group's pid
@@ -2340,11 +2380,28 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   pause `aurora-update.timer` for a large backup) still stops a running
   restore, which rolls back and has to be run again, and forgets the record,
   so the browser that started it can say only that Aurora has no record of
-  it; while the transaction runs the whole server waits on it (pages and
-  sign-ins hang, the 60 s route timeouts and the session lookup's deadline
-  fail some, and nothing bounds how many requests pile up on the pool); a
-  restore needs disk for two copies of the data and fails, rolled back, when
-  it runs out; a backup with large objects cannot be restored from the page
+  it; while the transaction runs the whole server waits on it (pages hang,
+  the 60 s route timeouts fail some, and nothing bounds how many requests
+  pile up on the pool); a scan, enrichment or other background job running
+  at the COMMIT carries on into the restored data with ids it read before
+  until Aurora restarts (the page and the runbook say to start a restore
+  with no scan running and to restart at once); a write that starts waiting
+  between the end-of-restore terminate and the COMMIT lands (sessions and
+  credentials excepted, by the gate); the gate covers the listed routes
+  only, so other writes keyed by ids rely on the terminate; access tokens
+  are not tied to a database, so one minted before a restore from another
+  install's backup acts, for its lifetime, as whoever has its user id and
+  token version in the restored data on the routes that check nothing else
+  (pre-existing; a restart does not end it); a restore needs disk for two
+  copies of the data, with no precheck (see the WAL PANIC above); on
+  shutdown the transcode manager's close clears the drain snapshot and the
+  restore's finish then publishes it again (harmless: the scripts ignore a
+  snapshot older than 90 s); the early 500 for old programs, like the 409,
+  can reach a browser still sending a large file as a dropped connection;
+  the outcome reads psql's English `ERROR:` lines, so a server with
+  non-English `lc_messages` reports a failed COMMIT as `unknown`
+  (conservative); no test drives `unknown` through `replace`; a backup with
+  large objects cannot be restored from the page
   (the runbook's shell restore can); systemd's stop sends SIGTERM to psql
   and pg_restore with Aurora, so a stop that lands just as the COMMIT is
   sent can leave `unknown` with no record (a restart forgets it), which the

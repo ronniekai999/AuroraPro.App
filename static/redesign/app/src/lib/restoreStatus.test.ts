@@ -89,7 +89,7 @@ describe('the words for a record', () => {
     expect(words({ state: 'failed', step: 'restoring', database: 'unchanged', message: 'lock timeout' })).toEqual(unchanged)
     const unknown = words({ state: 'failed', step: 'restoring', database: 'unknown' })!
     expect(unknown.title).toBe('Aurora cannot tell whether the restore from b.dump went through')
-    expect(unknown.says).toContain('either what it held before or the whole backup, never a mix')
+    expect(unknown.says).toContain('It ended without Aurora learning whether it took effect, so the database holds either what it held before or the backup.')
     expect(unknown.urgent).toBe(true)
   })
 

@@ -28,6 +28,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -43,6 +44,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aurora-media/aurora/internal/db"
+	"github.com/aurora-media/aurora/internal/models"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -717,6 +721,7 @@ func TestRestoreRejectsRandomGarbage(t *testing.T) {
 // and drops the second; one that rolled back leaves both as they were.
 type restoreFixture struct {
 	dbURL     string
+	pool      *pgxpool.Pool
 	seed      seedRow
 	dump      []byte
 	liveOnly  string // a library name only the live database has
@@ -728,7 +733,7 @@ type restoreFixture struct {
 func newRestoreFixture(t *testing.T) *restoreFixture {
 	t.Helper()
 	pool, dbURL := requireBackupTestDB(t)
-	f := &restoreFixture{dbURL: dbURL, seed: seedTestData(t, pool)}
+	f := &restoreFixture{dbURL: dbURL, pool: pool, seed: seedTestData(t, pool)}
 	f.dump = callBackup(t, dbURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -988,8 +993,11 @@ func TestARestoreWhoseClientLeavesStillLandsInTheDatabase(t *testing.T) {
 // TestAReadDuringTheRestoreWaitsAndThenSeesTheNewData: while the transaction
 // runs it holds an ACCESS EXCLUSIVE lock on every table it dropped, so another
 // connection's read of one waits rather than failing ("relation does not
-// exist" was the separate wipe's answer), and once the restore commits it
-// sees the backup's rows.
+// exist" was the separate wipe's answer) until the restore ends. A read still
+// waiting at the COMMIT is ended with every other waiting session (its request
+// may write next, with what it read before; see
+// TestAWriteWaitingOnTheRestoreIsEndedRatherThanLandingInTheRestoredData),
+// and a read after the restore sees the backup's rows.
 func TestAReadDuringTheRestoreWaitsAndThenSeesTheNewData(t *testing.T) {
 	f := newRestoreFixture(t)
 	f.pauseAtFirstCopy(t, 4)
@@ -1039,13 +1047,15 @@ func TestAReadDuringTheRestoreWaitsAndThenSeesTheNewData(t *testing.T) {
 		t.Errorf("the record mid-transaction: %+v", st)
 	}
 	a := <-read
-	if a.err != nil || a.n != 1 {
-		t.Fatalf("the waiting read answered %d, %v; want the backup's row (1)", a.n, a.err)
+	var pgErr *pgconn.PgError
+	if a.err == nil || !errors.As(a.err, &pgErr) || pgErr.Code != "57P01" {
+		t.Fatalf("the read still waiting at the COMMIT answered %d, %v; want it ended (57P01)", a.n, a.err)
 	}
 	<-done
 	if st := f.ended(t); st.State != restoreStateSucceeded {
 		t.Fatalf("record %+v", st)
 	}
+	// A read now sees the backup's rows.
 	f.assertRestored(t)
 }
 
@@ -1356,4 +1366,289 @@ setsid -w "$REAL" "$@"`)
 		t.Errorf("message %q does not say the server stopped it", st.Message)
 	}
 	f.assertOldData(t)
+}
+
+// waitForTheFirstCopy waits until the restore's session waits for the data
+// of its first COPY (pauseAtFirstCopy): the wipe is done, so a write started
+// now waits on a dropped table and cannot deadlock with the wipe (a write
+// that meets the wipe half way can, and one of the two is aborted).
+func (f *restoreFixture) waitForTheFirstCopy(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		n := f.query(t, ctx, `SELECT count(*)::int FROM pg_stat_activity WHERE application_name = $1 AND query LIKE 'COPY %' AND wait_event = 'ClientRead'`, restoreAppName)
+		cancel()
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the restore never reached its first COPY; record %+v", f.h.restores.status())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitingOnTheRestore waits until a session other than the restore's waits on
+// a lock with tag in its query.
+func (f *restoreFixture) waitingOnTheRestore(t *testing.T, tag string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		n := f.query(t, ctx, `SELECT count(*)::int FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%' || $1 || '%' AND pid <> pg_backend_pid()`, tag)
+		cancel()
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no session waits on the restore with %q in its query", tag)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// startWaitingWrite inserts a library named name from its own connection
+// (with appName as its application_name, when given), and answers its error
+// once the insert has returned.
+func (f *restoreFixture) startWaitingWrite(t *testing.T, name string, appName ...string) <-chan error {
+	t.Helper()
+	url := f.dbURL
+	if len(appName) > 0 {
+		url += "&application_name=" + appName[0]
+	}
+	pool, err := pgxpool.New(context.Background(), url)
+	if err != nil {
+		t.Fatalf("connect the writer: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_, err := pool.Exec(ctx, `INSERT INTO libraries (name, type, paths, owner_id) VALUES ($1, 'movie', ARRAY['/tmp/waiter'], $2)`, name, f.seed.userID)
+		done <- err
+	}()
+	return done
+}
+
+// TestAWriteWaitingOnTheRestoreIsEndedRatherThanLandingInTheRestoredData: a
+// write that meets the transaction's locks waits, and after the COMMIT it
+// used to go on against the restored data with the ids it had (the old
+// database's). Just before its COMMIT the restore ends the sessions waiting
+// on it: the write fails, and nothing of it is in the restored data.
+func TestAWriteWaitingOnTheRestoreIsEndedRatherThanLandingInTheRestoredData(t *testing.T) {
+	f := newRestoreFixture(t)
+	f.pauseAtFirstCopy(t, 3)
+	oid := f.mediaItemsOID(t)
+	_, done := f.start(t, context.Background())
+	f.waitForTheLock(t, oid)
+	f.waitForTheFirstCopy(t)
+	name := "waiter " + time.Now().UTC().Format("150405.000000000")
+	wrote := f.startWaitingWrite(t, name)
+	f.waitingOnTheRestore(t, "INSERT INTO libraries")
+	<-done
+	if st := f.ended(t); st.State != restoreStateSucceeded {
+		t.Fatalf("record %+v", st)
+	}
+	err := <-wrote
+	var pgErr *pgconn.PgError
+	if err == nil {
+		t.Fatal("the write that waited on the restore succeeded; it should have been ended")
+	}
+	if errors.As(err, &pgErr) && pgErr.Code != "57P01" {
+		t.Errorf("the waiting write failed with %s (%v), want 57P01 (terminated)", pgErr.Code, err)
+	}
+	f.assertRestored(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if n := f.query(t, ctx, `SELECT count(*)::int FROM libraries WHERE name = $1`, name); n != 0 {
+		t.Errorf("the write that waited landed in the restored data (%d rows)", n)
+	}
+}
+
+// TestTheRestoreCommitsWhenItCannotEndTheSessionsWaitingOnIt: ending the
+// sessions that wait on the restore is best effort. One it may not end (as a
+// superuser's, which the server's role may not signal; here a stand-in that
+// fails for one session) is skipped and the others are still ended; and the
+// scan failing as a whole cannot abort the transaction either: the restore
+// commits.
+func TestTheRestoreCommitsWhenItCannotEndTheSessionsWaitingOnIt(t *testing.T) {
+	t.Run("one session refused", func(t *testing.T) {
+		f := newRestoreFixture(t)
+		// The refused session comes first, so a refusal that stopped the loop
+		// would leave the other one too.
+		f.h.restoreTools.endWaiters = restoreEndWaitersBlock(
+			restoreWaiterFilter+" ORDER BY application_name = 'aurora-test-refused' DESC",
+			"(SELECT CASE WHEN a.application_name = 'aurora-test-refused' THEN a.pid / (a.pid - a.pid) ELSE 1 END FROM pg_stat_activity a WHERE a.pid = waiting) = 1 AND pg_terminate_backend(waiting)")
+		f.pauseAtFirstCopy(t, 3)
+		oid := f.mediaItemsOID(t)
+		_, done := f.start(t, context.Background())
+		f.waitForTheLock(t, oid)
+		f.waitForTheFirstCopy(t)
+		stamp := time.Now().UTC().Format("150405.000000000")
+		refused := f.startWaitingWrite(t, "refused "+stamp, "aurora-test-refused")
+		ended := f.startWaitingWrite(t, "ended "+stamp)
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			n := f.query(t, ctx, `SELECT count(*)::int FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO libraries%'`)
+			cancel()
+			if n >= 2 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%d of the two writes wait on the restore", n)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		<-done
+		if st := f.ended(t); st.State != restoreStateSucceeded || st.Database != restoreDBRestored {
+			t.Fatalf("record %+v; want the restore committed", st)
+		}
+		f.assertRestored(t)
+		if err := <-ended; err == nil {
+			t.Error("the session after the refused one was not ended")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if n := f.query(t, ctx, `SELECT count(*)::int FROM libraries WHERE name = $1`, "ended "+stamp); n != 0 {
+			t.Errorf("the ended session's write landed (%d rows)", n)
+		}
+		// Not ended, the refused write goes on against the restored data:
+		// the gap the session routes' gate exists for.
+		if err := <-refused; err != nil {
+			t.Logf("the refused session's write: %v", err)
+		}
+	})
+	t.Run("the scan itself fails", func(t *testing.T) {
+		f := newRestoreFixture(t)
+		f.h.restoreTools.endWaiters = restoreEndWaitersBlock(restoreWaiterFilter+" AND (pid / (pid - pid)) > 0", "pg_terminate_backend(waiting)")
+		f.pauseAtFirstCopy(t, 1)
+		_, done := f.start(t, context.Background())
+		<-done
+		if st := f.ended(t); st.State != restoreStateSucceeded || st.Database != restoreDBRestored {
+			t.Fatalf("record %+v; want the restore committed", st)
+		}
+		f.assertRestored(t)
+	})
+}
+
+// TestASignInRacingTheRestoreLeavesNoSessionInTheRestoredDatabase: the
+// security case. A sign-in that read its user before the wipe and inserted
+// its session after the COMMIT got a working session in the restored data
+// under the old database's user id. The session routes are closed for the
+// whole transaction: one already running is waited for before it begins, one
+// that comes during it is refused at once, and they open when it ends.
+func TestASignInRacingTheRestoreLeavesNoSessionInTheRestoredDatabase(t *testing.T) {
+	f := newRestoreFixture(t)
+	f.pauseAtFirstCopy(t, 3)
+	oid := f.mediaItemsOID(t)
+	ctx := context.Background()
+	svc := healthTestService()
+	q := db.NewQueries(f.pool)
+	const password = "a-racing-password"
+	hash, err := svc.HashPassword(password)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	username := "racer_" + time.Now().UTC().Format("150405000000000")
+	if _, err := q.CreateUser(ctx, username, username+"@example.com", hash, models.RoleUser); err != nil {
+		t.Fatalf("create the user (live data only, not in the backup): %v", err)
+	}
+	authH := NewAuthHandler(svc, q, nil)
+	signIn := func(hold <-chan struct{}, entered chan<- struct{}) *httptest.ResponseRecorder {
+		h := f.h.sessionGate.guardJSON()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if entered != nil {
+				close(entered)
+			}
+			if hold != nil {
+				<-hold
+			}
+			authH.Login(w, r)
+		}))
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"`+username+`","password":"`+password+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// A sign-in already running when the restore reaches its transaction.
+	hold, entered := make(chan struct{}), make(chan struct{})
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() { first <- signIn(hold, entered) }()
+	<-entered
+	_, done := f.start(t, ctx)
+	eventually(t, "the session routes to close", func() bool {
+		return signIn(nil, nil).Code == http.StatusServiceUnavailable
+	})
+	time.Sleep(300 * time.Millisecond)
+	if f.restoreHoldsLocks(t) {
+		t.Fatal("the restore's transaction began with a sign-in still running")
+	}
+	close(hold)
+	if rr := <-first; rr.Code != http.StatusOK {
+		t.Fatalf("the sign-in that was running: %d %s", rr.Code, rr.Body)
+	}
+
+	// One during the transaction is refused at once, not left waiting.
+	f.waitForTheLock(t, oid)
+	f.waitForTheFirstCopy(t)
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() { answered <- signIn(nil, nil) }()
+	select {
+	case rr := <-answered:
+		if rr.Code != http.StatusServiceUnavailable || errorReasonOf(rr) != restoreRunningReason {
+			t.Errorf("a sign-in during the transaction: %d %s, want 503 %s", rr.Code, rr.Body, restoreRunningReason)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a sign-in during the transaction waited instead of being refused")
+	}
+
+	<-done
+	if st := f.ended(t); st.State != restoreStateSucceeded {
+		t.Fatalf("record %+v", st)
+	}
+	f.assertRestored(t)
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if n := f.query(t, readCtx, `SELECT count(*)::int FROM refresh_tokens`); n != 0 {
+		t.Errorf("the restored database holds %d session(s); a backup holds none, and no sign-in may land after the COMMIT", n)
+	}
+	// The routes are open again (the user is not in the backup: refused as
+	// any unknown user is).
+	if rr := signIn(nil, nil); rr.Code == http.StatusServiceUnavailable {
+		t.Errorf("a sign-in after the restore: %d, want the routes open again", rr.Code)
+	}
+}
+
+// TestASettingTheServerRefusesCannotAbortTheRestore: client_connection_check_interval
+// does not exist before PostgreSQL 14 and is refused off Linux on 14 and on
+// Windows after, so the restore sets it through restoreSetIfSupported, which
+// leaves a refused setting as it was and the transaction usable.
+func TestASettingTheServerRefusesCannotAbortTheRestore(t *testing.T) {
+	pool, _ := requireBackupTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, refused := range [][2]string{{"aurora_no_such_setting", "1s"}, {"client_connection_check_interval", "-5"}} {
+		if _, err := tx.Exec(ctx, restoreSetIfSupported(refused[0], refused[1])); err != nil {
+			t.Fatalf("setting %s = %s aborted the statement: %v", refused[0], refused[1], err)
+		}
+	}
+	if _, err := tx.Exec(ctx, restoreSetIfSupported("client_connection_check_interval", "1s")); err != nil {
+		t.Fatalf("the supported setting: %v", err)
+	}
+	var got string
+	if err := tx.QueryRow(ctx, `SHOW client_connection_check_interval`).Scan(&got); err != nil {
+		t.Fatalf("the transaction is not usable after a refused setting: %v", err)
+	}
+	if got != "1s" {
+		t.Errorf("client_connection_check_interval = %q in the transaction, want 1s", got)
+	}
 }
