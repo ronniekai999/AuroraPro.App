@@ -20,7 +20,7 @@ import { type Media } from '@/lib/types'
 // Continue Watching section. Saved items are the headline; Continue
 // Watching appears below as a secondary surface. Saved state lives
 // in App-level `library` and is persisted to localStorage.
-export default function LibraryView({ library, continueItems, onSelect, onToggleLib, onPlayContinue, onCardContext, onCardPlay, resumableIds, loading = false, profileName }: {
+export default function LibraryView({ library, continueItems, onSelect, onToggleLib, onPlayContinue, onCardContext, onCardPlay, resumableIds, loading = false, profileName, onFind, onBrowse }: {
   library: Media[]
   continueItems: ContinueWatchingItem[]
   onSelect: (m: Media) => void
@@ -47,8 +47,13 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
   onPlayContinue?: (c: ContinueWatchingItem) => void
   // Whose list this is, for the count in the header ("11 saved for Morgan").
   profileName?: string
+  // What an empty list offers, in place: a search for something to save
+  // (the words are handed over as typed), and the two catalogs to browse.
+  onFind?: (words: string) => void
+  onBrowse?: (scope: 'movies' | 'shows') => void
 }) {
   const [filter, setFilter] = useState<'all' | 'movie' | 'show'>('all')
+  const [findWords, setFindWords] = useState('')
   const filteredLibrary = filter === 'all'
     ? library
     : library.filter(m => (filter === 'show' ? (m.type === 'show' || m.type === 'anime') : m.type === filter))
@@ -122,12 +127,36 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
       ) : library.length === 0 ? (
         // data-library-empty: what a test of a profile switch looks for, so
         // that rewording this cannot quietly blind it.
-        <div className="py-16 text-center" data-library-empty="">
-          <Icon name="library" size={48} className="mx-auto mb-4 text-ink-3" />
-          <h2 className="mb-2 text-lg text-ink">Nothing saved yet</h2>
-          <p className="mx-auto max-w-md text-sm text-ink-2">
-            Add a title from its card or its page and it is kept here.{continueItems.length > 0 ? ' What you have started is below.' : ''}
+        // The empty list says what it is for and offers the next thing to
+        // do, here: find a title, or browse for one.
+        <div className="lib-empty" data-library-empty="">
+          <h2 className="lib-empty-title">Nothing saved yet</h2>
+          <p className="lib-empty-lead">
+            Save a title from its card or its page and it waits here for you, on every device you sign in to.{continueItems.length > 0 ? ' What you have started is below.' : ''}
           </p>
+          {onFind && (
+            <form
+              role="search"
+              className="lib-empty-find"
+              onSubmit={e => { e.preventDefault(); if (findWords.trim()) onFind(findWords) }}
+            >
+              <Icon name="search" size={20} className="flex-none text-ink-2" />
+              <input
+                type="search"
+                enterKeyHint="search"
+                aria-label="Find something to save"
+                placeholder="Find something to save"
+                value={findWords}
+                onChange={e => setFindWords(e.target.value)}
+              />
+            </form>
+          )}
+          {onBrowse && (
+            <div className="lib-empty-acts">
+              <button type="button" className="stage-btn stage-btn-primary" onClick={() => onBrowse('movies')}>Browse movies</button>
+              <button type="button" className="stage-btn stage-btn-ghost" onClick={() => onBrowse('shows')}>Browse shows</button>
+            </div>
+          )}
         </div>
       ) : filteredLibrary.length === 0 ? (
         <p className="text-sm text-ink-2">No {filter === 'movie' ? 'movies' : 'TV shows'} saved.</p>

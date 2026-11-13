@@ -236,9 +236,9 @@ describe('signing out and in again on the tab', () => {
     await screen.findByText('12 Bells', undefined, find)
     fireEvent.click(document.querySelector('[data-identity-trigger]')!)
     fireEvent.click(screen.getByRole('button', { name: /^Sign out/ }))
-    fireEvent.change(await screen.findByPlaceholderText('Enter username', {}, find), { target: { value: 'ronnie' } })
-    fireEvent.change(screen.getByPlaceholderText('Enter password'), { target: { value: 'pw' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
+    fireEvent.change(await screen.findByLabelText('Username', {}, find), { target: { value: 'ronnie' } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
     // Signed in again, on Tonight; back to the Library, which opens on Movies.
     const library = await waitFor(() => {
       const tab = document.querySelector<HTMLElement>('header .stage-tab[data-nav="catalog"]')

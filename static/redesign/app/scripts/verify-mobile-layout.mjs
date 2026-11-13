@@ -362,6 +362,13 @@ mustHave(TOPNAV, 'className="stage-topnav"')
 mustHave(TOPNAV, 'className="stage-tab"')
 mustHave(TOPNAV, 'className="stage-navsearch-hint"')
 mustHave(TOPNAV, 'className="stage-navsearch-clear"')
+// The field is a label (a press anywhere on it is a press on its input), and
+// the pill and the identity carry the attributes the 44px rules key on
+// (index.css): written by hand in the markup below, so each is checked to
+// be in the component still.
+mustHave(TOPNAV, '<label className="stage-navsearch hidden md:flex">')
+mustHave(TOPNAV, 'data-presence=""')
+mustHave(TOPNAV, 'data-identity-trigger=""')
 mustHave(TOPNAV, '<div className="hidden md:block">')
 mustHave(TOPNAV, '<span className="relative flex-none">')
 mustHave(TOPNAV, '<AuroraMark />')
@@ -387,11 +394,11 @@ const navHtml = NAV_CASES.map(c => `
   <button type="button" class="${NAV_BRAND}" data-nav-part="brand"><svg width="28" height="28" viewBox="0 0 36 36"></svg><svg viewBox="${WORDMARK_BOX}" class="${NAV_WORDMARK}" data-nav-wordmark></svg></button>
   <span class="${NAV_PAGE}" data-nav-part="page">Library</span>
   <nav class="${NAV_TABS}" data-nav-part="destinations">${c.tabs.map((t, i) => `<button type="button" class="stage-tab"${i === 1 ? ' aria-current="page"' : ''}>${t}</button>`).join('')}</nav>
-  <div class="${NAV_FIELD}" data-nav-part="field"><svg width="16" height="16" class="flex-none text-ink-2"></svg>
+  <label class="${NAV_FIELD}" data-nav-part="field"><svg width="16" height="16" class="flex-none text-ink-2"></svg>
     <input type="text" placeholder="Search, or describe a mood" aria-label="Search titles" value="${c.typed ?? ''}">
     ${c.typed
       ? '<button type="button" class="stage-navsearch-clear" aria-label="Clear search"><svg width="14" height="14"></svg></button>'
-      : '<kbd aria-hidden="true" class="stage-navsearch-hint">⌘K</kbd>'}</div>
+      : '<kbd aria-hidden="true" class="stage-navsearch-hint">⌘K</kbd>'}</label>
   <div class="${NAV_RIGHT}" data-nav-part="presence and identity">
     ${c.short ? `<button type="button" data-presence="" class="${NAV_PILL}"><span aria-hidden="true" class="inline-block h-2 w-2 flex-none rounded-full"></span><span class="${NAV_PILL_SHORT}" data-pill="short">${c.short}</span><span class="${NAV_PILL_LONG}" data-pill="long">${c.label}</span></button>` : ''}
     <div class="hidden md:block"><div class="relative"><button type="button" data-identity-trigger="" class="${NAV_IDENTITY}"><span class="relative flex-none"><span style="display:block;width:28px;height:28px"></span></span><span data-identity-name="" class="${NAV_NAME}">${c.name}</span>${c.limit ? `<span class="${NAV_LIMIT}">${c.limit}</span>` : ''}<svg width="14" height="14" class="flex-none text-ink-2"></svg></button></div></div>
@@ -873,6 +880,236 @@ for (const width of NAV_WIDTHS) {
     widths.push(`${bar.id} ${bar.field.w.toFixed(0)}${bar.hint ? '+hint' : ''}`)
   }
   console.log(`── ${String(width).padStart(4)}px  ${problems === before ? 'ok' : 'FAIL'}   ${r.bodyFamily} · page ${r.sw}px · field: ${widths.join(' · ')}`)
+  await ctx.close()
+}
+// 5b. The same bar on a touch screen, which from md up is a tablet: each of
+// its own controls is a 44px target (by hit-testing, so one control's
+// target laid over another's shows), and the bar still fits and still
+// leaves a field to type in.
+console.log('\n══ the top bar on a tablet\'s touch screen')
+for (const width of [768, 834, 1024, 1280]) {
+  const before = problems
+  const ctx = await browser.newContext({ viewport: { width, height: 400 }, isMobile: true, hasTouch: true })
+  await ctx.route(`${ORIGIN}/**`, route => {
+    const p = new URL(route.request().url()).pathname
+    if (p === '/') return route.fulfill({ body: NAV_PAGE_HTML, contentType: 'text/html' })
+    const f = path.join(ASSETS, path.basename(p))
+    if (p.startsWith('/v2/assets/') && fs.existsSync(f)) {
+      const type = f.endsWith('.css') ? 'text/css' : f.endsWith('.woff2') ? 'font/woff2' : 'application/octet-stream'
+      return route.fulfill({ body: fs.readFileSync(f), contentType: type })
+    }
+    return route.fulfill({ status: 404, body: '' })
+  })
+  const page = await ctx.newPage()
+  await page.goto(`${ORIGIN}/`)
+  const r = await page.evaluate(async () => {
+    await document.fonts.ready
+    const hits = (el, x, y) => { const at = document.elementFromPoint(x, y); return !!at && (at === el || el.contains(at)) }
+    const hitArea = el => {
+      const b = el.getBoundingClientRect()
+      const cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2
+      if (!hits(el, cx, cy)) return { w: 0, h: 0 }
+      const run = (dx, dy) => { let n = 0; while (n < 200 && hits(el, cx + dx * (n + 1) * 0.5, cy + dy * (n + 1) * 0.5)) n++; return n }
+      return { w: (run(-1, 0) + run(1, 0) + 1) * 0.5, h: (run(0, -1) + run(0, 1) + 1) * 0.5 }
+    }
+    const bars = []
+    for (const bar of document.querySelectorAll('[data-navcase]')) {
+      // Hit-testing only answers for points on screen.
+      bar.scrollIntoView({ block: 'center' })
+      const field = bar.querySelector('[data-nav-part="field"]')
+      const controls = [
+        ['the brand', bar.querySelector('[data-nav-part="brand"]')],
+        ...[...bar.querySelectorAll('.stage-tab')].map(t => [`the "${t.textContent}" destination`, t]),
+        ['the presence pill', bar.querySelector('[data-presence]')],
+        ['the identity', bar.querySelector('[data-identity-trigger]')],
+        ['the field\'s clear button', field.querySelector('.stage-navsearch-clear')],
+      ].filter(([, el]) => el)
+      bars.push({
+        id: bar.dataset.navcase,
+        spill: bar.scrollWidth - bar.clientWidth,
+        field: (b => ({ w: b.width, h: b.height }))(field.getBoundingClientRect()),
+        input: hitArea(field.querySelector('input')),
+        // The field is a label: a press that reaches it anywhere reaches its input.
+        whole: hitArea(field),
+        label: field.tagName === 'LABEL' && field.control === field.querySelector('input'),
+        controls: controls.map(([name, el]) => ({ name, drawn: (b => `${b.width.toFixed(0)}x${b.height.toFixed(0)}`)(el.getBoundingClientRect()), hit: hitArea(el) })),
+      })
+    }
+    return { bars, coarse: matchMedia('(pointer: coarse)').matches, sw: document.documentElement.scrollWidth, vw: window.innerWidth }
+  })
+  if (!r.coarse) fail('the touch pass of the top bar is not on a coarse pointer — it would be measuring the pointer layout')
+  if (r.sw > r.vw + 0.5) fail(`the page is ${r.sw}px wide in a ${r.vw}px window on a touch screen`)
+  if (r.bars.length !== NAV_CASES.length) fail(`the top bar's touch probe found ${r.bars.length} bars, expected ${NAV_CASES.length} — this check is out of date`)
+  let n = 0
+  for (const bar of r.bars) {
+    const at = `${width}px touch, ${bar.id}`
+    if (bar.spill > 0.5) fail(`${at}: the bar's contents run ${bar.spill}px past it`)
+    if (bar.field.w < 120) fail(`${at}: the search field is ${bar.field.w.toFixed(0)}px wide, under the 120px it takes to type in`)
+    if (bar.field.h < 44) fail(`${at}: the search field is ${bar.field.h.toFixed(0)}px high, under the 44px a touch target needs`)
+    // The input itself fills the field between its two hairlines; the
+    // field, which is the input's label, is the 44px target.
+    if (!bar.label) fail(`${at}: the search field is not a label of its input, so a press on its edge or its icon does nothing`)
+    if (bar.whole.h < 44) fail(`${at}: a press reaches the search field over only ${bar.whole.h}px of its height, under the 44px a touch target needs`)
+    if (bar.input.h < bar.field.h - 2) fail(`${at}: a press reaches the field's input over only ${bar.input.h}px of the field's ${bar.field.h}px`)
+    // The usual bar has a brand, three destinations, a pill and an identity.
+    if (bar.controls.length < 5) fail(`${at}: the touch probe found ${bar.controls.length} controls in the bar — this check is out of date`)
+    for (const c of bar.controls) {
+      n++
+      if (c.hit.w < 44 || c.hit.h < 44) fail(`${at}: ${c.name} has a target of ${c.hit.w}x${c.hit.h}px by hit-testing (drawn ${c.drawn}), under the 44px a touch target needs`)
+    }
+  }
+  console.log(`── ${String(width).padStart(4)}px  ${problems === before ? 'ok' : 'FAIL'}   ${n} controls measured`)
+  await ctx.close()
+}
+// 5b. The scan bar, which sits under the top bar for an admin while a library
+// is scanned: one row that does not wrap or run past the window, and its
+// "Open Libraries" a 44px target by hit-testing on a touch screen. (The row
+// clips what is drawn outside it, so a target grown past a 40px row with a
+// pseudo-element measured 44 by its box and 40 by a press.)
+const SCANBAR = 'src/components/ScanProgressBar.tsx'
+for (const cls of ['scanbar', 'scanbar-row', 'scanbar-name', 'scanbar-count', 'scanbar-track', 'scanbar-open']) mustHave(SCANBAR, `className="${cls}"`)
+const scanRow = name => `<div class="scanbar-row" data-scan-library="1"><span class="scanbar-name">Scanning ${name}</span><span class="scanbar-count">1,400 of 2,200 files · 3 new</span><span class="scanbar-track" aria-hidden="true"><span style="width:63%"></span></span><button type="button" class="scanbar-open">Open Libraries</button></div>`
+const SCAN_PAGE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/v2/assets/${cssFile}">
+<style>body{margin:0}*,*::before,*::after{transition:none!important;animation:none!important}</style></head><body>
+<div class="scanbar">${scanRow('Movies')}${scanRow(LONG_NAME)}</div>
+</body></html>`
+console.log('\n══ the scan bar')
+for (const [width, touch] of [[320, true], [390, true], [768, true], [1280, true], [1280, false]]) {
+  const before = problems
+  const ctx = await browser.newContext({ viewport: { width, height: 400 }, isMobile: touch, hasTouch: touch })
+  await ctx.route(`${ORIGIN}/**`, route => {
+    const p = new URL(route.request().url()).pathname
+    if (p === '/') return route.fulfill({ body: SCAN_PAGE_HTML, contentType: 'text/html' })
+    const f = path.join(ASSETS, path.basename(p))
+    if (p.startsWith('/v2/assets/') && fs.existsSync(f)) {
+      const type = f.endsWith('.css') ? 'text/css' : f.endsWith('.woff2') ? 'font/woff2' : 'application/octet-stream'
+      return route.fulfill({ body: fs.readFileSync(f), contentType: type })
+    }
+    return route.fulfill({ status: 404, body: '' })
+  })
+  const page = await ctx.newPage()
+  await page.goto(`${ORIGIN}/`)
+  const r = await page.evaluate(async () => {
+    await document.fonts.ready
+    const hits = (el, x, y) => { const at = document.elementFromPoint(x, y); return !!at && (at === el || el.contains(at)) }
+    const hitArea = el => {
+      const b = el.getBoundingClientRect()
+      const cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2
+      if (!hits(el, cx, cy)) return { w: 0, h: 0 }
+      const run = (dx, dy) => { let n = 0; while (n < 200 && hits(el, cx + dx * (n + 1) * 0.5, cy + dy * (n + 1) * 0.5)) n++; return n }
+      return { w: (run(-1, 0) + run(1, 0) + 1) * 0.5, h: (run(0, -1) + run(0, 1) + 1) * 0.5 }
+    }
+    const rows = [...document.querySelectorAll('.scanbar-row')].map(row => {
+      const open = row.querySelector('.scanbar-open')
+      return { h: row.getBoundingClientRect().height, spill: row.scrollWidth - row.clientWidth, open: hitArea(open), right: open.getBoundingClientRect().right }
+    })
+    return { rows, coarse: matchMedia('(pointer: coarse)').matches, sw: document.documentElement.scrollWidth, vw: window.innerWidth }
+  })
+  const at = `${width}px${touch ? ' touch' : ''}`
+  if (r.coarse !== touch) fail(`${at}: the scan bar's pass is on the wrong kind of pointer`)
+  if (r.sw > r.vw + 0.5) fail(`${at}: the page is ${r.sw}px wide in a ${r.vw}px window with the scan bar on it`)
+  if (r.rows.length !== 2) fail(`${at}: the scan bar's probe found ${r.rows.length} rows, expected 2 — this check is out of date`)
+  for (const [i, row] of r.rows.entries()) {
+    const want = touch ? 44 : 40
+    if (Math.abs(row.h - want) > 0.5) fail(`${at}: scan row ${i} is ${row.h}px high, not the ${want}px it is drawn at (everything under the top bar is placed by it)`)
+    if (row.right > r.vw + 0.5) fail(`${at}: "Open Libraries" in scan row ${i} ends at ${row.right}px, past the ${r.vw}px window`)
+    // The sampler steps by half a pixel, so a row measures half a pixel
+    // either side of its height; the row's own height is checked above.
+    if (touch && (row.open.w < 44 || row.open.h < 43.5)) fail(`${at}: "Open Libraries" in scan row ${i} has a target of ${row.open.w}x${row.open.h}px by hit-testing, under the 44px a touch target needs`)
+    // (The sampler steps by half a pixel: a 40px row measures 39.5 to 40.5.)
+    if (!touch && (row.open.w < 24 || row.open.h < 39.5)) fail(`${at}: "Open Libraries" in scan row ${i} has a target of ${row.open.w}x${row.open.h}px by hit-testing`)
+  }
+  console.log(`── ${String(width).padStart(4)}px${touch ? ' touch' : '      '}  ${problems === before ? 'ok' : 'FAIL'}   rows ${r.rows.map(x => `${x.h}px, target ${x.open.w}x${x.open.h}`).join(' · ')}`)
+  await ctx.close()
+}
+// 5c. The bottom left corner, which the toasts and the update notice share
+// with two things of the player's: its card while it casts minimized
+// (.player-cast-widget), and, in the window, its transport controls and the
+// lane above its timeline. A toast lay across the card's pause button, and
+// across play, skip and mute. Here: with the card on the page the notice and
+// a toast clear it by 12px; with the player in the window a toast is above
+// the lane over the timeline (the Skip button's: 28px up, 48px high).
+const PLAYER = 'src/components/VideoPlayer.tsx'
+// The card's class lists, each checked to be in the player still (several
+// appear more than once there, so they are matched whole, not looked up).
+const WIDGET_ROW = 'flex items-center gap-2'
+const WIDGET_BTN = 'w-10 h-10 grid place-items-center rounded-control text-ink-2 hover:text-ink hover:bg-action-soft transition-colors'
+const WIDGET_ROW2 = 'mt-2.5 flex items-center gap-3'
+const WIDGET_PLAY = 'inline-flex items-center justify-center w-10 h-10 rounded-full bg-action text-action-on hover:brightness-95 shrink-0 transition-[filter]'
+const WIDGET_TITLE = 'text-[14px] font-semibold text-ink truncate'
+const WIDGET_SUB = 'text-[12px] text-ink-2 truncate'
+for (const cls of [WIDGET_ROW, WIDGET_BTN, WIDGET_ROW2, WIDGET_PLAY, WIDGET_TITLE, WIDGET_SUB]) mustHave(PLAYER, `className="${cls}"`)
+mustHave(PLAYER, 'className="player-cast-widget"')
+mustHave(PLAYER, 'player-lane player-float-left')
+mustHave('src/components/Toast.tsx', 'className="toast-stack"')
+mustHave('src/components/Toast.tsx', 'className="toast-text"')
+mustHave('src/components/Toast.tsx', 'className="toast-action"')
+mustHave('src/components/UpdateAvailableNotice.tsx', 'className="update-notice"')
+mustHave('src/components/UpdateAvailableNotice.tsx', 'className="toast-action is-primary"')
+mustHave('src/App.tsx', 'el.dataset.playerSurface = playerSurface')
+const CORNER_PAGE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/v2/assets/${cssFile}">
+<style>body{margin:0}*,*::before,*::after{transition:none!important;animation:none!important}</style></head><body>
+<div class="update-notice"><div class="toast"><p class="toast-text">A new version of Aurora is ready.</p><button type="button" class="toast-action is-primary">Reload</button><button type="button" class="toast-x"><svg width="16" height="16"></svg></button></div></div>
+<div class="toast-stack"><div class="toast" data-type="info"><p class="toast-text">Removed The Assassination of Jesse James by the Coward Robert Ford from My Library.</p><button type="button" class="toast-action">Undo</button></div></div>
+<template id="widget"><div class="player-cast-widget"><div class="${WIDGET_ROW}"><svg width="18" height="18"></svg><div class="min-w-0 flex-1"><p class="${WIDGET_TITLE}">Night Train to Meridian</p><p class="${WIDGET_SUB}">Casting to Living room</p></div><button type="button" class="${WIDGET_BTN}"></button><button type="button" class="${WIDGET_BTN}"></button></div><div class="${WIDGET_ROW2}"><button type="button" class="${WIDGET_PLAY}"></button><div class="h-[3px] flex-1 rounded-full"></div></div></div></template>
+</body></html>`
+console.log('\n══ the corner the toasts share with the player')
+for (const [width, height, touch] of [[320, 568, true], [390, 844, true], [768, 1024, true], [1440, 900, false], [844, 390, true]]) {
+  const before = problems
+  const ctx = await browser.newContext({ viewport: { width, height }, isMobile: touch, hasTouch: touch })
+  await ctx.route(`${ORIGIN}/**`, route => {
+    const p = new URL(route.request().url()).pathname
+    if (p === '/') return route.fulfill({ body: CORNER_PAGE_HTML, contentType: 'text/html' })
+    const f = path.join(ASSETS, path.basename(p))
+    if (p.startsWith('/v2/assets/') && fs.existsSync(f)) {
+      const type = f.endsWith('.css') ? 'text/css' : f.endsWith('.woff2') ? 'font/woff2' : 'application/octet-stream'
+      return route.fulfill({ body: fs.readFileSync(f), contentType: type })
+    }
+    return route.fulfill({ status: 404, body: '' })
+  })
+  const page = await ctx.newPage()
+  await page.goto(`${ORIGIN}/`)
+  const r = await page.evaluate(async () => {
+    await document.fonts.ready
+    const root = document.documentElement
+    const box = el => { const b = el.getBoundingClientRect(); return { top: b.top, bottom: b.bottom, left: b.left, right: b.right, h: b.height } }
+    const notice = document.querySelector('.update-notice')
+    const stack = document.querySelector('.toast-stack')
+    // The notice says how tall it is, as the component does: its height and the gap.
+    const say = () => root.style.setProperty('--update-notice-space', `${Math.ceil(notice.getBoundingClientRect().height) + 12}px`)
+    say()
+    const plain = { notice: box(notice), toast: box(stack) }
+    // The player's card while it casts minimized.
+    document.body.appendChild(document.getElementById('widget').content.cloneNode(true))
+    say()
+    const widget = document.querySelector('.player-cast-widget')
+    const cast = { widget: box(widget), notice: box(notice), toast: box(stack) }
+    widget.remove()
+    // The player in the window: the notice is under it, and takes no room.
+    notice.style.display = 'none'
+    root.style.removeProperty('--update-notice-space')
+    root.dataset.playerSurface = 'theater'
+    const theater = { toast: box(stack), timelineTop: parseFloat(getComputedStyle(root).getPropertyValue('--player-timeline-top')) }
+    return { plain, cast, theater, vh: window.innerHeight }
+  })
+  const at = `${width}x${height}${touch ? ' touch' : ''}`
+  const apart = (a, b) => a.bottom <= b.top + 0.5 || b.bottom <= a.top + 0.5 || a.right <= b.left + 0.5 || b.right <= a.left + 0.5
+  if (r.plain.toast.bottom > r.plain.notice.top - 11.5) fail(`${at}: a toast ends ${(r.plain.notice.top - r.plain.toast.bottom).toFixed(1)}px above the update notice, under the 12px between two cards`)
+  if (Math.abs(r.cast.widget.h - 114) > 0.5) fail(`${at}: the player's cast card is ${r.cast.widget.h}px high, not the 114px the toasts stack above — change --corner-base with it`)
+  if (!apart(r.cast.notice, r.cast.widget) || r.cast.notice.bottom > r.cast.widget.top - 11.5) fail(`${at}: the update notice (to ${r.cast.notice.bottom.toFixed(0)}px) is not 12px clear of the player's cast card (from ${r.cast.widget.top.toFixed(0)}px)`)
+  if (!apart(r.cast.toast, r.cast.widget) || r.cast.toast.bottom > r.cast.notice.top - 11.5) fail(`${at}: a toast (to ${r.cast.toast.bottom.toFixed(0)}px) is not clear of the notice and the cast card under it`)
+  if (!(r.theater.timelineTop > 0)) fail(`${at}: --player-timeline-top is not published — this check is out of date`)
+  const above = r.vh - r.theater.toast.bottom
+  // The lane's 48px buttons start 28px above the timeline, and 8px in a
+  // short window (.player-lane).
+  const laneEnds = (height <= 480 ? 8 : 28) + 48
+  if (above < r.theater.timelineTop + laneEnds - 0.5) fail(`${at}: with the player in the window a toast ends ${above.toFixed(0)}px above the bottom, inside the transport and its lane (the timeline's top is at ${r.theater.timelineTop}px, the lane's buttons end ${laneEnds}px above it)`)
+  if (r.theater.toast.top < 0) fail(`${at}: with the player in the window a toast starts ${r.theater.toast.top.toFixed(0)}px above the window`)
+  console.log(`── ${at.padEnd(15)} ${problems === before ? 'ok  ' : 'FAIL'}  cast card to ${(r.vh - r.cast.widget.top).toFixed(0)}px up · notice from ${(r.vh - r.cast.notice.bottom).toFixed(0)}px · toast from ${(r.vh - r.cast.toast.bottom).toFixed(0)}px · in the window, toast from ${above.toFixed(0)}px (timeline ${r.theater.timelineTop}px)`)
   await ctx.close()
 }
 // 6. The page's end: the shell's end padding against the tab bar's space,

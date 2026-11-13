@@ -427,7 +427,8 @@ export function TopNav({
         type="button"
         onClick={() => onNavigate('home')}
         aria-label="AuroraPro, go to Tonight"
-        className="-mx-1 flex flex-none items-center gap-2.5 rounded-art px-1 py-1"
+        // 36px as drawn; a 44px target on a touch screen (stage-hit44).
+        className="-mx-1 flex flex-none items-center gap-2.5 rounded-art px-1 py-1 stage-hit44"
       >
         <AuroraMark />
         {/* Drawn wordmark in plain ink: at this size the gradient has nowhere
@@ -450,8 +451,11 @@ export function TopNav({
 
       {/* The search field. What is typed shows on the search page, which is a
           page with its own address: a press elsewhere does not dismiss it
-          (it used to, back when the results were drawn over another page). */}
-      <div className="stage-navsearch hidden md:flex">
+          (it used to, back when the results were drawn over another page).
+          A label: a press anywhere on the field (its icon, its hairline)
+          puts the cursor in it, so the whole 44px a touch screen draws is
+          the target. The input keeps its own name (aria-label). */}
+      <label className="stage-navsearch hidden md:flex">
         <Icon name="search" size={16} className="flex-none text-ink-2" />
         <input
           ref={searchInputRef}
@@ -488,7 +492,7 @@ export function TopNav({
           // spill out of the field onto the presence pill.
           <kbd aria-hidden="true" className="stage-navsearch-hint">⌘K</kbd>
         )}
-      </div>
+      </label>
 
       <div className="ml-auto flex flex-none items-center gap-3">
         {presence && (

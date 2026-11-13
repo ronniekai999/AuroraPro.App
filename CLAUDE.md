@@ -520,7 +520,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   minimized one too), or while a card's menu, the add-to-list sheet, the
   profile picker, a PIN prompt or any modal dialog is over the page
   (`pageCovered`, which the search page's Escape obeys as well; Escape
-  closes the add-to-list sheet). The search page taking its address
+  closes the add-to-list sheet, and before any player: the sheet is painted
+  above the player). The search page taking its address
   (`showSearchPage`: a key typed, Enter from another page, "Find it") is
   the one change of address that leaves a player on; in practice that is a
   minimized one. Pinned by `App.searchRequest.test.tsx`,
@@ -997,8 +998,8 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     the app knows no profile for the account (a new account before its
     first progress write, or a tab that has not listed the profiles since)
     nothing does, beyond Home's rails (`railsUserRef`), the notification
-    count, and Tonight's hero, Continue Watching and wait (the signed-out
-    effect). What else App keeps for the previous user on that path (the
+    count, the search field's words, the toasts, and Tonight's hero,
+    Continue Watching and wait (the signed-out effects). What else App keeps for the previous user on that path (the
     browse grids and their totals, an open title) has not been audited: the
     next sign-in on the tab may be shown it until its own answers land. The
     grids' totals are not kept per owner. What reads them: a grid's count
@@ -1920,6 +1921,105 @@ New titles reach open web apps without a reload. Code:
   does not ask for the personalized hero pool again (a full Home load does);
   the dashboard's side cards read at mount can land after, and overwrite, a
   refresh's newer numbers; the macOS and TV clients ignore the event.
+
+### Signed out, toasts and My Library writes (web app)
+
+Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
+`changeLibrary` / `writeLibrary` / `restoreToLib`, `lib/libraryUndo.ts`,
+`lib/devicePairing.ts`.
+
+- The sign-in page's wall of frames and its form sit on one line and never
+  wrap; the wall is drawn only from 980px (its 560px and the form column's
+  420px). Wrapping, with the wall drawn from 900px, put the wall alone on the
+  first line from 900 to 979px and the form a whole screen down.
+  `scripts/verify-signed-out.mjs` renders both signed-out pages from the
+  build at nine sizes: the first field and the submit button are in the
+  first screenful (the account form at 320x568 is taller than the screen and
+  is checked to scroll to its button instead), the wall is beside the form
+  or not drawn, and on a touch screen each link in a sentence is a 44px
+  target over its whole width.
+- What the pages say of a refusal is a hand-kept list of the server's whole
+  sentences with their statuses (`ANSWERS`, against
+  `internal/api/auth_handlers.go`), never a word inside one: matched on
+  "password", a 500 "failed to hash password" told its viewer how long a
+  password must be. A 429 is "too many tries" whatever its words; every 5xx
+  and anything unknown is "could not ... just now", about no field. Nothing
+  checks the list against the Go source: a reworded server sentence falls
+  back to that line. A refusal puts the focus in the field it is about (the
+  form's first when none), and going between the two pages puts it on the
+  new page's heading.
+- "Connect a TV with a code" before signing in: a provider's round trip
+  comes back to the front page, so the tab keeps that the viewer was on
+  their way to pair (`rememberDeviceIntent`: a time in sessionStorage and
+  nothing from the address; the destination is fixed). The next sign-in
+  uses it once; a sign-out and ten minutes forget it.
+- A toast is said to whoever is acting when it is raised. Toasts are
+  dropped when nobody is signed in and when the account changes. Each
+  takes the acting profile with its id (`nextToastId`, from a layout-effect
+  mirror), and a profile switch drops the ones said to another profile
+  (none is drawn on the switch's first commit, `profileSwitchPending`): a
+  toast the switch itself causes, such as the bug report's "closed because
+  this tab is now on another profile", is kept. A toast's action runs once.
+- A title's My Library writes go to the server one at a time, in the order
+  made (`changeLibrary`'s queue, keyed by profile and title; both routes
+  are idempotent, so a write is sent whatever became of the one before it),
+  except one whose turn comes while the session acts as another profile:
+  it is not sent (the server would refuse it). Each write's in-flight mark
+  (`pendingLibOpsRef`) is its own object, cleared only by that write. A
+  refused write takes back its own toast; only the latest write asked for
+  a title is taken back on screen and said ("Couldn't …"), and a queue in
+  which any write failed ends with the profile's list read again from the
+  server, which stands. After a switch or a sign-out a refusal does none of
+  this, and is not said (the list on screen is another's). The toast's Undo
+  only ever restores
+  (`undoMayRestore`): nothing when the title is in the list, nothing on
+  another profile's list. It was the toggle called again, which re-sent a
+  failed removal and silently removed a title saved again by hand.
+- Escape closes the add-to-list sheet before any player: the sheet is
+  `z-[70]` and the player in the window `z-[60]`, siblings. A title page
+  goes Back on Escape only when nothing is over it (`pageCovered`: the
+  onboarding flow, a card's menu, any modal dialog, and a Radix dialog,
+  which sets no `aria-modal` and is seen by the page it hides). A player
+  that casts in the window or full screen is itself such a modal surface,
+  and under it Escape still goes Back, as before, unless something else is
+  over the page too; a cast minimised covers nothing. The trailer, the
+  player's menus and the party's leave question take the key first
+  (`lib/escapeLayers`); so does the recap, which stops the key itself.
+- The toasts' corner (bottom left) is also the player's: its card while it
+  casts minimized (`.player-cast-widget`), and in the window its play, skip
+  and mute. The update notice and the toasts stack above the card
+  (`--corner-base`, by `html:has(.player-cast-widget)`; the card's 114px is
+  written into that rule), and with the player in the window a toast goes
+  to the row above the timeline's lane (`--player-timeline-top` + 88px, the
+  player's own `.player-lane-upper`). `scripts/verify-mobile-layout.mjs`
+  checks both against the built stylesheet, with the card's class lists
+  read from the player. A toast in the window can lie over the party's chat
+  ticker for its few seconds; no cast session was rendered.
+- Pinned by `AuthView.test.tsx`, `Toast.test.tsx`, `lib/libraryUndo.test.ts`,
+  `lib/devicePairing.test.ts`, `App.cardMenu.test.tsx` (a stub that holds
+  and fails library writes), `App.profileSwitch.test.tsx` (a removal's toast
+  and a refusal across a switch, every commit sampled; a queued Undo not
+  sent after one) and
+  `App.searchRequest.test.tsx` (a sign-out, an expiry, the TV intent).
+- Known gaps: the owner half of `undoMayRestore` is pinned at the function
+  only (once toasts go at a switch no press reaches it in the app); a
+  queued write whose turn comes after a profile switch is dropped without a
+  word, so a parent who removed a title on a slow network, pressed Undo and
+  switched to another profile before the removal was answered keeps the
+  removal (the same class as the progress writes a switch refuses, see
+  Profile lock); "acting as" is this tab's own record of the session's
+  profile, so a switch made only in another tab, or one this tab has sent
+  and not yet seen answered, is not seen and that write is sent and
+  refused; when the read at the end of a failed queue fails too, the
+  screen keeps what the queue's last answer left on it until the next
+  library read; when a removal and its Undo are both refused, the read
+  puts the title back and the Undo's "Couldn't put … back" is still said;
+  `pendingLibOpsRef` is keyed by title, not profile; the layout-effect
+  mirrors (`buildCardMenuRef`, `restoreToLibRef`) have no deterministic
+  test (a press from a MutationObserver as a card is first drawn came after
+  React had run the passive effects, so it passed with the mirror made
+  passive); a password manager's handling of the two forms (one password
+  input whose `autocomplete` switches) was not tested.
 
 ### Nullable database columns
 

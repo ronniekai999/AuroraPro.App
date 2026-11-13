@@ -40,7 +40,7 @@ describe('AppRoot', () => {
     // own): its message, and its Reload beside its dismiss button.
     const dismiss = await screen.findByRole('button', { name: 'Dismiss update notice' })
     const notice = dismiss.parentElement!
-    expect(notice).toHaveTextContent('Aurora was updated. Reload to use the current version.')
+    expect(notice).toHaveTextContent('A new version of Aurora is ready.')
     expect(within(notice).getByRole('button', { name: 'Reload' })).toBeInTheDocument()
     // And it is outside what the error screen replaced.
     expect(heading.closest('[data-error-screen]')!.contains(notice)).toBe(false)

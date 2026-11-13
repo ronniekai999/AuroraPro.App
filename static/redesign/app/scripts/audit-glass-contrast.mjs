@@ -1082,6 +1082,23 @@ const SURFACES = [
       ? [rootToken('--surface-raised').rgb, rootToken('--surface-raised-2').rgb]
       : sel.endsWith('-row') ? [INK, rootToken('--surface-raised').rgb] : [INK],
   })),
+  // ── The signed-out pages, on the page: the line under the heading, a
+  //    field's label, the "or" divider, the closing line and a refusal.
+  //    The system surfaces: a toast's words and its dismiss button on the
+  //    raised row (which is also what the update notice is), the scan bar's
+  //    count on its row, and what an empty My Library says. ──
+  ...[
+    ['.auth-lead', 15, 'page'], ['.auth-field label', 13, 'page'], ['.auth-or', 12, 'page'], ['.auth-foot', 14, 'page'],
+    ['.auth-error', 14, 'page'], ['.auth-bar-aside', 14, 'page'], ['.lib-empty-lead', 16, 'page'],
+    ['.toast', 14, 'raised-2'], ['.toast-x', 16, 'raised-2'], ['.toast-mark', 16, 'raised-2'],
+    ['.scanbar-row', 13, 'raised'], ['.scanbar-name', 13, 'raised'],
+  ].map(([sel, px, ground]) => ({
+    what: `signed out and system: ${sel}`, where: `${CSS} (${sel})`,
+    color: () => cssColor(sel, 'color').rgb,
+    alpha: () => cssColor(sel, 'color').a,
+    px,
+    on: () => ground === 'raised-2' ? [rootToken('--surface-raised-2').rgb] : ground === 'raised' ? [rootToken('--surface-raised').rgb] : [INK],
+  })),
   // ── A rail's header, on the page: its title (which is also the "see all"
   //    link when the rail has one, so there is no separate link text), the
   //    one line under it, and the chevron that marks the title as a link. ──

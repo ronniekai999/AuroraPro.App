@@ -105,6 +105,36 @@ describe('My Library', () => {
     expect(screen.getByRole('heading', { name: 'Nothing saved yet' }).closest('[data-library-empty]')).not.toBeNull()
   })
 
+  // An empty page offers the next thing to do, in place: a search for
+  // something to save, and the two catalogs. (It was a sentence about
+  // buttons that are elsewhere.)
+  it('offers a search and the two catalogs where nothing is saved', () => {
+    const onFind = vi.fn(), onBrowse = vi.fn()
+    render(view({ library: [], onFind, onBrowse }))
+    const empty = document.querySelector('[data-library-empty]') as HTMLElement
+    const field = within(empty).getByRole('searchbox', { name: 'Find something to save' })
+    // Nothing typed: nothing to look for.
+    fireEvent.submit(field.closest('form')!)
+    fireEvent.change(field, { target: { value: '   ' } })
+    fireEvent.submit(field.closest('form')!)
+    expect(onFind).not.toHaveBeenCalled()
+    fireEvent.change(field, { target: { value: 'night train' } })
+    fireEvent.submit(field.closest('form')!)
+    expect(onFind).toHaveBeenCalledWith('night train')
+    fireEvent.click(within(empty).getByRole('button', { name: 'Browse movies' }))
+    fireEvent.click(within(empty).getByRole('button', { name: 'Browse shows' }))
+    expect(onBrowse.mock.calls).toEqual([['movies'], ['shows']])
+    cleanup()
+    // Where the page is given neither, it draws neither.
+    render(view({ library: [] }))
+    expect(screen.queryByRole('searchbox')).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Browse/ })).toBeNull()
+    cleanup()
+    // And nothing of it once something is saved.
+    render(view({ onFind, onBrowse }))
+    expect(screen.queryByRole('searchbox', { name: 'Find something to save' })).toBeNull()
+  })
+
   // An empty list that is still loading is not "0 saved".
   it('gives no count, and a skeleton, while an empty list is still loading', () => {
     render(view({ library: [], loading: true }))

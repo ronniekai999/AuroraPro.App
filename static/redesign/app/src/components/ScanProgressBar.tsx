@@ -1,10 +1,8 @@
-// Aurora V2 — global scan progress bar.
+// The scan bar: one row under the top bar for each library that is being
+// scanned, saying which, how far along, and where to see more.
 //
-// Phase 5.3 parity port. V1 has a top-of-page bar that fills as the
-// scanner ticks; here we poll `/api/libraries/{id}/scan/status` for
-// every known library every 4s while any are active. Renders a thin
-// bar at the very top of the viewport when at least one scan is
-// running. Idle = component returns null.
+// It polls `/api/libraries/{id}/scan/status` for every known library every
+// 4s while any are active. Idle, the component renders nothing.
 //
 // Future: replace polling with a global WebSocket subscription to
 // the existing server-side `scan_progress` events. The polling
@@ -19,8 +17,11 @@ interface ProgressItem {
   status: ScanStatus
 }
 
-export function ScanProgressBar({ isAdmin, onScanComplete }: {
+export function ScanProgressBar({ isAdmin, onScanComplete, onOpenLibraries }: {
   isAdmin: boolean
+  /** Opens the admin page's Libraries section, where a scan is run and
+   *  watched. The row offers it when this is given. */
+  onOpenLibraries?: () => void
   /**
    * Fired once when the last running scan finishes.
    *
@@ -108,58 +109,53 @@ export function ScanProgressBar({ isAdmin, onScanComplete }: {
   // nothing, including the last scan polled while it was. The state is kept,
   // not cleared, so the completion edge above does not read the switch as a
   // scan finishing; polling restarts if the session is an admin's again.
-  if (!isAdmin || active.length === 0) return null
+  if (!isAdmin) return null
+  // What a screen reader is told: which libraries are being scanned, once,
+  // when that changes ("Scanning Movies"), and nothing as the counts tick.
+  // Its own element, mounted for as long as an admin is (a live region put
+  // on the page already filled is often not read), and not the bar: the
+  // bar's counts change every four seconds, and a status that held them
+  // would be read out each time. Emptied when the last scan ends, which
+  // says nothing.
+  const said = active.length > 0 ? `Scanning ${active.map(a => a.library.name).join(', ')}` : ''
 
-  // Phase 5.3 final QA — flow positioning. Previously the bar was
-  // `fixed top-0` which collided with the page's sticky top header
-  // (both wanted row 0). `fixed` removes the element from the
-  // parent's layout, so the header could not be pushed down to make
-  // room. Now: render in normal flow. The parent (App.tsx) wraps
-  // this bar + header in a single `sticky top-0` container so both
-  // stay pinned together AND the bar's height pushes the page
-  // content down naturally.
+  // In normal flow, not fixed: App wraps this bar and the top bar in one
+  // sticky container, so both stay pinned together and the bar's height
+  // pushes the page down. (Fixed, it sat over the top bar.)
   return (
-    <div className="bg-surface-raised-2 border-b border-line">
-      {active.map(({ library: lib, status: s }) => {
-        const pct = s.total_files > 0
-          ? Math.min(100, Math.max(0, (s.scanned_files / s.total_files) * 100))
-          : 0
-        return (
-          <div key={lib.id} className="px-4 py-1.5">
-            {/* Fixed row height + nowrap. This bar sits ABOVE the nav inside
-                the sticky chrome stack, and App publishes that stack's
-                measured height as --chrome-h. The counts here update every
-                4s, so if the text can wrap as digits grow the stack height
-                changes and every consumer of --chrome-h (the sticky browse
-                and admin toolbars, both drawers, the identity menu's height,
-                the page's scroll padding) steps with it. */}
-            <div className="flex items-center justify-between gap-3 mb-1 h-4">
-              <span className="text-white/80 text-xs font-medium whitespace-nowrap overflow-hidden text-ellipsis">
-                Scanning <strong className="text-ink">{lib.name}</strong>
+    <>
+      <p className="sr-only" role="status" data-scan-said="">{said}</p>
+      {active.length > 0 && (
+        <div className="scanbar">
+          {active.map(({ library: lib, status: s }) => {
+            const pct = s.total_files > 0
+              ? Math.min(100, Math.max(0, (s.scanned_files / s.total_files) * 100))
+              : 0
+            return (
+              // One row of a fixed height, nothing in it wrapping. This bar
+              // is in the sticky chrome stack, whose measured height App
+              // publishes as --chrome-h; the counts change every 4s, and a
+              // row that grew as its digits did would step everything
+              // placed under the stack.
+              <div key={lib.id} className="scanbar-row" data-scan-library={lib.id}>
+                <span className="scanbar-name">Scanning {lib.name}</span>
                 {s.total_files > 0 && (
-                  <span className="text-white/50 ml-2">
-                    {s.scanned_files.toLocaleString()} / {s.total_files.toLocaleString()}
-                    {s.new_files > 0 && <> · <span className="text-emerald-300">{s.new_files} new</span></>}
+                  <span className="scanbar-count">
+                    {s.scanned_files.toLocaleString()} of {s.total_files.toLocaleString()} files
+                    {s.new_files > 0 && <> · {s.new_files.toLocaleString()} new</>}
                   </span>
                 )}
-              </span>
-              {s.current_file && (
-                <span className="text-white/50 text-xs truncate max-w-[40%]" title={s.current_file}>
-                  {/* Audit L4 — server already passes the basename;
-                      the extra split is harmless but unnecessary. */}
-                  {s.current_file}
-                </span>
-              )}
-            </div>
-            <div className="h-1 bg-white/[0.06] rounded-full overflow-hidden">
-              <div
-                className="h-full bg-action transition-[width] duration-500"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-          </div>
-        )
-      })}
-    </div>
+                <span className="scanbar-track" aria-hidden="true"><span style={{ width: `${pct}%` }} /></span>
+                {onOpenLibraries && (
+                  <button type="button" className="scanbar-open" onClick={onOpenLibraries}>
+                    Open Libraries
+                  </button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </>
   )
 }

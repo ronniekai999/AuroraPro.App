@@ -37,7 +37,7 @@ const USER = { id: 1, username: 'ronnie', email: 'r@example.test', role: 'user' 
  *  /api/profiles fails every time. `role`: the account's role. `hold(key)`
  *  keeps one answer back until the returned release is called; the keys are
  *  `binding` (GET /api/profiles/active) and `parties-<bound profile>`. */
-function stubServer({ bound = 1, bindingUnreadable = false, parentLocked = false, listFails = false, role = 'user' } = {}) {
+function stubServer({ bound = 1, bindingUnreadable = false, parentLocked = false, listFails = false, role = 'user', scanning = false } = {}) {
   const parent = { ...PARENT, has_pin: parentLocked }
   const me = { ...USER, role }
   const holds = new Map<string, Promise<void>>()
@@ -67,6 +67,11 @@ function stubServer({ bound = 1, bindingUnreadable = false, parentLocked = false
     if (p === '/api/media/recent') return json({ data: [] })
     if (p === '/api/media') return json({ data: [], page: 1, per_page: 1, total_items: 0, total_pages: 1 })
     if (p.startsWith('/api/me/discover')) return json({ rails: [] })
+    // `scanning`: one library, being scanned.
+    if (scanning && p === '/api/libraries') return json([{ id: 1, name: 'Movies', type: 'movie', paths: ['/m'] }])
+    if (scanning && p === '/api/libraries/1/scan/status') return json({ status: 'running', total_files: 22, scanned_files: 14 })
+    if (p === '/api/admin/library-health') return json({ libraries: [] })
+    if (p === '/api/admin/dashboard') return json({ movie_count: 1, show_count: 0, episode_count: 0, user_count: 1, active_streams: 0, disk_free_gb: 100, version: 'test', uptime: '1m', memory_alloc_mb: 1, goroutines: 1, library_count: 1, total_file_size_bytes: 0, active_parties: 0 })
     // One live party hosted by someone else, named for the profile asked for.
     if (p === '/api/parties/active') {
       return json({ parties: [{
@@ -492,6 +497,51 @@ describe('the admin entries, in the whole app', () => {
     await screen.findByRole('heading', { name: 'Requests' }, { timeout: 10_000 })
   })
 
+  // The scan bar is an admin's, under the top bar, and leads to the admin
+  // page's Libraries section: from another page, and from the admin page
+  // while it is on another section.
+  it('shows an admin a running scan under the top bar, with the way to the admin page\'s Libraries section', async () => {
+    const server = stubServer({ bound: 1, role: 'admin', scanning: true })
+    renderAt('/', { remembered: 1, role: 'admin' })
+    await settled('Parent')
+    const row = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('.scanbar-row')
+      if (!el) throw new Error('no scan bar yet')
+      return el
+    }, { timeout: 10_000 })
+    expect(row.textContent).toContain('Scanning Movies')
+    expect(row.textContent).toContain('14 of 22 files')
+    // Under the top bar, in the same sticky stack.
+    const nav = document.querySelector('header.stage-topnav')!
+    expect(nav.parentElement).toBe(row.closest('.scanbar')!.parentElement)
+    expect(nav.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const current = () => document.querySelector('[data-hidden-page] [aria-current="page"], main [aria-current="page"]:not(.stage-tab)')?.textContent
+    fireEvent.click(within(row).getByRole('button', { name: 'Open Libraries' }))
+    await waitFor(() => expect(where.path).toBe('/admin'))
+    await waitFor(() => expect(current()).toBe('Libraries'), { timeout: 10_000 })
+    // On another section of the admin page, the same press opens Libraries again,
+    fireEvent.click(await screen.findByRole('button', { name: 'Overview' }, { timeout: 10_000 }))
+    await waitFor(() => expect(current()).toBe('Overview'))
+    await waitFor(() => expect(server.asks.filter(a => a === '/api/admin/dashboard').length).toBeGreaterThan(0), { timeout: 10_000 })
+    // in place: the page is not mounted again (which fetched its dashboard
+    // again, and dropped what the open section held).
+    const marked = document.querySelector('[aria-current="page"]:not(.stage-tab)')!.parentElement!
+    marked.setAttribute('data-test-same-page', '')
+    const dashboards = server.asks.filter(a => a === '/api/admin/dashboard').length
+    fireEvent.click(within(document.querySelector<HTMLElement>('.scanbar-row')!).getByRole('button', { name: 'Open Libraries' }))
+    await waitFor(() => expect(current()).toBe('Libraries'), { timeout: 10_000 })
+    await new Promise(done => setTimeout(done, 100))
+    expect(document.querySelector('[data-test-same-page]')).toBe(marked)
+    expect(server.asks.filter(a => a === '/api/admin/dashboard').length).toBe(dashboards)
+    // Reached any other way later, the admin page opens on its overview.
+    fireEvent.click(document.querySelector('header.stage-topnav [data-nav="home"]')!)
+    await waitFor(() => expect(where.path).toBe('/home'))
+    fireEvent.click(document.querySelector('[data-identity-trigger]')!)
+    fireEvent.click(within(screen.getByRole('group', { name: 'Account and profiles' })).getByRole('button', { name: 'Admin' }))
+    await waitFor(() => expect(where.path).toBe('/admin'))
+    await waitFor(() => expect(current()).toBe('Overview'), { timeout: 10_000 })
+  })
+
   it('shows the same admin account none of them while its session acts as a restricted profile, on any commit', async () => {
     stubServer({ bound: 2, role: 'admin' })
     const commits = renderAt('/', { remembered: 2, role: 'admin' })
@@ -500,6 +550,22 @@ describe('the admin entries, in the whole app', () => {
     const menu = within(screen.getByRole('group', { name: 'Account and profiles' }))
     for (const name of ['Admin', 'Server status', 'Requests', 'My requests']) expect(menu.queryByRole('button', { name })).toBeNull()
     expect(commits.filter(c => c.destinations.includes('Together') || c.destinations.includes('Admin'))).toEqual([])
+  })
+
+  // The scan bar is drawn from admin-only reads. An admin account acting as
+  // a restricted profile has no admin powers: it is shown no scan, and the
+  // app does not ask the server about one on its behalf.
+  it('shows a running scan to no session acting as a restricted profile, admin account or not, and asks nothing about it', async () => {
+    const server = stubServer({ bound: 2, role: 'admin', scanning: true })
+    const commits = renderAt('/', { remembered: 2, role: 'admin' })
+    await settled('Kid')
+    // Long enough for the bar's first reads, had it made any.
+    await new Promise(done => setTimeout(done, 300))
+    expect(document.querySelector('.scanbar')).toBeNull()
+    expect(document.querySelector('[data-scan-said]')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open Libraries' })).toBeNull()
+    expect(server.asks.filter(a => a === '/api/libraries' || a.includes('/scan/status'))).toEqual([])
+    expect(commits.length).toBeGreaterThan(0)
   })
 
   it('does not show them before the server has said which profile an admin\'s session acts as', async () => {

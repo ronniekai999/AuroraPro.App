@@ -2651,13 +2651,23 @@ function StatTile({ label, value, icon, color, hint, sub }: StatTileProps) {
 // is the name this file has always used for one.
 type AdminTab = AdminSection
 
-export default function AdminView({ currentAdminId, catalogVersion = 0 }: {
+export default function AdminView({ currentAdminId, catalogVersion = 0, initialSection, sectionAsk = 0 }: {
   currentAdminId: number
   /** App's live catalog version (hooks/useCatalogVersion); a change means a
    *  scan added titles, so the dashboard's counts refresh. */
   catalogVersion?: number
+  /** The section the page opens on (the scan bar's "Open Libraries"); the
+   *  overview when none is asked for. */
+  initialSection?: AdminSection
+  /** Counts the asks for `initialSection`. A new one while the page is up
+   *  opens that section again, in place: the page is not remounted (which
+   *  fetched the dashboard again and dropped what the open section held). */
+  sectionAsk?: number
 }) {
-  const [tab, setTab] = useState<AdminTab>('dashboard')
+  const [tab, setTab] = useState<AdminTab>(initialSection ?? 'dashboard')
+  useEffect(() => {
+    if (initialSection) setTab(initialSection)
+  }, [sectionAsk, initialSection])
 
   // /api/admin/backup streams a pg_dump archive. We fetch with the
   // Authorization header (rather than a tokenized anchor) so the

@@ -281,13 +281,13 @@ describe('what leads Tonight', () => {
 
     fireEvent.click(document.querySelector('[data-identity-trigger]')!)
     fireEvent.click(screen.getByRole('button', { name: /^Sign out/ }))
-    const username = await screen.findByPlaceholderText('Enter username', {}, find)
+    const username = await screen.findByLabelText('Username', {}, find)
     const releaseAgain = page.hold('/api/progress/continue')
     const since = page.commits.length
     const picks = page.answered.filter(p => p === '/api/me/hero').length
     fireEvent.change(username, { target: { value: 'ronnie' } })
-    fireEvent.change(screen.getByPlaceholderText('Enter password'), { target: { value: 'pw' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
     // The picks and the rails have landed again; only Continue Watching is out.
     await waitFor(() => expect(page.answered.filter(p => p === '/api/me/hero').length).toBeGreaterThan(picks), find)
     await screen.findAllByText('Only In The Catalog', undefined, find)
@@ -317,14 +317,14 @@ describe('what leads Tonight', () => {
     await screen.findByRole('button', { name: 'Details of Left Unfinished' }, find)
 
     page.expire()
-    const username = await screen.findByPlaceholderText('Enter username', {}, find)
+    const username = await screen.findByLabelText('Username', {}, find)
     // This sign-in's Continue Watching never answers.
     page.hold('/api/progress/continue')
     const since = page.commits.length
     const picks = page.answered.filter(p => p === '/api/me/hero').length
     fireEvent.change(username, { target: { value: 'ronnie' } })
-    fireEvent.change(screen.getByPlaceholderText('Enter password'), { target: { value: 'pw' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
     // The picks and the rails have landed again; only Continue Watching is out.
     await waitFor(() => expect(page.answered.filter(p => p === '/api/me/hero').length).toBeGreaterThan(picks), find)
     await screen.findAllByText('Only In The Catalog', undefined, find)
@@ -735,12 +735,12 @@ describe('the page around the hero', () => {
     page.failSaved()
     fireEvent.click(document.querySelector('[data-identity-trigger]')!)
     fireEvent.click(screen.getByRole('button', { name: /^Sign out/ }))
-    const username = await screen.findByPlaceholderText('Enter username', {}, find)
+    const username = await screen.findByLabelText('Username', {}, find)
     localStorage.setItem('aurora_my_library:1:2', JSON.stringify([{ id: 999, title: 'Saved Before The Limit', year: 2019, rating: 8, duration: '', genre: '', type: 'movie', poster: '', backdrop: '', description: '' }]))
     const since = page.commits.length
     fireEvent.change(username, { target: { value: 'ronnie' } })
-    fireEvent.change(screen.getByPlaceholderText('Enter password'), { target: { value: 'pw' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
     await screen.findByRole('heading', { name: 'Shows' }, find)
     await new Promise(done => setTimeout(done, 300))
     expect(railNames()).toEqual(['Movies', 'Shows'])

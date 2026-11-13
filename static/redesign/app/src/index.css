@@ -90,7 +90,7 @@
        this token instead so nav height stays changeable in one edit. */
     --topnav-h: 64px;
     /* Measured height of the WHOLE sticky chrome stack — the admin
-       ScanProgressBar (which renders in flow ABOVE the nav, ~37px per
+       ScanProgressBar (which renders in flow under the nav, 40px per
        actively-scanning library) plus the nav. App writes the real value
        here via a ResizeObserver; 64px is the no-scan fallback.
        ------------------------------------------------------------------
@@ -1392,6 +1392,282 @@ html[data-effects="reduced"] .stage-topnav {
 }
 /* Said above the list when the row it is about is not in the list shown. */
 .req-wrong-page { margin: 16px 0 0; overflow-wrap: anywhere; }
+
+/* ── Signed out: sign in, and create an account ─────────────────────
+   Sign in: a wall of frames with the house lights down beside the form.
+   The two sit on one line and never wrap: the wall is drawn only from
+   980px, the width its 560px and the form column's 420px add up to, and
+   below that the form is the page. (Wrapping, with the wall drawn from
+   900px, put the wall alone on the first line from 900 to 979px, a whole
+   screen of empty frames with the form under the fold.) Create an account:
+   a bar with the brand and the way back, the form in the middle. The
+   frames are empty: a visitor who has not signed in is shown nothing of
+   the library. */
+.auth-page {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  background: var(--surface-page);
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+.auth-page.is-register {
+  flex-direction: column;
+  padding: 0 var(--page-pad-x, 48px) 40px;
+}
+.auth-wall {
+  position: relative;
+  flex: 1 1 560px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow: hidden;
+}
+@media not all and (min-width: 980px) {
+  .auth-wall { display: none; }
+}
+.auth-wall-frames {
+  position: absolute;
+  top: -40px;
+  left: -40px;
+  width: 760px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 20px;
+  transform: rotate(-6deg);
+  opacity: 0.5;
+}
+.auth-wall-frames > span {
+  display: block;
+  aspect-ratio: 2 / 3;
+  border-radius: var(--radius-art);
+  background: linear-gradient(160deg, var(--surface-raised-2) 0%, var(--surface-raised) 70%);
+}
+/* A few of them catch a little more light, so the wall is not a grid of
+   identical tiles. Neutral: no colour of the brand's here. */
+.auth-wall-frames > span:nth-child(3n + 1) {
+  background: linear-gradient(160deg, color-mix(in srgb, #ffffff 9%, var(--surface-raised-2)) 0%, var(--surface-raised) 72%);
+}
+.auth-wall-frames > span:nth-child(5n + 3) {
+  background: linear-gradient(200deg, color-mix(in srgb, #ffffff 5%, var(--surface-raised-2)) 0%, var(--surface-raised) 72%);
+}
+.auth-wall-fade {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(14, 15, 17, 0.2) 0%, var(--surface-page) 96%),
+    linear-gradient(0deg, var(--surface-page) 4%, rgba(14, 15, 17, 0) 40%);
+}
+.auth-wall-line {
+  position: absolute;
+  left: 48px;
+  bottom: 48px;
+  max-width: 460px;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 44px;
+  line-height: 1.02;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #ffffff;
+}
+.auth-main {
+  flex: 1 1 420px;
+  min-width: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  box-sizing: border-box;
+  padding: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.auth-page.is-register .auth-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 24px 0;
+}
+@media not all and (min-width: 640px) {
+  .auth-main { padding: 32px 20px; }
+  .auth-page.is-register { padding: 0 20px 24px; }
+}
+.auth-bar {
+  flex: none;
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.auth-bar .auth-brand { flex: 1 1 auto; }
+.auth-bar-aside {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+.auth-form {
+  margin: 0;
+  width: 400px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.auth-form.is-wide {
+  width: 440px;
+  gap: 20px;
+}
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.auth-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.auth-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 40px;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+@media not all and (min-width: 640px) {
+  .auth-title { font-size: 32px; }
+}
+.auth-lead {
+  margin: 0;
+  font-size: 15px;
+  color: var(--ink-2);
+}
+.auth-field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.auth-field label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+/* (0,2,1), over the global field rule: 48px high, and 16px type so a phone
+   does not zoom the page when a field takes the focus. */
+input.auth-input:not([type="range"]) {
+  width: 100%;
+  height: 48px;
+  box-sizing: border-box;
+  padding: 0 14px;
+  font-size: 16px;
+}
+input.auth-code:not([type="range"]) { letter-spacing: 0.06em; }
+.auth-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.auth-pair > .auth-field { flex: 1 1 180px; }
+.auth-error {
+  margin: 0;
+  display: flex;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--danger-ink);
+}
+.auth-submit {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 999px;
+  background: var(--action);
+  color: var(--on-action);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.auth-submit:not(:disabled):hover { background: rgba(255, 255, 255, 0.9); }
+.auth-submit:disabled { opacity: 0.6; cursor: default; }
+.auth-or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.auth-or > span {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.auth-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.auth-providers.is-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+.auth-provider {
+  height: 48px;
+  box-sizing: border-box;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.auth-providers.is-row > .auth-provider { flex: 1 1 180px; }
+.auth-provider:where(:not([aria-disabled="true"])):hover { background: var(--surface-raised); }
+.auth-provider[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+.auth-foot {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+/* A link in a sentence: underlined. On a touch screen it is 44px high by
+   its own box, which grows its line: two of them on wrapped lines then
+   cannot overlap. (Each used to reach 12px above and below its line
+   instead, and the foot's wrapped lines are 6px apart.) */
+.auth-link {
+  position: relative;
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.auth-link:hover { text-decoration-thickness: 2px; }
+@media (hover: none), (pointer: coarse) {
+  .auth-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  .auth-link::after {
+    content: "";
+    position: absolute;
+    inset: 0 -6px;
+  }
+}
 .req-acts {
   flex: none;
   display: flex;
@@ -2295,6 +2571,32 @@ html {
   .stage-btn.stage-hit44::before {
     inset: -5px;
   }
+}
+
+/* The top bar's own controls on a touch screen, which from md up is a
+   tablet: drawn as they are for a pointer, each a 44px target. The
+   destinations are 38px high and the presence pill and the identity 40px:
+   their targets grow above and below, not sideways into a neighbour. The
+   field is 44px high there, and its clear button (24px) has a target of its
+   own. (The brand button carries stage-hit44.) */
+@media (hover: none), (pointer: coarse) {
+  .stage-topnav .stage-tab,
+  .stage-topnav [data-presence],
+  .stage-topnav [data-identity-trigger],
+  .stage-navsearch-clear { position: relative; }
+  .stage-topnav .stage-tab::before,
+  .stage-topnav [data-presence]::before,
+  .stage-topnav [data-identity-trigger]::before {
+    content: '';
+    position: absolute;
+    inset: -3px 0;
+  }
+  .stage-navsearch-clear::before {
+    content: '';
+    position: absolute;
+    inset: -10px;
+  }
+  .stage-topnav .stage-navsearch { height: 44px; }
 }
 
 /* The profile unlock prompt's two fields. The app's global
@@ -3430,6 +3732,10 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
 
 /* The floating control for a cast or AirPlay session while the player itself
    is tucked away. Bottom left, above the phone tab bar's reach. */
+/* Its place and height (16px up, 114px high: two 40px rows, 10px between,
+   12px of padding) are what the toasts and the update notice stack above
+   (.toast-stack, --corner-base); scripts/verify-mobile-layout.mjs checks
+   they clear it. */
 .player-cast-widget {
   position: fixed;
   left: 16px;
@@ -3725,12 +4031,12 @@ html[data-player-surface="theater"][data-player-menu] .stage-voice-pill {
   from { opacity: 1; }
   to { opacity: 0; }
 }
-/* Leaves by drifting 18px right as it fades (D3) — a nod to the corner it came
-   from, without the full-width slide. --dur-base matches Toast.tsx's 220ms
-   removal timer. */
+/* Leaves by drifting 18px left as it fades (D3), toward the corner it sits
+   in (the bottom left, since the redesign), without the full-width slide.
+   --dur-base matches Toast.tsx's 220ms removal timer. */
 @keyframes toastOut {
   from { opacity: 1; transform: none; }
-  to { opacity: 0; transform: translateX(18px); }
+  to { opacity: 0; transform: translateX(-18px); }
 }
 .animate-fade-in.is-closing {
   animation: fadeOut var(--dur-fast) var(--ease-exit) forwards;
@@ -4749,21 +5055,258 @@ textarea:focus-visible {
   background: rgba(255, 255, 255, 0.02);
 }
 
-/* Toast: an opaque raised-2 card with a hairline and a dark shadow, so the
-   message contrast does not depend on what is behind it. The type is
-   carried by the icon and its colour (Toast.tsx), not by a tinted glow. */
-.toast {
-  background: var(--surface-raised-2);
-  border: 1px solid var(--line-strong);
-  padding: 12px 14px 12px 12px;
-  border-radius: var(--radius-control);
+/* ── My Library with nothing saved: what it is for, and the next thing to
+   do, in place (a search, and the two catalogs). */
+.lib-empty {
+  padding: 72px 0 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  text-align: center;
+}
+.lib-empty-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 40px;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+.lib-empty-lead {
+  margin: 0;
+  max-width: 460px;
+  font-size: 17px;
+  color: var(--ink-2);
+}
+.lib-empty-find {
+  margin: 16px 0 0;
+  width: 480px;
+  max-width: 100%;
+  height: 52px;
+  box-sizing: border-box;
+  padding: 0 16px;
   display: flex;
   align-items: center;
   gap: 12px;
-  box-shadow: 0 18px 44px -12px rgba(0, 0, 0, 0.75);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface-raised);
+}
+.lib-empty-find:focus-within { border-color: #ffffff; }
+/* The form is the field's box; the input inside it has none of its own.
+   (0,2,1) and up, over the global field rule and its focus treatment. */
+.lib-empty-find input:not([type="range"]),
+.lib-empty-find input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 16px;
+}
+.lib-empty-acts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+}
+@media not all and (min-width: 640px) {
+  .lib-empty { padding: 40px 0 32px; }
+  .lib-empty-title { font-size: 32px; }
+  .lib-empty-lead { font-size: 16px; }
+}
+
+/* ── The scan bar: one row under the top bar for each library being
+   scanned, 40px high, and 44px on a touch screen, where "Open Libraries"
+   is pressed with a thumb. A fixed height and nothing that wraps: the bar
+   is in the sticky chrome stack, and everything under that stack is placed
+   by its measured height (--chrome-h). */
+.scanbar { background: var(--surface-raised); }
+.scanbar-row {
+  height: 40px;
+  box-sizing: border-box;
+  padding: 0 var(--page-pad-x);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.scanbar-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+  color: var(--ink);
+}
+.scanbar-count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.scanbar-track {
+  flex: 1 1 60px;
+  min-width: 40px;
+  max-width: 320px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.22);
+  overflow: hidden;
+}
+.scanbar-track > span {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--action);
+  transition: width 500ms var(--ease-standard);
+}
+.scanbar-open {
+  flex: none;
+  margin-left: auto;
+  /* The row's own height: a 40px target, and 44 on a touch screen (below). */
+  align-self: stretch;
+  min-width: 44px;
+  padding: 0 4px;
+  margin-right: -4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+}
+.scanbar-open:hover { text-decoration: underline; text-underline-offset: 3px; }
+/* The row itself is the taller one: it clips what is drawn outside it, so a
+   target grown past a 40px row was still 40px. */
+@media (hover: none), (pointer: coarse) {
+  .scanbar-row { height: 44px; }
+}
+/* A phone has no room for the count beside the name and the bar. */
+@media not all and (min-width: 640px) {
+  .scanbar-count { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scanbar-track > span { transition: none; }
+}
+
+/* Where toasts are: the bottom left corner, at the page's own margin, above
+   a phone's tab bar, and above the update notice while that is up. */
+.toast-stack,
+.update-notice {
+  /* How far up from the bottom of the window the corner's first card sits. */
+  --corner-base: calc(32px + var(--tabbar-space, 0px));
+  position: fixed;
+  left: var(--page-pad-x);
+  max-width: calc(100% - 2 * var(--page-pad-x));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+@media not all and (min-width: 768px) {
+  .toast-stack,
+  .update-notice { --corner-base: calc(16px + var(--tabbar-space, 0px)); }
+}
+/* --update-notice-space: the notice's own measured height and the gap
+   above it, while it is up (UpdateAvailableNotice). */
+.toast-stack {
+  z-index: 200;
+  bottom: calc(var(--corner-base) + var(--update-notice-space, 0px));
+}
+.update-notice {
+  z-index: 58;
+  bottom: var(--corner-base);
+}
+/* Two things of the player's are in this corner too.
+   Minimized while it casts, the player is a card here (.player-cast-widget:
+   16px from the bottom, 114px high, drawn under the toasts): the notice and
+   the toasts stack above it, 12px clear. A toast used to lie across its
+   pause button.
+   In the window, the transport's play, skip and mute are in this corner
+   (and audio, speed and full screen in the other, which the toasts covered
+   before they moved here), and the lane above the timeline is the Skip
+   button's and "Tap for sound"'s. A toast goes to the row above that lane,
+   where the player puts its own passing messages (.player-lane-upper), by
+   the same published figures. The notice is under the player there. */
+html:has(.player-cast-widget) .toast-stack,
+html:has(.player-cast-widget) .update-notice {
+  --corner-base: max(calc(16px + var(--tabbar-space, 0px)), calc(142px + env(safe-area-inset-bottom, 0px)));
+}
+html[data-player-surface="theater"] .toast-stack {
+  bottom: calc(var(--theater-inset-y) + var(--player-timeline-top) + 88px + var(--player-dock-lift));
+}
+@media (max-height: 480px) {
+  html[data-player-surface="theater"] .toast-stack {
+    bottom: calc(var(--theater-inset-y) + var(--player-timeline-top) + 64px + var(--player-dock-lift));
+  }
+}
+/* A toast: a row of words on a raised surface, with at most one thing to
+   press beside dismissing it. */
+.toast {
+  min-height: 52px;
+  max-width: 100%;
+  box-sizing: border-box;
+  background: var(--surface-raised-2);
+  padding: 6px 8px 6px 16px;
+  border-radius: var(--radius-control);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 14px;
+  color: var(--ink);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
   /* forwards: holds the "to" frame so a re-render can never snap the toast
      back to its "from" (the same defence .animate-fade-in has). */
   animation: toastIn 320ms var(--ease-emphasized) forwards;
+}
+
+.toast-text {
+  min-width: 0;
+  margin: 0;
+  padding-block: 6px;
+  overflow-wrap: anywhere;
+}
+.toast-mark { color: var(--danger-ink); margin-right: -6px; }
+/* The toast's action (Undo), and the update notice's (Reload, the primary). */
+.toast-action {
+  flex: none;
+  height: 40px;
+  padding: 0 14px;
+  border-radius: var(--radius-control);
+  background: var(--action-soft);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.toast-action:hover { background: rgba(255, 255, 255, 0.16); }
+.toast-action.is-primary {
+  padding: 0 16px;
+  border-radius: 999px;
+  background: var(--action);
+  color: var(--on-action);
+}
+.toast-action.is-primary:hover { background: rgba(255, 255, 255, 0.9); }
+.toast-x {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-control);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+.toast-x:hover { background: rgba(255, 255, 255, 0.08); color: var(--ink); }
+/* 40px as drawn; 44px on a touch screen. */
+@media (hover: none), (pointer: coarse) {
+  .toast-action, .toast-x { position: relative; }
+  .toast-action::before, .toast-x::before { content: ''; position: absolute; inset: -2px; }
 }
 
 /* ── A chip that is one of several choices (a genre, a sort) ───────── */

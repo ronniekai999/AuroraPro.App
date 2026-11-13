@@ -126,6 +126,10 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
   const listFails = new Set<number>()
   const searches: { asked: number; mode: string | null }[] = []
   let profileLists = 0
+  /** Each write to a profile's own list, as the server was asked. */
+  const libraryWrites: string[] = []
+  /** How many of the next such writes the server refuses. */
+  const libraryWriteFails = { n: 0 }
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
@@ -141,6 +145,16 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     if (isCount) counts.push(asked)
     if (p === '/api/media/search') searches.push({ asked, mode: url.searchParams.get('mode') })
     if (p === '/api/profiles') profileLists++
+    // A write to a profile's own list: recorded, kept back while
+    // 'library-write' is held, and refused when told to be.
+    if (/^\/api\/profiles\/\d+\/library(\/\d+)?$/.test(p) && init?.method && init.method !== 'GET') {
+      libraryWrites.push(`${init.method} ${p}`)
+      const fails = libraryWriteFails.n > 0
+      if (fails) libraryWriteFails.n--
+      const kept = holds.get('library-write')
+      if (kept) await kept
+      return fails ? json({ error: { code: 500, message: 'failed to resolve library' } }, 500) : new Response(null, { status: 204 })
+    }
     const held = holds.get(p === '/api/auth/me' ? 'me'
       : p === '/api/media/search' ? `search-${asked}`
         : p === '/api/progress/continue' ? `continue-${asked}`
@@ -231,6 +245,8 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     refusals,
     heroPools,
     searches,
+    libraryWrites,
+    failLibraryWrites(n = 1) { libraryWriteFails.n = n },
     /** From now on the server fails to answer for this profile's own list. */
     failListFor(profile: number) { listFails.add(profile) },
     get profileLists() { return profileLists },
@@ -740,6 +756,72 @@ describe('a profile switch never commits the new name over the previous profileâ
     await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
     expect(kidOverParent(commits)).toBe(0)
     expect(kid(commits).filter(c => c.libraryEmpty)).toEqual([])
+  })
+
+  // A toast is said to whoever is acting when it is raised. "Removed <title>
+  // from My Library. Undo" stays seven seconds, and stayed through a switch:
+  // the title's name was up under the new profile's.
+  const removeTheSavedTitle = async () => {
+    fireEvent.click((await screen.findAllByRole('button', { name: 'More actions for Parentonly Saved' }, { timeout: 5000 }))[0])
+    fireEvent.click(within(await screen.findByRole('menu', { name: 'Actions for Parentonly Saved' })).getByRole('menuitem', { name: 'Remove from My Library' }))
+    return await screen.findByText('Removed Parentonly Saved from My Library.', undefined, { timeout: 5000 })
+  }
+  it('with a removal\'s toast up: the toast and its Undo go with the profile they were said to', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const commits = renderApp('/library')
+    await removeTheSavedTitle()
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument()
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    // Not vacuous: the toast was up when the switch was made, and it names a Parent-only title.
+    expect(commits.some(c => c.label === 'Parent' && c.parentTitles)).toBe(true)
+    expect(kid(commits).length).toBeGreaterThan(0)
+    expect(kidOverParent(commits)).toBe(0)
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull()
+    expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104'])
+  })
+
+  // The removal is still out when the switch is made, and the server then
+  // refuses it. Taking it back is an edit of the Parent's list, and saying
+  // so names the Parent's title: neither is the Kid's.
+  it('with a removal still out: its refusal edits no list of the new profile\'s and is not said to it', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const commits = renderApp('/library')
+    const release = server.hold('library-write')
+    server.failLibraryWrites()
+    await removeTheSavedTitle()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104']))
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    release()
+    await new Promise(done => setTimeout(done, 200))
+    expect(kidOverParent(commits)).toBe(0)
+    expect(screen.queryByText(/Couldn't/)).toBeNull()
+    // The Kid's own list, on screen and as this browser keeps it, is the Kid's.
+    expect(screen.queryByText('Parentonly Saved')).toBeNull()
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toEqual(['Kidonly Saved'])
+  })
+
+  // An Undo's save waits behind the removal it undoes. A switch made while
+  // both are out: the save's turn comes on a session that now acts as the
+  // Kid, naming the Parent's profile, and the server would refuse it. It is
+  // not sent.
+  it('with an Undo waiting behind its removal: the Undo is not sent for the previous profile', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    renderApp('/library')
+    const release = server.hold('library-write')
+    const said = await removeTheSavedTitle()
+    await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104']))
+    fireEvent.click(within(said.closest('.toast') as HTMLElement).getByRole('button', { name: 'Undo' }))
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    release()
+    await new Promise(done => setTimeout(done, 200))
+    expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104'])
+    expect(screen.queryByText(/Couldn't/)).toBeNull()
   })
 
   it('on My Library, into a restricted profile: the page goes with the switch', async () => {

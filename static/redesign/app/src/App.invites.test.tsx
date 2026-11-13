@@ -80,9 +80,9 @@ const find = { timeout: 5000 }
 async function signOutAndInAsBob() {
   fireEvent.click(document.querySelector('[data-identity-trigger]')!)
   fireEvent.click(screen.getByRole('button', { name: /^Sign out/ }))
-  fireEvent.change(await screen.findByPlaceholderText('Enter username', {}, find), { target: { value: 'bob' } })
-  fireEvent.change(screen.getByPlaceholderText('Enter password'), { target: { value: 'pw' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
+  fireEvent.change(await screen.findByLabelText('Username', {}, find), { target: { value: 'bob' } })
+  fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
   await waitFor(() => expect(document.querySelector('[data-identity-name]')?.textContent).toBe('Bob'), find)
   // A sign-in lands on Tonight; Bob goes to Together.
   fireEvent.click(document.querySelector('header .stage-tab[data-nav="together"]')!)

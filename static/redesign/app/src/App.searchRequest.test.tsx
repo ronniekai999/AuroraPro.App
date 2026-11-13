@@ -12,6 +12,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { MemoryRouter, useLocation, useNavigate } from 'react-router'
 import App from './App'
 import { forgetDescribedAnswer } from '@/lib/describedSearch'
+import { rememberDeviceIntent } from '@/lib/devicePairing'
 
 vi.mock('@/components/VideoPlayer', async (original) => ({
   ...(await original<typeof import('@/components/VideoPlayer')>()),
@@ -77,8 +78,9 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
     // `kidFree`: the second profile has no content limit, so both may request.
     const kid = kidFree ? { ...KID, max_age_rating: undefined } : KID
     // The second account has one profile of its own.
-    if (me.id === 2 && p === '/api/profiles') return json([OTHER])
-    if (me.id === 2 && p === '/api/profiles/active') return json(OTHER)
+    // (`noProfiles` is both accounts': neither has made one.)
+    if (me.id === 2 && !noProfiles && p === '/api/profiles') return json([OTHER])
+    if (me.id === 2 && !noProfiles && p === '/api/profiles/active') return json(OTHER)
     if (p === '/api/profiles') return json(noProfiles ? [] : [PARENT, kid])
     const activate = p.match(/^\/api\/profiles\/(\d+)\/activate$/)
     if (activate && init?.method === 'POST') { acting.id = Number(activate[1]); return new Response(null, { status: 204 }) }
@@ -134,6 +136,14 @@ function renderApp(bound = 1, keep = false, { bindingUnreadable = false, noProfi
       signedIn = false
       act(() => { window.dispatchEvent(new Event('aurora:session-expired')) })
     },
+    /** Another tab of the browser signs in as a second account: the session
+     *  is theirs from then on, and this tab is told the way tabs are (the
+     *  stored user changes). It never passes through "nobody signed in". */
+    anotherTabSignsInAs(name: string) {
+      me = { id: 2, username: name, email: 'other@example.test', role: 'user' }
+      localStorage.setItem('aurora_user', JSON.stringify(me))
+      act(() => { window.dispatchEvent(new StorageEvent('storage', { key: 'aurora_user', newValue: JSON.stringify(me) })) })
+    },
     holdRequest() {
       let release!: () => void
       held.answer = new Promise<void>(done => { release = done })
@@ -157,7 +167,7 @@ async function searchFor(words: string) {
 vi.setConfig({ testTimeout: 30_000 })
 // A described search's answer is kept for the life of the page (one entry,
 // lib/describedSearch); a test's ask must not be answered by the last one's.
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); forgetDescribedAnswer() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); forgetDescribedAnswer(); sessionStorage.clear() })
 
 describe('a search that finds nothing in the library', () => {
   it('ends in a request, made on the search page: the title is looked up, asked for where it stands, and is then on the requests page', async () => {
@@ -949,9 +959,9 @@ describe('the words in the search field go with whoever typed them', () => {
     return server
   }
   async function theSecondSignsIn() {
-    fireEvent.change(await screen.findByPlaceholderText('Enter username', {}, find), { target: { value: 'dana' } })
-    fireEvent.change(screen.getByPlaceholderText('Enter password'), { target: { value: 'pw' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Sign In' }))
+    fireEvent.change(await screen.findByLabelText('Username', {}, find), { target: { value: 'dana' } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
     await waitFor(() => expect(document.querySelector('[data-identity-name]')?.textContent).toBe('Other'), find)
     await waitFor(() => expect(field()).not.toBeNull(), find)
     // Long enough for a search of whatever is in the field to have been asked for.
@@ -989,6 +999,122 @@ describe('the words in the search field go with whoever typed them', () => {
     fireEvent.click(await screen.findByRole('button', { name: /^Harbor Lights/ }, find))
     await waitFor(() => expect(JSON.parse(localStorage.getItem('aurora_recent_searches:2:9') ?? '[]')).toEqual(['harbor']), find)
     expect(server.searched.filter(s => s.as === 2).map(s => s.q)).toEqual(['harbor'])
+  })
+
+  // A toast, too, is said to whoever is acting. Toasts were kept through a
+  // sign-out and an expiry, and a toast's timer starts again when the stack
+  // is drawn again: "Removed <title> from My Library. Undo" was shown to
+  // the next person to sign in, for its whole seven seconds.
+  async function removedWithAToast() {
+    const server = await typedByTheFirst()
+    const pick = async (row: string) => {
+      fireEvent.click((await screen.findAllByRole('button', { name: 'More actions for Harbor Lights' }, find))[0])
+      fireEvent.click(within(await screen.findByRole('menu', { name: 'Actions for Harbor Lights' }, find)).getByRole('menuitem', { name: row }))
+    }
+    await pick('Add to My Library')
+    await pick('Remove from My Library')
+    await screen.findByText('Removed Harbor Lights from My Library.', {}, find)
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument()
+    return server
+  }
+  const noToastOfTheFirst = () => {
+    expect(document.querySelectorAll('.toast')).toHaveLength(0)
+    expect(document.body.textContent).not.toContain('Harbor Lights from My Library')
+    expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull()
+  }
+  it('a toast said to the first account is not shown to the next after a sign-out', async () => {
+    await removedWithAToast()
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(await screen.findByRole('button', { name: /^Sign out/ }, find))
+    await theSecondSignsIn()
+    noToastOfTheFirst()
+  })
+
+  it('nor after the session expires, to the next account or to the same one signing in again', async () => {
+    const server = await removedWithAToast()
+    server.expire()
+    await theSecondSignsIn()
+    noToastOfTheFirst()
+    cleanup()
+    vi.unstubAllGlobals()
+    const again = await removedWithAToast()
+    again.expire()
+    fireEvent.change(await screen.findByLabelText('Username', {}, find), { target: { value: 'ronnie' } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    await waitFor(() => expect(document.querySelector('[data-identity-name]')?.textContent).toBe('Parent'), find)
+    await act(async () => { await new Promise(done => setTimeout(done, 300)) })
+    noToastOfTheFirst()
+  })
+
+  // On an account with profiles the profile going to nobody's drops the
+  // toasts as well (the switch's reset). An account that has made no profile
+  // has none to go: there only the change of who is signed in drops them.
+  async function saidToAnAccountWithNoProfile() {
+    const server = renderApp(1, false, { noProfiles: true })
+    await waitFor(() => expect(field()).not.toBeNull(), find)
+    fireEvent.change(field(), { target: { value: WORDS } })
+    fireEvent.click((await screen.findAllByRole('button', { name: 'More actions for Harbor Lights' }, find))[0])
+    fireEvent.click(within(await screen.findByRole('menu', { name: 'Actions for Harbor Lights' }, find)).getByRole('menuitem', { name: 'Add to My Library' }))
+    const said = await screen.findByText('Pick a profile to save titles', {}, find)
+    // Held where it is, as under a pointer: it does not time out during the test.
+    fireEvent.mouseEnter(said.closest('.toast')!)
+    return server
+  }
+  it('a toast on an account with no profile goes when its session expires', async () => {
+    const server = await saidToAnAccountWithNoProfile()
+    server.expire()
+    fireEvent.change(await screen.findByLabelText('Username', {}, find), { target: { value: 'dana' } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    await waitFor(() => expect(field()).not.toBeNull(), find)
+    await act(async () => { await new Promise(done => setTimeout(done, 200)) })
+    expect(document.querySelectorAll('.toast')).toHaveLength(0)
+  })
+
+  it('and when another account takes the tab over without a sign-out in between', async () => {
+    const server = await saidToAnAccountWithNoProfile()
+    expect(document.querySelectorAll('.toast')).toHaveLength(1)
+    server.anotherTabSignsInAs('dana')
+    await waitFor(() => expect(server.searched.some(s => s.as === 2) || document.querySelectorAll('.toast').length === 0).toBe(true), find)
+    await waitFor(() => expect(document.querySelectorAll('.toast')).toHaveLength(0), find)
+  })
+
+  // "Connect a TV with a code" on the sign-in page leads to the pairing
+  // page, which asks for a sign-in first. A provider's sign-in comes back
+  // to the front page, so the tab keeps that the viewer was on their way
+  // there (lib/devicePairing): used once, by the next sign-in.
+  const signIn = async (name: string, shows: string) => {
+    fireEvent.change(await screen.findByLabelText('Username', {}, find), { target: { value: name } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    await waitFor(() => expect(document.querySelector('[data-identity-name]')?.textContent).toBe(shows), find)
+  }
+  it('whoever was on their way to connect a TV is taken there by the next sign-in, once', async () => {
+    const server = renderApp()
+    await screen.findByText('Parent', undefined, find)
+    server.expire()
+    await screen.findByLabelText('Username', {}, find)
+    expect(where.path).toBe('/')
+    // What a provider's link on the pairing page leaves behind for the tab.
+    rememberDeviceIntent()
+    await signIn('ronnie', 'Parent')
+    await waitFor(() => expect(where.path).toBe('/device'), find)
+    // Forgotten on use: the next sign-in on the tab goes nowhere for it.
+    expect(sessionStorage.getItem('aurora_tv_intent_v1')).toBeNull()
+  })
+
+  it('and a sign-out forgets it: the next account is not taken to pair a TV', async () => {
+    renderApp()
+    await screen.findByText('Parent', undefined, find)
+    rememberDeviceIntent()
+    fireEvent.click(document.querySelector<HTMLElement>('[data-identity-trigger]')!)
+    fireEvent.click(await screen.findByRole('button', { name: /^Sign out/ }, find))
+    await screen.findByLabelText('Username', {}, find)
+    expect(sessionStorage.getItem('aurora_tv_intent_v1')).toBeNull()
+    await signIn('dana', 'Other')
+    await act(async () => { await new Promise(done => setTimeout(done, 200)) })
+    expect(where.path).toBe('/')
   })
 
   it('and a search by description asked for before the session expired is not run again for the next account', async () => {

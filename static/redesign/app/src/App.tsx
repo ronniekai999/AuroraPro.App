@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy } from 'react'
 import { useNavigate, useLocation, useNavigationType } from 'react-router'
-import { consumeDevicePairing, rememberDevicePairing } from '@/lib/devicePairing'
+import { consumeDeviceIntent, consumeDevicePairing, forgetDeviceIntent } from '@/lib/devicePairing'
+import { undoMayRestore } from '@/lib/libraryUndo'
+import { ESCAPE_LAYERS_ATTR } from '@/lib/escapeLayers'
 import {
   fetchMe,
   getStoredUser,
@@ -13,6 +15,7 @@ import {
   addToLibrary,
   removeFromLibrary,
   libraryItemToMedia,
+  type LibraryItem,
   listMedia,
   mapMedia,
   listRecent,
@@ -38,7 +41,6 @@ import {
   rsvpPartyInvite,
   schedulePartyStart,
   type MyPartyInvite,
-  login as apiLogin,
   logout as apiLogout,
   posterURL,
   backdropURL,
@@ -54,8 +56,6 @@ import {
   deleteMedia,
   markWatched,
   clearProgress,
-  getSetupStatus,
-  register,
   type ActivityEntry,
   type ContinueWatchingItem,
   type HeroPick,
@@ -66,7 +66,6 @@ import {
   type Profile,
   type ServerMediaItem,
   type ServerStats,
-  type SetupStatus,
   type Watchlist,
   type Episode as ApiEpisode,
   type User as ApiUser,
@@ -89,7 +88,6 @@ import {
   shouldClosePlayerOnPathChange,
 } from '@/lib/partyPlayer'
 import { HeroSection } from '@/components/HeroSection'
-import { AuroraWordmark } from '@/components/AuroraWordmark'
 import { MediaRail } from '@/components/MediaRail'
 import { BugReportHost } from '@/components/BugReportHost'
 import { useBugReportEntry } from '@/hooks/useBugReportEntry'
@@ -98,6 +96,7 @@ import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { anchorFor, ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
 import { ScanProgressBar } from '@/components/ScanProgressBar'
 import { searchField } from '@/lib/searchKeys'
+import AuthView from '@/components/AuthView'
 import { hasInAppEntryBehind } from '@/lib/historyBack'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
@@ -135,8 +134,7 @@ import { useNotificationSeed } from '@/hooks/useNotificationSeed'
 import { Icon } from '@/components/Icon'
 import { ToastContainer, type Toast } from '@/components/Toast'
 import { announceStaleBundle, isStaleBundleError } from '@/lib/buildUpdate'
-import { Spinner } from '@/components/ui/spinner'
-import { oauthProviderLabel, OAUTH_SIGN_IN_PROVIDERS, type OAuthProvider } from '@/lib/oauth'
+import { oauthProviderLabel } from '@/lib/oauth'
 import { type Media } from '@/lib/types'
 import { isResumable } from '@/lib/format'
 import { currentPreferredQuality, readPrefsSnapshot, writePrefKey } from '@/lib/appearance'
@@ -314,406 +312,6 @@ function cwSubtitle(c: ContinueWatchingItem): string {
 }
 
 
-/* ─────────────────────── AUTH VIEW ─────────────────────── */
-// Maps server-side auth-failure messages to a small whitelist of
-// user-safe strings. Whitelist (not blacklist) so that an endpoint
-// which accidentally leaks stack-trace / schema detail won't surface
-// it through this UI.
-function filterAuthError(msg: string): string {
-  const lower = msg.toLowerCase()
-  const knownPatterns: Array<{ match: string; safe: string }> = [
-    { match: 'invalid credentials', safe: 'Invalid username or password.' },
-    { match: 'rate limit', safe: 'Too many attempts — please wait a moment and try again.' },
-    { match: 'rate-limited', safe: 'Too many attempts — please wait a moment and try again.' },
-    { match: 'too many requests', safe: 'Too many attempts — please wait a moment and try again.' },
-    { match: 'invite', safe: 'Invite code required or invalid.' },
-    { match: 'already exists', safe: 'That username or email is already in use.' },
-    { match: 'username', safe: 'Username is invalid or unavailable.' },
-    { match: 'email', safe: 'Email address is invalid or unavailable.' },
-    { match: 'password', safe: 'Password does not meet requirements.' },
-    { match: 'unauthorized', safe: 'Authentication required.' },
-    { match: 'forbidden', safe: 'You do not have permission to do that.' },
-    { match: 'network', safe: 'Network error — check your connection and try again.' },
-    { match: 'failed to fetch', safe: 'Network error — check your connection and try again.' },
-  ]
-  for (const p of knownPatterns) {
-    if (lower.includes(p.match)) return p.safe
-  }
-  return 'Login failed. Please try again.'
-}
-
-// AuthView — login + registration. Registration requires an invite
-// code in most deployments; the setup-status probe below relaxes that
-// for a fresh install.
-function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
-  const [isRegister, setIsRegister] = useState(false)
-  const [username, setUsername] = useState('')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [inviteCode, setInviteCode] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  // Phase 5 — setup wizard. On a fresh install (no users in DB),
-  // the first registrant becomes admin and no invite code is
-  // needed. Probe /api/auth/setup-status to detect the state and
-  // skip the invite-code field on the register form.
-  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    void getSetupStatus().then(s => { if (!cancelled) setSetupStatus(s) }).catch(() => { /* non-fatal */ })
-    return () => { cancelled = true }
-  }, [])
-  // Auto-flip to register mode on a fresh install so the first
-  // visitor knows what to do.
-  useEffect(() => {
-    if (setupStatus && !setupStatus.has_users) setIsRegister(true)
-  }, [setupStatus])
-  const inviteRequired = !!(setupStatus?.has_users)
-
-  const handleSubmit = useCallback(async (e?: React.FormEvent) => {
-    if (e) e.preventDefault()
-    setError(null)
-    if (isRegister) {
-      if (!username || !password) {
-        setError('Username and password are required.')
-        return
-      }
-      if (inviteRequired && !inviteCode) {
-        setError('Invite code is required.')
-        return
-      }
-      setSubmitting(true)
-      try {
-        const t = await register({ username, email, password, invite_code: inviteCode })
-        onLogin(t.user)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Register failed')
-      } finally { setSubmitting(false) }
-      return
-    }
-    if (!username || !password) {
-      setError('Username and password are required.')
-      return
-    }
-    setSubmitting(true)
-    try {
-      const user = await apiLogin(username, password)
-      onLogin(user)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Login failed'
-      // Bucket unknown error strings into a generic message; see
-      // filterAuthError above for the whitelist rationale.
-      setError(filterAuthError(msg))
-    } finally {
-      setSubmitting(false)
-    }
-  }, [isRegister, username, email, password, inviteCode, inviteRequired, onLogin])
-
-  return (
-    // Split layout (Aurora Stage Phase 7a): brand block BESIDE the card from lg
-    // up, stacked above it below. Previously the mark + wordmark + tagline sat
-    // in a 420px column above the form, which on a 1440x900 screen put a
-    // 14px logo and three lines of text in the middle of an otherwise empty
-    // page. The starfield and aurora wash are the backdrop the mockup's sign-in
-    // leans on, and a wide split is what lets them read.
-    <div className="min-h-screen flex items-center justify-center aurora-bg p-4 md:p-8">
-      <div className="w-full max-w-[980px] flex flex-col lg:flex-row lg:items-center gap-10 lg:gap-16">
-        {/* Brand block. lg:text-left / text-center so it reads as a heading
-            above the card on narrow screens and as a facing panel on wide. */}
-        <div className="flex-1 min-w-0 text-center lg:text-left">
-          <div className="inline-flex items-center justify-center w-[84px] h-[84px] rounded-[26px] bg-action-soft border border-line mb-5">
-            <svg width="52" height="52" viewBox="0 0 36 36" fill="none">
-              <defs>
-                <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0" stopColor="#A855F7" />
-                  <stop offset="0.5" stopColor="#7C3AED" />
-                  <stop offset="1" stopColor="#22D3EE" />
-                </linearGradient>
-              </defs>
-              <circle cx="18" cy="18" r="16" fill="url(#auroraMarkA)" />
-              <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
-            </svg>
-          </div>
-          {/* Drawn Borealis wordmark. Stays
-              an h1 — the sign-in screen's only heading, and the card's own
-              "Welcome Back" is an h2 under it. The svg's role="img" +
-              aria-label give the h1 its accessible name "Aurora Pro" (the
-              old text version needed a whitespace hack for the same result).
-              Inline svg follows the parent's text-center/lg:text-left. */}
-          <h1 className="leading-none">
-            <AuroraWordmark className="inline-block h-8 lg:h-[46px] w-auto" />
-          </h1>
-          <p className="text-white/60 text-sm lg:text-base mt-3 max-w-[38ch] mx-auto lg:mx-0">
-            Your personal media universe — every film and series you own, on any screen.
-          </p>
-          {/* Invite hint, only when the server actually requires a code. It was
-              previously discoverable only by switching to register mode and
-              finding a fourth input; saying so up front is the difference
-              between "why can't I sign up" and "I need to ask for a code". */}
-          {isRegister && inviteRequired && (
-            <p className="text-ink text-xs mt-4 inline-flex items-start gap-2 max-w-[42ch] mx-auto lg:mx-0">
-              <Icon name="key" size={13} className="mt-0.5 shrink-0" />
-              {/* "Signing up with a password needs a code", not a flat "this
-                  server is invite-only". An admin can set
-                  oauth_<provider>_bypass_invite, in which case the tiles forty
-                  pixels below this sentence work without one — and a
-                  categorical claim would send that user away. The backend
-                  exposes those flags on setup-status; reading them to say
-                  precisely which route is open is a follow-up, but the wording
-                  must not assert more than we check. */}
-              <span>Signing up with a password needs an invite code from this server&rsquo;s admin.</span>
-            </p>
-          )}
-        </div>
-
-        {/* Card */}
-        <form onSubmit={handleSubmit} className="glass-panel rounded-2xl p-7 sm:p-8 w-full lg:w-[428px] lg:flex-none">
-          <h2 className="text-white text-xl font-semibold mb-1">
-            {isRegister ? (setupStatus && !setupStatus.has_users ? 'Welcome to Aurora' : 'Create Account') : 'Welcome Back'}
-          </h2>
-          <p className="text-white/60 text-sm mb-6">
-            {isRegister
-              ? (setupStatus && !setupStatus.has_users
-                ? "You're the first user on this server — your account becomes the admin."
-                : 'Sign up to start streaming')
-              : 'Sign in to your media server'}
-          </p>
-
-          <div className="space-y-4">
-            <div>
-              <label htmlFor="login-username" className="block text-white/60 text-sm mb-2">Username</label>
-              <input
-                id="login-username"
-                type="text"
-                placeholder="Enter username"
-                className="w-full"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="username"
-                disabled={submitting}
-              />
-            </div>
-            {isRegister && (
-              <div>
-                <label htmlFor="login-email" className="block text-white/60 text-sm mb-2">Email</label>
-                <input
-                  id="login-email"
-                  type="email"
-                  placeholder="you@example.com"
-                  className="w-full"
-                  value={email}
-                  onChange={e => setEmail(e.target.value)}
-                  autoComplete="email"
-                  disabled={submitting}
-                />
-              </div>
-            )}
-            <div>
-              <label htmlFor="login-password" className="block text-white/60 text-sm mb-2">Password</label>
-              <input
-                id="login-password"
-                type="password"
-                placeholder="Enter password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full"
-                autoComplete={isRegister ? 'new-password' : 'current-password'}
-                disabled={submitting}
-              />
-            </div>
-            {isRegister && inviteRequired && (
-              <div>
-                <label htmlFor="login-invite" className="block text-white/60 text-sm mb-2">Invite Code</label>
-                <input
-                  id="login-invite"
-                  type="text"
-                  placeholder="From your server admin"
-                  className="w-full"
-                  value={inviteCode}
-                  onChange={e => setInviteCode(e.target.value.toUpperCase())}
-                  disabled={submitting}
-                />
-              </div>
-            )}
-          </div>
-
-          {error && (
-            <div role="alert" className="mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
-              {error}
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full mt-6 py-3 bg-action hover:bg-white/90 text-action-on rounded-xl font-medium transition-ui duration-200 motion-safe:hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed motion-safe:disabled:hover:scale-100 flex items-center justify-center gap-2"
-          >
-            {submitting ? (
-              <>
-                <Spinner className="size-4" />
-                {isRegister ? 'Creating account…' : 'Signing in…'}
-              </>
-            ) : isRegister ? 'Create Account' : 'Sign In'}
-          </button>
-
-          {/* OAuth sign-in row. The ?invite= query forwards an entered
-              invite code through the round-trip so register-mode
-              sign-ins claim it atomically server-side. Each button
-              renders only when its provider is enabled in setupStatus. */}
-          {/* Derived from the same list the tiles map, so the guard and the
-              grid can never disagree about whether any provider is enabled.
-              This was a five-term `||` that had to be edited in lockstep with
-              five separate render blocks. */}
-          {OAUTH_SIGN_IN_PROVIDERS.some(p => setupStatus?.[p.flag]) && (
-            <>
-              <div className="flex items-center gap-3 my-6">
-                <div className="flex-1 h-px bg-white/[0.06]" />
-                <span className="text-white/50 text-xs uppercase tracking-wider">or</span>
-                <div className="flex-1 h-px bg-white/[0.06]" />
-              </div>
-              {/* 2-up tile grid, from a list rather than five near-identical
-                  hand-written blocks. With all five providers enabled the
-                  stacked version was five full-width 44px rows plus the form
-                  above them — the card ran past the fold on a 900px screen.
-                  Two columns halves that.
-
-                  Odd counts: the last tile spans both columns so the grid never
-                  ends with a half-width orphan. That is the common case, since
-                  most servers enable one or three. */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {OAUTH_SIGN_IN_PROVIDERS
-                  .filter(p => setupStatus?.[p.flag])
-                  .map((p, i, list) => (
-                    <OAuthSignInButton
-                      key={p.provider}
-                      provider={p.provider}
-                      label={p.label}
-                      // Visible label is short so a 178px tile fits it; the
-                      // accessible name keeps the verb. Without this a tile
-                      // announced as "X, link" — which everywhere else on the
-                      // web is a close button — and the "or" divider that
-                      // supplies context does not travel to a links list.
-                      ariaLabel={`Continue with ${p.label}`}
-                      inviteCode={isRegister ? inviteCode : ''}
-                      disabled={submitting}
-                      className={list.length % 2 === 1 && i === list.length - 1 ? 'sm:col-span-2' : undefined}
-                    />
-                  ))}
-              </div>
-            </>
-          )}
-
-          <div className="mt-4 text-center">
-            <button
-              type="button"
-              onClick={() => { setIsRegister(!isRegister); setError(null) }}
-              className="text-ink-2 hover:text-ink text-sm transition-colors"
-            >
-              {isRegister ? 'Already have an account? Sign In' : "Don't have an account? Register"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  )
-}
-
-// Phase B — OAuth sign-in button. Per-provider brand icon + colors.
-// Renders as an <a> rather than a button + window.location because
-// the browser handles the cross-site redirect natively (no JS state
-// to preserve at this point; the round-trip's success page sets
-// localStorage tokens before re-entering the SPA).
-function OAuthSignInButton({ provider, label, ariaLabel, inviteCode, disabled, className }: {
-  provider: OAuthProvider
-  label: string
-  // Full-sentence accessible name; the visible `label` stays short.
-  ariaLabel?: string
-  inviteCode: string
-  disabled: boolean
-  // Grid-placement class from the caller (the odd-count tile spans both
-  // columns). Placement belongs to the grid, not to the button.
-  className?: string
-}) {
-  // Build the start URL. inviteCode is forwarded as ?invite=CODE so
-  // the server can atomically claim it pre-flight (see
-  // oauth_handlers.go Start handler).
-  const params = new URLSearchParams()
-  if (inviteCode.trim()) params.set('invite', inviteCode.trim())
-  const qs = params.toString()
-  const href = `/api/auth/oauth/${provider}/start${qs ? '?' + qs : ''}`
-
-  // Per-provider visual treatment. Discord blurple, Twitch purple,
-  // Google neutral-with-color-mark. Each button keeps the same
-  // dimensions so the row reads as a uniform stack.
-  const config = {
-    google: {
-      bg: 'bg-white hover:bg-white/95 text-gray-800',
-      icon: (
-        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
-          <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" />
-          <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z" />
-          <path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" />
-          <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" />
-        </svg>
-      ),
-    },
-    discord: {
-      bg: 'bg-[#5865F2] hover:bg-[#4752C4] text-white',
-      icon: (
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z" />
-        </svg>
-      ),
-    },
-    twitch: {
-      bg: 'bg-[#9146FF] hover:bg-[#7c2fff] text-white',
-      icon: (
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714Z" />
-        </svg>
-      ),
-    },
-    facebook: {
-      bg: 'bg-[#1877F2] hover:bg-[#1665D8] text-white',
-      icon: (
-        // Official Facebook "f" mark.
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
-        </svg>
-      ),
-    },
-    twitter: {
-      // X's brand is solid black; we add a subtle lift on hover.
-      bg: 'bg-black hover:bg-zinc-800 text-white border border-white/10',
-      icon: (
-        // The X mark — official post-rebrand glyph.
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
-        </svg>
-      ),
-    },
-  }[provider]
-
-  return (
-    <a
-      href={disabled ? undefined : href}
-      aria-label={ariaLabel}
-      // aria-disabled rather than only dropping href: without it the element
-      // loses its `link` role entirely while submitting, so the tiles vanish
-      // from the accessibility tree instead of announcing as unavailable.
-      aria-disabled={disabled || undefined}
-      onClick={(e) => {
-        if (disabled) e.preventDefault()
-        else rememberDevicePairing(window.location.pathname, window.location.search)
-      }}
-      className={`w-full flex items-center justify-center gap-2.5 py-2.5 px-3 rounded-xl font-medium text-sm transition-ui duration-200 motion-safe:hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''} ${className ?? ''}`}
-    >
-      {config.icon}
-      {label}
-    </a>
-  )
-}
-
 // Views that render their own edge-to-edge hero and therefore opt out of
 // the .stage-page gutter, padding their inner sections with .stage-gutter.
 // Anything not listed here gets the standard page pad from App's wrapper.
@@ -724,6 +322,7 @@ const FULL_BLEED_VIEWS = new Set(['home', 'movies', 'shows', 'detail'])
 const NO_MEDIA: Media[] = []
 const NO_CONTINUE: ContinueWatchingItem[] = []
 const NO_RECENT: string[] = []
+const NO_TOASTS: Toast[] = []
 
 /* ─────────────────────── HOME VIEW ─────────────────────── */
 // HomeView. Rails are cached at App level so navigating away-and-back
@@ -1941,9 +1540,10 @@ export default function App() {
   // measured height of the sticky chrome stack as --chrome-h so every
   // thing placed under it (the drawers, the sticky browse and admin
   // toolbars, the identity menu, the page's scroll padding) anchors to
-  // reality instead of to the nav's nominal 64px. The stack grows by ~37px per actively-scanning library
-  // because ScanProgressBar renders in flow above the nav, and an admin
-  // mid-scan was the case where all five hardcoded offsets broke.
+  // reality instead of to the nav's nominal 64px. The stack grows by one
+  // row (40px, 44 on a touch screen) per library being scanned, because
+  // ScanProgressBar renders in flow under the nav, and an admin mid-scan
+  // was the case where all five hardcoded offsets broke.
   // Which surface the player is presenting. 'theater' is the player in the
   // window: the picture edge to edge, or, in the boxed layout on a wide
   // window, set in beside the party panel. It is the only one that changes
@@ -2110,11 +1710,33 @@ export default function App() {
   // to, or the same user signing in again, was taken as answered for while
   // `library` held the snapshot.
   const [libraryServerFor, setLibraryServerFor] = useState<string | null>(null)
-  // In-flight optimistic library toggles, by media id → 'add' | 'remove'.
-  // The reconcile below re-applies these on top of the server snapshot so a
-  // save/unsave that completes DURING the fetch isn't clobbered by the
-  // (older) snapshot. Cleared when each toggle's request settles.
-  const pendingLibOpsRef = useRef<Map<number, 'add' | 'remove'>>(new Map())
+  // In-flight optimistic library toggles, by media id → the latest write's
+  // mark ('add' | 'remove'). The reconcile below re-applies these on top of
+  // the server snapshot so a save/unsave that completes DURING the fetch
+  // isn't clobbered by the (older) snapshot. Each write has a mark object of
+  // its own and clears only that one when it settles: by value, a removal
+  // answered while a later removal of the same title waited cleared the
+  // later one's mark.
+  const pendingLibOpsRef = useRef<Map<number, { op: 'add' | 'remove' }>>(new Map())
+  // The server's list of a profile's library on top of what is on screen:
+  // cached cards kept, in-flight writes re-applied.
+  const mergeServerLibrary = useCallback((prev: Media[], items: LibraryItem[]) => {
+    const cachedById = new Map(prev.map(m => [m.id, m]))
+    const pending = pendingLibOpsRef.current
+    // Server set, minus any item an in-flight unsave is removing.
+    const merged = items
+      .filter(it => pending.get(it.media_item_id)?.op !== 'remove')
+      .map(it => cachedById.get(it.media_item_id) ?? libraryItemToMedia(it))
+    // Re-add any in-flight save the snapshot predates.
+    const have = new Set(merged.map(m => m.id))
+    for (const [id, mark] of pending) {
+      if (mark.op === 'add' && !have.has(id)) {
+        const cached = cachedById.get(id)
+        if (cached) merged.push(cached)
+      }
+    }
+    return merged
+  }, [])
   // Reconcile the local cache against the server's authoritative library for
   // the active profile (login, profile switch, refresh). Rich cached
   // snapshots win per id so posters/ratings survive; ids the server has that
@@ -2129,23 +1751,7 @@ export default function App() {
         if (cancelled) return
         setLibraryLoaded(true)
         setLibraryServerFor(`aurora_my_library:${user.id}:${activeProfileId}`)
-        setLibrary(prev => {
-          const cachedById = new Map(prev.map(m => [m.id, m]))
-          const pending = pendingLibOpsRef.current
-          // Server set, minus any item an in-flight unsave is removing.
-          const merged = items
-            .filter(it => pending.get(it.media_item_id) !== 'remove')
-            .map(it => cachedById.get(it.media_item_id) ?? libraryItemToMedia(it))
-          // Re-add any in-flight save the snapshot predates.
-          const have = new Set(merged.map(m => m.id))
-          for (const [id, op] of pending) {
-            if (op === 'add' && !have.has(id)) {
-              const cached = cachedById.get(id)
-              if (cached) merged.push(cached)
-            }
-          }
-          return merged
-        })
+        setLibrary(prev => mergeServerLibrary(prev, items))
       })
       .catch(() => {
         // offline / transient — keep the localStorage cache, and stop
@@ -2153,7 +1759,7 @@ export default function App() {
         if (!cancelled) setLibraryLoaded(true)
       })
     return () => { cancelled = true; ac.abort() }
-  }, [user, activeProfileId])
+  }, [user, activeProfileId, mergeServerLibrary])
   // Memoized ID set so MediaRail / BrowseView / LibraryView can do
   // O(1) membership checks without re-creating the Set on every
   // render. Rebuilt only when the library array reference changes.
@@ -2164,9 +1770,21 @@ export default function App() {
   // under fast double-clicks and duplicate React keys corrupt the
   // toast list.
   const toastIdCounter = useRef(0)
+  // The profile each toast was said to, by its id (every toast takes one
+  // here). A switch drops the toasts said to the previous profile and keeps
+  // those said to the new one: a toast the switch itself causes (the bug
+  // report's "closed because this tab is now on another profile") is raised
+  // by an effect of the commit that names the new profile, which runs
+  // before the switch's reset does. The profile is mirrored in a layout
+  // effect, so it is the new one by then.
+  const actingProfileRef = useRef<number | null>(activeProfileId)
+  useLayoutEffect(() => { actingProfileRef.current = activeProfileId }, [activeProfileId])
+  const toastOwnersRef = useRef(new Map<string, number | null>())
   const nextToastId = useCallback(() => {
     toastIdCounter.current += 1
-    return `t${toastIdCounter.current}`
+    const id = `t${toastIdCounter.current}`
+    toastOwnersRef.current.set(id, actingProfileRef.current)
+    return id
   }, [])
 
   // Join a party from a bell row / calendar chip — in-app, not a new tab.
@@ -2452,13 +2070,21 @@ export default function App() {
   const [homeLibraryCount, setHomeLibraryCount] = useState<{ key: string; total: number } | null>(null)
 
   const navigate = useNavigate()
+  // Someone signed in: a TV's code carried through a provider's round trip
+  // goes back into the address, and a viewer who had followed "Connect a TV
+  // with a code" is taken to that page (lib/devicePairing). Both are read
+  // once and forgotten.
   useEffect(() => {
     if (!user) return
     const code = consumeDevicePairing()
+    const wanted = consumeDeviceIntent()
     if (code) navigate(`/device?code=${encodeURIComponent(code)}`, { replace: true })
+    else if (wanted) navigate('/device', { replace: true })
   }, [user, navigate])
   const location = useLocation()
   const previousPathnameRef = useRef(location.pathname)
+  // The address the effect below last acted on (null before its first run).
+  const syncedPathnameRef = useRef<string | null>(null)
 
   // QA BUG-001 — sync URL → view on mount and on every pathname
   // change (browser back/forward, bookmarks, direct loads). Without
@@ -2467,6 +2093,14 @@ export default function App() {
   // when in-app handleNavigate triggers a pathname change, this
   // effect just confirms the same view we already set.
   useEffect(() => {
+    // Only a new address is acted on. The effect also runs when closePlayer
+    // changes, which it does during startup; a run then, between a press
+    // that had set the view ahead of its address (the first key typed into
+    // the bar sets 'search' and then navigates) and that address's commit,
+    // read the old address as a Back out of the search page: the view went
+    // back and the words just typed were cleared.
+    if (syncedPathnameRef.current === location.pathname) return
+    syncedPathnameRef.current = location.pathname
     const previousPathname = previousPathnameRef.current
     previousPathnameRef.current = location.pathname
     const target = pathToView(location.pathname)
@@ -2579,12 +2213,15 @@ export default function App() {
     }
   }, [user, navScope, location.pathname, navigate])
 
-  const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
+  // Returns the toast's id, for a caller that may have to take it back.
+  const addToast = useCallback((message: string, type: Toast['type'] = 'info', action?: Toast['action']) => {
     const id = nextToastId()
-    setToasts(prev => [...prev, { id, message, type }])
+    setToasts(prev => [...prev, { id, message, type, action }])
+    return id
   }, [nextToastId])
 
   const removeToast = useCallback((id: string) => {
+    toastOwnersRef.current.delete(id)
     setToasts(prev => prev.filter(t => t.id !== id))
   }, [])
 
@@ -2972,6 +2609,16 @@ export default function App() {
     setSearchDescribe({ query, n, owner: searchOwner })
     showSearchPage()
   }, [searchOwner, noteSearch, showSearchPage])
+  // The scan bar's "Open Libraries": the admin page, on its Libraries
+  // section. Counted, so pressing it again while the page is on another
+  // section opens Libraries again; leaving the admin page forgets it, so the
+  // page opens on its overview the next time it is reached any other way.
+  const [adminAsk, setAdminAsk] = useState(0)
+  const openAdminLibraries = useCallback(() => {
+    setAdminAsk(n => n + 1)
+    if (view !== 'admin') handleNavigate('admin')
+  }, [view, handleNavigate])
+  useEffect(() => { if (view !== 'admin') setAdminAsk(0) }, [view])
   // The field's clear button, and the first Escape: the words go, the page
   // stays (it lists the recent searches), and the cursor is in the field.
   const clearSearch = useCallback(() => {
@@ -3237,6 +2884,83 @@ export default function App() {
     }
   }, [view, selectedMedia?.id])
 
+  // A title's library writes go to the server one at a time, in the order
+  // they were made. An Undo pressed while its removal was still out sent a
+  // POST that nothing ordered after the DELETE, and a save and a removal
+  // made in quick succession by hand could pass each other the same way.
+  // Both routes are idempotent, so every write is sent, whatever became of
+  // the one before it, and the last one sent is the last one made. A write
+  // whose turn comes after a profile switch is not sent: the session no
+  // longer acts as the profile it names, and the server would refuse it.
+  const libraryWritesRef = useRef<Map<string, { tail: Promise<unknown>; made: number; failed: boolean }>>(new Map())
+  // One change to a profile's My Library: made on screen at once, then sent.
+  // `refused(last)`: the server did not take it; `last` says whether it was
+  // still the latest change asked for that title.
+  const changeLibrary = useCallback((m: Media, op: 'add' | 'remove', profileId: number, refused: (last: boolean) => void) => {
+    // All membership mutations dedupe inside the functional updater so a
+    // rapid double-click can't insert the same id twice (duplicate React
+    // keys) or drop it.
+    const addLocal = (prev: Media[]) => (prev.some(i => i.id === m.id) ? prev : [...prev, m])
+    const removeLocal = (prev: Media[]) => prev.filter(i => i.id !== m.id)
+    setLibrary(op === 'add' ? addLocal : removeLocal)
+    const mark = { op }
+    pendingLibOpsRef.current.set(m.id, mark)
+    const settle = () => { if (pendingLibOpsRef.current.get(m.id) === mark) pendingLibOpsRef.current.delete(m.id) }
+    // The list this change was made on. A switch before the answer swaps in
+    // another profile's, which nothing here may edit.
+    const owner = libraryOwnerRef.current
+    const key = `${profileId}:${m.id}`
+    const queue = libraryWritesRef.current.get(key) ?? { tail: Promise.resolve(), made: 0, failed: false }
+    libraryWritesRef.current.set(key, queue)
+    const n = ++queue.made
+    const send = () => (actingProfileRef.current !== profileId
+      ? Promise.reject(new Error('the session acts as another profile'))
+      : op === 'add' ? addToLibrary(profileId, m.id) : removeFromLibrary(profileId, m.id))
+    const sent = queue.tail.then(send, send)
+    queue.tail = sent
+    const last = () => queue.made === n
+    sent.then(settle, () => {
+      settle()
+      queue.failed = true
+      // Another list is on screen (a switch, or a sign-out, since): it is
+      // not this change's to edit, and what became of the change is not
+      // said to whoever is acting now, by a title's name.
+      if (libraryOwnerRef.current !== owner) return
+      // The latest change is taken back on screen; an earlier one is left
+      // to the read below, since what came after it is on screen too.
+      if (last()) setLibrary(op === 'add' ? removeLocal : addLocal)
+      refused(last())
+    }).finally(() => {
+      if (!last()) return
+      libraryWritesRef.current.delete(key)
+      // A queue in which anything failed ends with the server's own list:
+      // working out the title's state from the answers in order is what
+      // left the screen saying saved for a title the server did not have.
+      if (!queue.failed || libraryOwnerRef.current !== owner) return
+      getLibrary(profileId).then(items => {
+        if (libraryOwnerRef.current === owner) setLibrary(prev => mergeServerLibrary(prev, items))
+      }, () => {})
+    })
+  }, [mergeServerLibrary])
+  // The toast's Undo puts a removed title back, and does only that. It was
+  // the toggle called again, which flips whatever the list says by then: a
+  // removal that had failed was sent a second time, and a title its viewer
+  // had saved again by hand was removed, silently. Here a title that is in
+  // the list is left alone; one that is not goes back, for the profile it
+  // was removed for and only while that profile's list is still the one on
+  // screen (`owner`; lib/libraryUndo), with its write behind the removal's
+  // (changeLibrary's queue).
+  const restoreToLib = useCallback((m: Media, profileId: number, owner: string | null) => {
+    if (!undoMayRestore(libraryOwnerRef.current, owner, library, m.id)) return
+    changeLibrary(m, 'add', profileId, (last) => {
+      if (last) addToast(`Couldn't put "${m.title}" back — try again`, 'error')
+    })
+  }, [library, changeLibrary, addToast])
+  // Undo is pressed later, when `library` has moved on: it calls the
+  // function of that render, not the one that made the toast.
+  const restoreToLibRef = useRef(restoreToLib)
+  // A layout effect, for the reason buildCardMenuRef's is one.
+  useLayoutEffect(() => { restoreToLibRef.current = restoreToLib }, [restoreToLib])
   const handleToggleLib = useCallback((m: Media) => {
     // Optimistic: flip local state now, persist to the server, roll back on
     // failure. Needs a signed-in profile — the library is per-profile.
@@ -3244,33 +2968,28 @@ export default function App() {
       addToast('Pick a profile to save titles', 'info')
       return
     }
+    // The render-closure read only decides intent (changeLibrary dedupes).
     const wasSaved = library.some(i => i.id === m.id)
-    // All membership mutations dedupe inside the functional updater so a
-    // rapid double-click can't insert the same id twice (duplicate React
-    // keys) or drop it — the render-closure read above only decides intent.
-    const addLocal = (prev: Media[]) => (prev.some(i => i.id === m.id) ? prev : [...prev, m])
-    const removeLocal = (prev: Media[]) => prev.filter(i => i.id !== m.id)
-    setLibrary(wasSaved ? removeLocal : addLocal)
-    addToast(
-      wasSaved ? `Removed "${m.title}" from library` : `Added "${m.title}" to library`,
-      wasSaved ? 'info' : 'success',
-    )
-    // Record the in-flight op so a concurrent reconcile preserves it.
-    pendingLibOpsRef.current.set(m.id, wasSaved ? 'remove' : 'add')
-    const settle = () => pendingLibOpsRef.current.delete(m.id)
-    // The list this change was made on. A switch before the answer swaps in
-    // another profile's, which a rollback must not edit.
+    const profileId = activeProfileId
     const owner = libraryOwnerRef.current
-    const req = wasSaved
-      ? removeFromLibrary(activeProfileId, m.id)
-      : addToLibrary(activeProfileId, m.id)
-    req.then(settle).catch(() => {
-      settle()
-      // Roll back the optimistic change and tell the user it didn't stick.
-      if (libraryOwnerRef.current === owner) setLibrary(wasSaved ? addLocal : removeLocal)
-      addToast(`Couldn't ${wasSaved ? 'remove' : 'save'} "${m.title}" — try again`, 'error')
+    // A removal can be taken back from its toast (once: a toast takes its
+    // action once), for whoever removed the wrong one.
+    let undone = false
+    const said = addToast(
+      wasSaved ? `Removed ${m.title} from My Library.` : `Saved ${m.title} to My Library.`,
+      wasSaved ? 'info' : 'success',
+      wasSaved ? { label: 'Undo', run: () => { undone = true; restoreToLibRef.current(m, profileId, owner) } } : undefined,
+    )
+    changeLibrary(m, wasSaved ? 'remove' : 'add', profileId, (last) => {
+      // It was not done: the toast that said it was goes, and with it the
+      // Undo of a removal that did not happen.
+      removeToast(said)
+      // Said only of the last thing its viewer asked for that title: after
+      // an Undo or a later change by hand, a "couldn't remove, try again"
+      // would ask them to undo what they asked for since.
+      if (last && !undone) addToast(`Couldn't ${wasSaved ? 'remove' : 'save'} "${m.title}" — try again`, 'error')
     })
-  }, [library, activeProfileId, addToast])
+  }, [library, activeProfileId, addToast, removeToast, changeLibrary])
 
   const handleBack = useCallback(() => {
     // In-app opens pushed /title/:id onto the history stack, so real
@@ -3316,9 +3035,12 @@ export default function App() {
         // The add-to-list sheet had no Escape of its own, so the key went
         // to the page behind it: on the search page it cleared the words,
         // or went Back, with the sheet still up. Escape closes the sheet,
-        // and before anything else: it is what is on top (a player
-        // minimized under it used to be closed first, with the sheet left
-        // up).
+        // and before any player: the sheet is painted above the player
+        // (z-[70]; the player in the window is z-[60], a sibling, and a
+        // minimized one is out of the paint order), so it is what is on top
+        // also when a player has opened under it (a party's, by itself).
+        // A dialog above the player owns its Escape (lib/escapeLayers).
+        // Native full screen is the browser's own Escape.
         if (addToListMedia) closeAddToList()
         else if ((playerTarget || playerLoading) && !playerRemoteActiveRef.current) closePlayer(true)
         else if (view === 'search') {
@@ -3338,7 +3060,27 @@ export default function App() {
         // What is typed there stays: on a title opened from a search, those
         // are the words Back returns to.
         else if (searchInputRef.current && document.activeElement === searchInputRef.current) searchInputRef.current.blur()
-        else if (view === 'detail') handleBack()
+        // A title page goes Back, but not from behind something over it: the
+        // onboarding flow, a card's menu, a recap or any other dialog. Their
+        // Escape is theirs (or, for the flow, nothing), and went on to send
+        // the page they cover Back. The trailer, the player's menus and the
+        // party's leave question take the key before this handler sees it
+        // (lib/escapeLayers). A player still up here is casting (any other
+        // was closed above). In the window or full screen its surface is a
+        // modal dialog that makes the page inert, which pageCovered reads
+        // as covered; under it Escape stays the page's, as before, unless
+        // something else is over the page too (nothing in the page can be
+        // opened then: it is inert). Minimised, the cast covers nothing, and
+        // the page is asked like any other: a Radix dialog (a recap) sets no
+        // aria-modal and is seen only by the page being hidden.
+        else if (view === 'detail') {
+          const castOver = !!playerTarget && (playerSurface === 'theater' || playerSurface === 'fullscreen')
+          const covered = castOver
+            ? !!(contextMenu || profilesGateOpen || onboardingOpen)
+              || document.querySelector(`[aria-modal="true"]:not([${ESCAPE_LAYERS_ATTR}])`) !== null
+            : pageCovered()
+          if (!covered) handleBack()
+        }
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         // Ctrl or Cmd K puts the focus in the search field (it used to
@@ -3381,7 +3123,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, playerLoading, searchQuery, view, handleBack, contextMenu, addToListMedia, closeAddToList, user, profilesGateOpen, pinTarget, closePlayer, clearSearch, handleNavigate])
+  }, [playerTarget, playerLoading, playerSurface, searchQuery, view, handleBack, contextMenu, addToListMedia, closeAddToList, user, profilesGateOpen, pinTarget, onboardingOpen, closePlayer, clearSearch, handleNavigate])
 
   // Session expiry. /api/auth/me is validated once at mount (below), so a
   // long-lived tab whose session expired mid-session never re-checked: it kept
@@ -3771,6 +3513,8 @@ export default function App() {
     setSearchQuery('')
     setSearchDescribe(null)
     forgetDescribedAnswer()
+    // "Connect a TV with a code" is the intent of whoever followed it.
+    forgetDeviceIntent()
     setLibraryServerFor(null)
     setHomeRails(undefined)
     setHomeHero(null)
@@ -5775,7 +5519,11 @@ export default function App() {
     setContextMenu({ ...anchorFor(e), items, title: m.title, reason: m.reason, opener })
   }
   const buildCardMenuRef = useRef(buildCardMenu)
-  useEffect(() => { buildCardMenuRef.current = buildCardMenu })
+  // Mirrored in a layout effect: in a passive one, a press in the frame a
+  // card was first drawn in built the menu of the render before, whose list
+  // did not have the title yet (My Library's card offered "Add to My
+  // Library").
+  useLayoutEffect(() => { buildCardMenuRef.current = buildCardMenu })
   const openCardContextMenu = useCallback((e: React.MouseEvent, m: Media, own?: ContinueWatchingItem) => buildCardMenuRef.current(e, m, own), [])
   // A profile switch closes the menu: it holds the previous profile's Resume
   // record and closures over its id (Add, the thumbs, Mark as watched), so a
@@ -6105,7 +5853,30 @@ export default function App() {
     // commit's effects.
     continueItemsRef.current = []
     if (viewRef.current === 'detail') setSelectedMedia(null)
+    // What was being said to the previous profile (see the toasts' effect),
+    // and nothing said to the new one since (toastOwnersRef).
+    setToasts(t => {
+      const kept = t.filter(x => toastOwnersRef.current.get(x.id) === actingProfileRef.current)
+      for (const x of t) if (!kept.includes(x)) toastOwnersRef.current.delete(x.id)
+      return kept.length === t.length ? t : kept
+    })
   }, [forgetHeroLeadWait])
+  // A toast is said to whoever is acting when it is raised, and goes when
+  // they do: when nobody is signed in, when the account changes, and on a
+  // profile switch (above). Toasts were kept through all three, and a
+  // toast's timer starts again when the stack is drawn again, so the next
+  // person to sign in on the tab was shown "Removed <title> from My
+  // Library. Undo" for seven seconds, and after a switch it stayed up under
+  // the new profile's name. (Its Undo did nothing for them; the title's
+  // name was shown.) The startup binding arriving is not a switch, and
+  // drops nothing.
+  const toastsUserRef = useRef<number | false | null>(null)
+  useEffect(() => {
+    const now = user ? user.id : user
+    const before = toastsUserRef.current
+    toastsUserRef.current = now
+    if (now === false || (typeof before === 'number' && before !== now)) setToasts(t => (t.length ? [] : t))
+  }, [user])
   useOnProfileChange(activeProfileId, resetForProfileChange)
   // Whether the startup load had settled before this render; written after
   // the effect above has read it, so on the render that settles it and sets
@@ -6701,16 +6472,11 @@ export default function App() {
           `inert={x || undefined}` rather than `inert={x}` so the attribute is
           absent, not `inert="false"` — the HTML attribute is presence-based. */}
       <main className={`min-h-screen stage-shell ${theaterActive ? 'stage-dim-app' : ''}`} inert={theaterActive || onboardingOpen || undefined}>
-        {/* Sticky stack: scan bar + nav in one sticky container so the
+        {/* Sticky stack: nav + scan bar in one sticky container so the
             scan bar contributes its height to flow and both pin together
-            on scroll. The bar stays ABOVE the nav, as in the mockup. */}
+            on scroll. The bar is UNDER the nav, as in the mockup (it was
+            above it). */}
         <div ref={chromeRef} className="sticky top-0 z-50">
-          {/* Global scan progress bar (admin-only). Returns null when
-              no scan is active. NOTE: it renders IN FLOW above the nav, so
-              it changes the height of this whole sticky stack — which is
-              why chromeRef publishes the measured height as --chrome-h
-              (see the effect above) for everything anchored below it. */}
-          <ScanProgressBar isAdmin={adminUI} onScanComplete={notifyCatalogChanged} />
           <TopNav
             user={user}
             adminUI={adminUI}
@@ -6755,6 +6521,12 @@ export default function App() {
             onReportBug={reportsOn ? bugReport.openHere : undefined}
             onSignOut={() => { void handleLogout() }}
           />
+          {/* The scan bar (admin-only). Returns null when no scan is
+              active. NOTE: it renders IN FLOW under the nav, so it changes
+              the height of this whole sticky stack — which is why chromeRef
+              publishes the measured height as --chrome-h (see the effect
+              above) for everything anchored below it. */}
+          <ScanProgressBar isAdmin={adminUI} onScanComplete={notifyCatalogChanged} onOpenLibraries={openAdminLibraries} />
         </div>{/* /sticky stack */}
 
         {/* Page Content. The global `p-8` is gone (Aurora Stage M2): pages
@@ -6995,6 +6767,9 @@ export default function App() {
                 // The Continue Watching grid's Play resumes its own record.
                 onPlayContinue={handlePlayContinue}
                 profileName={profileSwitchPending ? undefined : profiles.find(p => p.id === activeProfileId)?.name}
+                // An empty list offers what to do next, in place.
+                onFind={findInLibrary}
+                onBrowse={handleNavigate}
               />
             </ViewSuspense></HiddenPage>
           )}
@@ -7357,7 +7132,10 @@ export default function App() {
               as an unrestricted profile, as the server's admin routes do. */}
           {view === 'admin' && adminUI && (
             <ViewSuspense fallback={<ViewFallback />}>
-              <AdminView currentAdminId={user.id} catalogVersion={catalogVersion} />
+              {/* sectionAsk: the scan bar's "Open Libraries" opens the page
+                  on that section, also when the page is already up on
+                  another, and without mounting it again. */}
+              <AdminView currentAdminId={user.id} catalogVersion={catalogVersion} initialSection={adminAsk > 0 ? 'libraries' : undefined} sectionAsk={adminAsk} />
             </ViewSuspense>
           )}
           {/* An admin whose session's profile is not known yet (startup), or
@@ -7781,7 +7559,9 @@ export default function App() {
       )}
 
       {/* Toast */}
-      <ToastContainer toasts={toasts} onRemove={removeToast} />
+      {/* None on a switch's first commit: they were said to the previous
+          profile, and are dropped by the reset that follows that commit. */}
+      <ToastContainer toasts={profileSwitchPending ? NO_TOASTS : toasts} onRemove={removeToast} />
     </div>
   )
 }
