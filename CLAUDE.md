@@ -2146,7 +2146,10 @@ Code: `lib/pageCapture.ts` (html-to-image), called by
 `components/BugReportForm.tsx`. Pinned by `scripts/verify-bug-capture.mjs`
 (in `audit:checks`: the built app under the production CSP, captures made
 through the form compared pixel by pixel with screenshots, mutation-tested)
-and `lib/pageCapture.test.ts`.
+and `lib/pageCapture.test.ts`. The check runs the browser with font hinting
+off (its own fontconfig file) and leans on headless's hidden scrollbars: a
+visible scrollbar is drawn in the screenshot and not in the copy, and
+hinting changes system-font text in the copy (see the known gaps).
 
 - The copy is laid out again inside an SVG image, which loads nothing. The
   families the document has loaded go in as data: URLs read with `fetch`
@@ -2187,7 +2190,18 @@ and `lib/pageCapture.test.ts`.
   before); an inner scroll box is drawn at its start (a rail scrolled
   sideways shows its first cards); a backdrop blur picks up a faint tint at
   its edges; fonts are matched by family only; checked in Chromium only,
-  not Safari or Firefox. The check's font coverage leans on the Bricolage
+  not Safari or Firefox. Text in a system font (the system's monospace:
+  the error screen's "What the app saw" block, party and device codes, some
+  admin text; fallback glyphs such as CJK or symbols outside the embedded
+  latin subsets) cannot be embedded, and on a Linux machine that hints its
+  fonts, at a device scale of 2, the copy (laid out at 1 and scaled up)
+  gives it other glyph widths than the screen: on CI's runner the error
+  screen's monospace lines ended early, 1.7% of that capture's pixels
+  differing. Every box keeps its size, so a line that came out wider could
+  wrap and be drawn over the text under it (not seen in today's app). The
+  check turns hinting off and does not see this. Laying the copy out at the
+  device scale (CSS `zoom`) was tried and made the embedded fonts' text
+  differ instead. The check's font coverage leans on the Bricolage
   headings: where Inter is installed on the machine, a copy without
   embedded fonts still draws Inter text right.
 

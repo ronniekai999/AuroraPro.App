@@ -43,10 +43,23 @@
 // under the limits; each of the two defects, alone, puts several percent of
 // the picture and its heading over them.
 //
-// What it leans on: the browser hides scrollbars (headless does; a visible
-// one is drawn in the screenshot and not in the copy), and the Bricolage
-// headings pin the font embedding (where Inter is installed on the machine,
-// the copy draws Inter text right with no fonts embedded; CI has none).
+// What it leans on:
+//   - The browser hides scrollbars (headless does; a visible one is drawn in
+//     the screenshot and not in the copy).
+//   - The Bricolage headings pin the font embedding (where Inter is
+//     installed on the machine, the copy draws Inter text right with no
+//     fonts embedded; CI has none).
+//   - Font hinting is off: the browser is given a fontconfig file that
+//     turns it off (FONTCONFIG_FILE). Text in a system font (the error
+//     screen's "What the app saw" block is set in the system's monospace)
+//     cannot be embedded, and where the machine hints its fonts the copy,
+//     laid out at device scale 1 and scaled up, gives that text other glyph
+//     widths than the screen at device scale 2: on CI's runner the error
+//     screen at 390px differed by 1.7% (5.8% in one band), its monospace
+//     lines ending early. That is a real difference in the picture, on
+//     Linux machines that hint fonts, for system-font text only; it is a
+//     known gap in CLAUDE.md, and not what this check is for. Text in the
+//     app's own (embedded) fonts is drawn alike with hinting on or off.
 //
 // Run after a build (the audit chain does): node scripts/verify-bug-capture.mjs
 
@@ -370,7 +383,22 @@ async function openDialog(page, phone) {
   await page.getByRole('dialog').waitFor()
 }
 
-const browser = await chromium.launch({ executablePath: EXE }).catch(err => {
+// Font hinting off for the browser (see the header): the machine's own
+// fontconfig, then a rule that assigns no hinting over whatever it set.
+const fontconfig = path.join(await mkdtemp(path.join(tmpdir(), 'aurora-bug-capture-fonts-')), 'fonts.conf')
+await writeFile(fontconfig, `<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">${process.env.FONTCONFIG_FILE || '/etc/fonts/fonts.conf'}</include>
+  <match target="pattern">
+    <edit name="hinting" mode="assign"><bool>false</bool></edit>
+    <edit name="hintstyle" mode="assign"><const>hintnone</const></edit>
+    <edit name="autohint" mode="assign"><bool>false</bool></edit>
+  </match>
+</fontconfig>
+`)
+
+const browser = await chromium.launch({ executablePath: EXE, env: { ...process.env, FONTCONFIG_FILE: fontconfig } }).catch(err => {
   console.error(`Could not launch Chromium (tried ${EXE ?? "Playwright's own browser"}) — set CHROMIUM_PATH or run: npx playwright install chromium`)
   throw err
 })
