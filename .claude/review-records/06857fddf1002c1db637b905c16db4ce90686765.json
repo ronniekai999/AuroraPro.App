@@ -1,0 +1,10 @@
+{
+  "sha": "06857fddf1002c1db637b905c16db4ce90686765",
+  "verdict": "lows-only",
+  "summary": "Failure words across the main app, no native confirm or alert outside Admin (guard test), title page leaves on a 404, My Library owner-check pins. Review 33 fix-first (2 mediums: a confirmation outliving its session; guard scanner blind to code after comment-like text), fixed in 06857fd; re-check lows-only, 5 lows recorded for a follow-up",
+  "reviewer": "fresh-context-agent-a8196c85",
+  "findings": "5",
+  "diff_digest": "de3dc4cf4b90407c2ab263817c14a3772a4331ebd4a1e77418d60a3faae412e9",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T09:28:09Z"
+}
