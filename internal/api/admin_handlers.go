@@ -87,7 +87,21 @@ type AdminHandler struct {
 	// would capture a transient mid-restore state. TryLock returns
 	// false rather than blocking so the second admin gets a clean
 	// 409 Conflict instead of an inexplicable hang.
+	//
+	// A restore holds it from before its upload until the restore itself
+	// ends, which can be after its request has (see admin_restore.go): the
+	// goroutine that runs it releases it.
 	backupRestoreMu sync.Mutex
+
+	// restores records the latest restore for the two status reads
+	// (admin_restore.go).
+	restores restoreTracker
+	// rootCtx is the server-lifecycle context a restore runs under once its
+	// upload is done (SetRootContext). Nil in tests: Background.
+	rootCtx context.Context
+	// restoreExec runs psql and pg_restore for a restore. Nil in production
+	// (execRestoreCommand); tests put a fake here.
+	restoreExec restoreCommand
 }
 
 // SetDatabaseURL wires the conninfo string used by the pg_dump-based

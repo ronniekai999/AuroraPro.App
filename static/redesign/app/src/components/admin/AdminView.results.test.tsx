@@ -31,6 +31,7 @@ vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof 
 
 import AdminView from './AdminView'
 import { resetRestoreOutcomeForTest } from './restoreOutcome'
+import { resetRestoreRecordForTest } from '@/hooks/useRestoreRecord'
 
 type User = ReturnType<typeof userEvent.setup>
 const LIB: Library = { id: 1, name: 'Movies', type: 'movie', paths: ['/media/movies'], scan_interval_minutes: 0, owner_id: 1, created_at: '', updated_at: '' }
@@ -41,6 +42,9 @@ let fetchAnswer: (url: string) => Promise<Response>
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
 beforeEach(() => {
+  // A restore's ticket is kept in localStorage, which outlives a test.
+  localStorage.clear()
+  resetRestoreRecordForTest()
   // A restore's outcome outlives the page by design: each test starts clean.
   resetRestoreOutcomeForTest()
   fetchAnswer = async () => json(503, { error: 'unavailable' })
@@ -463,7 +467,7 @@ describe('a restore’s other answers', () => {
     await user.click(within(d).getByRole('button', { name: 'Restore database' }))
     return alertLines(await within(d).findByRole('alert'))[0]
   }
-  const LOST = 'The connection to the server failed during the restore, so it is not known how far it got: the database may be as it was, restored, or empty. Check the server before going on.'
+  const LOST = 'The connection to the server was lost during the restore. If the upload had finished, the restore goes on on the server without this page, and how it ends is shown here once Aurora can be asked: the database may be as it was, restored, or empty until then.'
   it.each([
     ['no answer', () => Promise.reject(new TypeError('Failed to fetch')), LOST],
     ['a proxy that gave up (504)', async () => json(504, { error: 'gateway timeout' }), LOST],

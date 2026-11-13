@@ -27,6 +27,7 @@ vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof 
 
 import AdminView from './AdminView'
 import { resetRestoreOutcomeForTest } from './restoreOutcome'
+import { resetRestoreRecordForTest } from '@/hooks/useRestoreRecord'
 
 type User = ReturnType<typeof userEvent.setup>
 const LIB: Library = { id: 1, name: 'Movies', type: 'movie', paths: ['/m'], scan_interval_minutes: 0, owner_id: 1, created_at: '', updated_at: '' }
@@ -43,6 +44,9 @@ function deferred<T>() {
 const never = () => new Promise<never>(() => {})
 
 beforeEach(() => {
+  // A restore's ticket is kept in localStorage, which outlives a test.
+  localStorage.clear()
+  resetRestoreRecordForTest()
   // A restore's outcome outlives the page by design: each test starts clean.
   resetRestoreOutcomeForTest()
   vi.stubGlobal('fetch', async () => new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } }))

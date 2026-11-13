@@ -29,6 +29,7 @@ vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof 
 
 import AdminView from './AdminView'
 import { resetRestoreOutcomeForTest } from './restoreOutcome'
+import { resetRestoreRecordForTest } from '@/hooks/useRestoreRecord'
 
 type User = ReturnType<typeof userEvent.setup>
 
@@ -52,6 +53,9 @@ const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
 beforeEach(() => {
+  // A restore's ticket is kept in localStorage, which outlives a test.
+  localStorage.clear()
+  resetRestoreRecordForTest()
   // A restore's outcome outlives the page by design: each test starts clean.
   resetRestoreOutcomeForTest()
   vi.stubGlobal('fetch', fetchMock)

@@ -532,8 +532,11 @@ func TestRestoreRejectsTinyValidPrefix(t *testing.T) {
 	suffix := time.Now().UTC().Format("20060102150405.000000")
 	sentinelUsername := "tiny_sentinel_" + suffix
 	if _, err := pool.Exec(ctx,
+		// $1 is cast once: used bare as the username and inside the
+		// concatenation, Postgres deduced two types for it (42P08) and the
+		// test never reached the handler.
 		`INSERT INTO users (username, email, password_hash, role)
-		 VALUES ($1, $1 || '@example.com', 'x', 'admin')`,
+		 VALUES ($1::text, $1::text || '@example.com', 'x', 'admin')`,
 		sentinelUsername,
 	); err != nil {
 		t.Fatalf("insert sentinel — DB schema is in an inconsistent state, not this handler's fault: %v", err)
@@ -698,5 +701,83 @@ func TestRestoreRejectsRandomGarbage(t *testing.T) {
 	body, _ := io.ReadAll(res.Body)
 	if !bytes.Contains(body, []byte("PGDMP")) {
 		t.Errorf("expected error body to mention 'PGDMP' magic, got: %s", body)
+	}
+}
+
+// TestARestoreWhoseClientLeavesStillLandsInTheDatabase is the regression
+// test for the restore that died with its request, against a real database
+// and the real psql and pg_restore: the client goes the moment the wipe has
+// emptied the database (a reload, a closed tab), which used to kill
+// pg_restore and leave it empty. The restore must still land the backup,
+// and the ticket must read how it went.
+func TestARestoreWhoseClientLeavesStillLandsInTheDatabase(t *testing.T) {
+	pool, dbURL := requireBackupTestDB(t)
+	if _, err := exec.LookPath("psql"); err != nil {
+		t.Skip("psql not on PATH; skipping")
+	}
+	seed := seedTestData(t, pool)
+	dump := callBackup(t, dbURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `DELETE FROM media_items WHERE id = $1`, seed.mediaID); err != nil {
+		t.Fatalf("perturb media_items: %v", err)
+	}
+	pool.Close()
+
+	reqCtx, leave := context.WithCancel(context.Background())
+	defer leave()
+	h := &AdminHandler{databaseURL: dbURL}
+	h.restoreExec = func(c context.Context, step restoreStep, name string, args, env []string) (string, error) {
+		if step == restoreStepRestoring {
+			// The wipe has committed: the database is empty. The client goes.
+			leave()
+		}
+		return execRestoreCommand(c, step, name, args, env)
+	}
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("backup", "left-behind.dump")
+	_, _ = fw.Write(dump)
+	_ = mw.Close()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/restore", &buf).WithContext(reqCtx)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	ticket := strings.Repeat("t", 43)
+	req.Header.Set(restoreTicketHeader, ticket)
+	h.Restore(httptest.NewRecorder(), req)
+	if reqCtx.Err() == nil {
+		t.Fatal("the request was never cancelled; the test did not exercise a client leaving")
+	}
+
+	deadline := time.Now().Add(60 * time.Second)
+	var st RestoreStatus
+	for {
+		var ok bool
+		st, ok = h.restores.statusForTicket(ticket)
+		if !ok {
+			t.Fatal("the ticket does not read the restore")
+		}
+		if st.State != restoreStateRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the restore is still running after 60s: %+v", st)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if st.State != restoreStateSucceeded || st.Database != restoreDBRestored || st.File != "left-behind.dump" {
+		t.Fatalf("the restore whose client left: %+v, want succeeded", st)
+	}
+
+	fresh, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("reconnect after restore: %v", err)
+	}
+	defer fresh.Close()
+	var title string
+	if err := fresh.QueryRow(ctx, `SELECT title FROM media_items WHERE id = $1`, seed.mediaID).Scan(&title); err != nil {
+		t.Fatalf("the restored row is not there: %v", err)
+	}
+	if title != seed.title {
+		t.Errorf("restored title %q, want %q", title, seed.title)
 	}
 }

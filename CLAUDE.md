@@ -2093,8 +2093,10 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
 ### Admin page dialogs and the restore (web app)
 
 Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
-`adminFailure.ts`, `restoreOutcome.ts`, `RestoreOutcomeAlert.tsx`) and
-`components/settings/ConfirmDialog.tsx`.
+`adminFailure.ts`, `restoreOutcome.ts`, `RestoreOutcomeAlert.tsx`),
+`components/settings/ConfirmDialog.tsx`, and for the restore's record
+`lib/restoreStatus.ts`, `hooks/useRestoreRecord.ts`,
+`components/RestoreRecordNote.tsx` and `internal/api/admin_restore.go`.
 
 - No native alert, confirm or prompt (the app-wide guard's allowlist is
   empty). Every confirmation is `ConfirmDialog` through
@@ -2119,26 +2121,67 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   said to have maybe happened. (The panel loads, two actions (the update
   trigger and the referral question's save) and two tests still show the
   server's text: see the failure-words bullet above.)
-- A restore runs on its request's context on the server
-  (`internal/api/admin_backup.go`), so a reload, a closed tab or a lost
-  connection stops `pg_restore` part way and can leave the database empty.
-  The confirm says so before anything is sent. While a restore request is
-  out the page holds the browser's leave-this-page prompt
-  (`holdPageForRestore`: `preventDefault()` and a truthy `returnValue`,
-  for current browsers and for Chrome and Edge before 119), released in
-  the request's `finally`, whatever the Admin page does meanwhile. The
-  outcome goes to a module store keyed by the account id from before the
-  restore; the backup panel says it, or `RestoreOutcomeAlert` (mounted by
-  App for `adminUI && user`) does when no backup panel is mounted as it
-  lands (another Admin section, or another page).
-- Known gaps: the server-side hazard itself is unfixed (a restore should
-  outlive its request); the outcome is memory only (a reload loses it) and
-  keyed by the pre-restore account id (after a restore from another
-  install's backup the admin may not be told); the leave-page prompt was
-  seen in no real browser; an answer that lands after its section was left
-  is said nowhere, except a restore's outcome and the AI settings' restart
-  notice; a dialog taller than the window keeps its focused button in view
-  and lets the title scroll away.
+- A restore outlives its request (`internal/api/admin_restore.go`, runbook
+  `docs/backup-restore.md`). Only the upload is the request's: once the file
+  is on disk the check, the wipe and `pg_restore` run on the server-lifecycle
+  context (`SetRootContext`) under the 60-minute `restoreTimeout`, on a
+  goroutine that owns `backupRestoreMu` (the 409 for a second backup or
+  restore) and the temp file, releasing both before it answers a client that
+  stayed. A client that left gets nothing; the restore runs on. A shutdown
+  still ends it (the lifecycle context, and systemd stops the unit's
+  processes), as does the updater's deploy restart. A panic on that
+  goroutine is recovered and recorded. The answers to a client that stayed
+  are the old ones (400/500/200 and their sentences); Aurora never answers a
+  restore with 502-504, which the web app reads as a proxy giving up.
+- The record (`restoreTracker`, memory only, so a restart forgets it): the
+  latest restore that got past its upload (refusals of the upload itself
+  record nothing): `state` none/running/succeeded/failed, `step`
+  checking/clearing/restoring, `database` unchanged/unknown/empty/restored
+  (`unknown` only when the context cut a wipe or `pg_restore` short), file,
+  times, message, and `restart_required` (a restore succeeded since boot; a
+  later refusal does not clear it). Two reads of it:
+  `GET /api/admin/restore/status` behind `requireAdmin`, and
+  `GET /api/restore/status` outside every session check, answered only to the
+  latest restore's ticket (`X-Aurora-Restore-Ticket`, 32-128 base64url
+  characters the client chose and sent with the upload; kept as SHA-256,
+  compared in constant time; any other value is the same 404
+  `restore_unknown`). The ticket read exists because the admin read cannot
+  serve the person who started the restore when it matters: from the wipe
+  until the commit there are no tables, so `RequireAuth`'s token-version
+  check and the admin guard fail; a failure after the wipe leaves it so; and
+  a success restores no sessions (dumps exclude `refresh_tokens` rows), so
+  the admin guard answers `session_ended`. A malformed ticket on the upload
+  is a 400 before the lock.
+- The web app makes a ticket per restore (`lib/restoreStatus.ts`), keeps it in
+  localStorage before the upload starts (put back on a 409, so another
+  restore's ticket is not lost), sends it, and reads the record
+  (`hooks/useRestoreRecord`): by ticket when one is kept (no session, so it
+  works signed out and never sets off the session-expiry path), else through
+  the admin route on the Admin page; again every 5 s while running, and while
+  a kept ticket gets no answer. The sign-in page shows it
+  (`RestoreRecordNote`), since a reload during or after a restore lands
+  there. The backup panel shows it when this tab has no answer of its own
+  (`restoreOutcome`'s outcome, with `lost` for no answer or a 502-504), and
+  always while a restore runs, with the restore button and file input
+  disabled. The server's text (`message`) is shown on the Admin page only
+  (`restoreServerLine`); the sign-in page uses the page's words. The
+  outcome of this tab's request still goes to the module store keyed by the
+  account id from before the restore; the backup panel says it, or
+  `RestoreOutcomeAlert` (mounted by App for `adminUI && user`) does when no
+  backup panel is mounted as it lands. Nothing holds the page any more (the
+  leave-this-page prompt is gone).
+- Known gaps: a restart (a deploy by the auto-updater included, which does
+  not wait for a restore) still ends a running restore and forgets the
+  record, so the browser that started it can say only that Aurora has no
+  record of it; a restore cannot be cancelled; the ticket lives in one
+  browser's localStorage (a private window or cleared site data loses it,
+  and then only the admin read is left); a client older than the ticket
+  restores without one; this tab's own outcome is still memory only and keyed
+  by the pre-restore account id; nothing in the browser tests the sign-in
+  page's note beyond one render of its longest words at two sizes; an answer
+  that lands after its section was left is said nowhere, except a restore's
+  outcome and the AI settings' restart notice; a dialog taller than the
+  window keeps its focused button in view and lets the title scroll away.
 
 ### Nullable database columns
 
