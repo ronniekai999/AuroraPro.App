@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -27,7 +26,8 @@ import (
 // A ticket of the shape the web app sends (32 random bytes, base64url).
 const testRestoreTicket = "q8Xc0bJ7Tq2f-Pn4Zr_Ws9Lk1Hy3Vd6Am5Ue8Gi0Ot"
 
-// fakeRestore stands in for the three programs of a restore. Each step runs
+// fakeRestore stands in for a restore's programs: the check, and the whole
+// transaction (the wipe and the load) as one step. Each step runs
 // its behaviour from steps (a missing one succeeds at once) and records the
 // context it was given and the archive path it was handed.
 type fakeRestore struct {
@@ -193,12 +193,12 @@ func lockFree(h *AdminHandler) bool {
 // still runs, on a context the request's end does not touch, to a recorded
 // success, and the lock and the uploaded file are let go after.
 func TestARestoreRunsOnAfterItsRequestEnds(t *testing.T) {
-	for _, leaveAt := range []restoreStep{restoreStepChecking, restoreStepClearing, restoreStepRestoring} {
+	for _, leaveAt := range []restoreStep{restoreStepChecking, restoreStepRestoring} {
 		t.Run("the client leaves while "+string(leaveAt), func(t *testing.T) {
 			f := newFakeRestore()
 			started := map[restoreStep]chan struct{}{}
 			release := map[restoreStep]chan struct{}{}
-			for _, s := range []restoreStep{restoreStepChecking, restoreStepClearing, restoreStepRestoring} {
+			for _, s := range []restoreStep{restoreStepChecking, restoreStepRestoring} {
 				started[s], release[s] = make(chan struct{}), make(chan struct{})
 				f.steps[s] = hold(started[s], release[s])
 			}
@@ -207,7 +207,7 @@ func TestARestoreRunsOnAfterItsRequestEnds(t *testing.T) {
 			defer leave()
 			rec, handlerDone := startRestore(t, h, reqCtx, testRestoreTicket)
 
-			for _, s := range []restoreStep{restoreStepChecking, restoreStepClearing, restoreStepRestoring} {
+			for _, s := range []restoreStep{restoreStepChecking, restoreStepRestoring} {
 				waitFor(t, string(s)+" to start", started[s])
 				if s == leaveAt {
 					leave()
@@ -230,8 +230,8 @@ func TestARestoreRunsOnAfterItsRequestEnds(t *testing.T) {
 				t.Errorf("the record after it ended: %+v", st)
 			}
 			ran, ctxErrs, archive := f.snapshot()
-			if len(ran) != 3 {
-				t.Fatalf("steps run: %v, want all three", ran)
+			if len(ran) != 2 {
+				t.Fatalf("steps run: %v, want both (the check, and the transaction)", ran)
 			}
 			for s, err := range ctxErrs {
 				if err != nil {
@@ -271,10 +271,11 @@ func TestARestoreStillAnswersAClientThatWaited(t *testing.T) {
 		{"it succeeds", "", "", http.StatusOK, restoreSucceededMessage, restoreStateSucceeded, "", restoreDBRestored},
 		{"the archive cannot be read in full", restoreStepChecking, "unexpected end of file", http.StatusBadRequest,
 			"the database was NOT modified: unexpected end of file", restoreStateFailed, "checking", restoreDBUnchanged},
-		{"the wipe fails", restoreStepClearing, "permission denied for schema public", http.StatusInternalServerError,
-			"pre-restore wipe failed: exit status 1 — psql said: permission denied for schema public", restoreStateFailed, "clearing", restoreDBUnchanged},
-		{"pg_restore fails after the wipe", restoreStepRestoring, "relation already exists", http.StatusInternalServerError,
-			"restore failed; database is in wiped state. Restore a valid backup with pg_restore from the server's command line before restarting Aurora (docs/backup-restore.md). pg_restore said: relation already exists", restoreStateFailed, "restoring", restoreDBEmpty},
+		// The wipe and the load are one transaction now: a failure anywhere
+		// in it rolls back, wipe included. (A failure after a separate wipe
+		// used to leave the database empty.)
+		{"the transaction fails", restoreStepRestoring, "relation already exists", http.StatusInternalServerError,
+			"the restore failed and was rolled back, so the database was NOT modified: exit status 1 — relation already exists", restoreStateFailed, "restoring", restoreDBUnchanged},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -325,10 +326,11 @@ func TestTheRestoreStatusReportsEachState(t *testing.T) {
 
 	t.Run("running, step by step", func(t *testing.T) {
 		f := newFakeRestore()
+		// Nothing is committed until the transaction ends, so the
+		// database is unchanged at every step of a running restore.
 		want := map[restoreStep]string{
 			restoreStepChecking:  restoreDBUnchanged,
-			restoreStepClearing:  restoreDBUnknown,
-			restoreStepRestoring: restoreDBEmpty,
+			restoreStepRestoring: restoreDBUnchanged,
 		}
 		started := map[restoreStep]chan struct{}{}
 		release := map[restoreStep]chan struct{}{}
@@ -338,7 +340,7 @@ func TestTheRestoreStatusReportsEachState(t *testing.T) {
 		}
 		h := newRestoreHandler(f)
 		_, done := startRestore(t, h, context.Background(), "")
-		for _, s := range []restoreStep{restoreStepChecking, restoreStepClearing, restoreStepRestoring} {
+		for _, s := range []restoreStep{restoreStepChecking, restoreStepRestoring} {
 			waitFor(t, string(s), started[s])
 			st := adminStatus(t, h)
 			if st.State != restoreStateRunning || st.Step != string(s) || st.Database != want[s] || st.Finished != nil || st.Message != "" {
@@ -360,32 +362,15 @@ func TestTheRestoreStatusReportsEachState(t *testing.T) {
 		waitFor(t, "pg_restore to start", started)
 		shutdown()
 		waitFor(t, "the answer", done)
+		// The transaction rolls back: the old data stays (it used to be
+		// "unknown", most likely empty).
 		st := adminStatus(t, h)
-		if st.State != restoreStateFailed || st.Step != string(restoreStepRestoring) || st.Database != restoreDBUnknown ||
-			!strings.Contains(st.Message, "shutting down") || st.RestartRequired {
+		if st.State != restoreStateFailed || st.Step != string(restoreStepRestoring) || st.Database != restoreDBUnchanged ||
+			!strings.Contains(st.Message, "shutting down") || !strings.Contains(st.Message, "NOT modified") || st.RestartRequired {
 			t.Errorf("a restore stopped by shutdown: %+v", st)
 		}
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("answer: %d", rec.Code)
-		}
-	})
-
-	t.Run("cut short while the old data was being cleared", func(t *testing.T) {
-		f := newFakeRestore()
-		started, release := make(chan struct{}), make(chan struct{})
-		f.steps[restoreStepClearing] = hold(started, release)
-		h := newRestoreHandler(f)
-		root, shutdown := context.WithCancel(context.Background())
-		h.SetRootContext(root)
-		_, done := startRestore(t, h, context.Background(), "")
-		waitFor(t, "the wipe to start", started)
-		shutdown()
-		waitFor(t, "the answer", done)
-		if st := adminStatus(t, h); st.State != restoreStateFailed || st.Step != string(restoreStepClearing) || st.Database != restoreDBUnknown {
-			t.Errorf("a wipe stopped part way: %+v", st)
-		}
-		if ran, _, _ := f.snapshot(); len(ran) != 2 {
-			t.Errorf("steps run after the wipe was stopped: %v", ran)
 		}
 	})
 
@@ -588,58 +573,5 @@ func TestRestoreFileLabel(t *testing.T) {
 		if got := restoreFileLabel(in); got != want {
 			t.Errorf("restoreFileLabel(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-// exitError runs a shell that ends as script says, for a real
-// *exec.ExitError.
-func exitError(t *testing.T, script string) error {
-	t.Helper()
-	err := exec.Command("sh", "-c", script).Run()
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("sh -c %q: %v, want an exit error", script, err)
-	}
-	return err
-}
-
-// TestAFailedWipeSaysWhatItLeft: the wipe is one statement, so a statement
-// that failed changed nothing, but psql also fails when its connection goes
-// mid-statement, and the server can still commit a statement whose client
-// has gone. Only what psql's exit and libpq's words rule out is "unchanged".
-func TestAFailedWipeSaysWhatItLeft(t *testing.T) {
-	cases := []struct {
-		name   string
-		err    error
-		stderr string
-		want   string
-	}{
-		{"the statement failed", exitError(t, "exit 1"), "ERROR:  permission denied for schema public", restoreDBUnchanged},
-		{"a script error under ON_ERROR_STOP", exitError(t, "exit 3"), "ERROR:  syntax error", restoreDBUnchanged},
-		{"never connected (libpq 14+)", exitError(t, "exit 2"), `psql: error: connection to server at "db" (10.0.0.2), port 5432 failed: Connection refused`, restoreDBUnchanged},
-		{"never connected (older libpq)", exitError(t, "exit 2"), "psql: could not connect to server: No such file or directory", restoreDBUnchanged},
-		{"lost, after NOTICEs naming a failed_jobs table", exitError(t, "exit 2"), "NOTICE:  drop cascades to constraint failed_jobs_fkey on table failed_jobs\nserver closed the connection unexpectedly\nconnection to server was lost", restoreDBUnknown},
-		{"lost mid-statement", exitError(t, "exit 2"), "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally", restoreDBUnknown},
-		{"lost, as libpq says it", exitError(t, "exit 2"), "connection to server was lost", restoreDBUnknown},
-		{"killed", exitError(t, "kill -9 $$"), "", restoreDBUnknown},
-		{"psql is not installed", errors.New(`exec: "psql": executable file not found in $PATH`), "", restoreDBUnchanged},
-	}
-	for _, c := range cases {
-		if got := wipeLeftDatabase(c.err, c.stderr); got != c.want {
-			t.Errorf("%s: %s, want %s", c.name, got, c.want)
-		}
-	}
-
-	// Through the handler: a connection lost mid-wipe is recorded as in doubt.
-	f := newFakeRestore()
-	lost := exitError(t, "exit 2")
-	f.steps[restoreStepClearing] = func(context.Context) (string, error) { return "server closed the connection unexpectedly", lost }
-	h := newRestoreHandler(f)
-	rec, done := startRestore(t, h, context.Background(), "")
-	waitFor(t, "the answer", done)
-	st := adminStatus(t, h)
-	if st.State != restoreStateFailed || st.Step != string(restoreStepClearing) || st.Database != restoreDBUnknown ||
-		!strings.Contains(rec.Body.String(), "may be as it was or empty") {
-		t.Errorf("a wipe whose connection was lost: %d %s, record %+v", rec.Code, rec.Body, st)
 	}
 }

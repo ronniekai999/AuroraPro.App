@@ -1,0 +1,10 @@
+{
+  "sha": "e58d625d551cc5bb32edb83a2c2de01bc94f6bb0",
+  "verdict": "lows-only",
+  "summary": "Forward merge onto this branch whose tree is byte-identical to the reviewed afda164 (git tree fb0b129): the atomic restore rebuilt on main's restore job (#563). Reviewed as d1b0d18..afda164: R2 fix-first (M1 waiting writes landing after COMMIT), re-check lows-only; 4 lows (a slow-body client can hold the gate's drain, device grants and the token-version cache kept on unknown or for 60 s, user requests that never wait can land, the connection-check setting fails silently)",
+  "reviewer": "fresh-context-agent-a9880fe2",
+  "findings": "4",
+  "diff_digest": "f45f7fdf6c1657fac18cd9d475d48a62e6dd42649a5ef44fec35609d5e66c834",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T21:06:48Z"
+}

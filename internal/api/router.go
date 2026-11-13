@@ -194,6 +194,9 @@ type RouterDeps struct {
 	// deadline can name what it was waiting on. Optional; nil disables
 	// tracking. See inflight.go.
 	InFlight *InFlightRegistry
+	// adminHandlerMade, in tests, is handed the router's AdminHandler (its
+	// restore's session gate and hooks).
+	adminHandlerMade func(*AdminHandler)
 }
 
 func NewRouter(deps RouterDeps) http.Handler {
@@ -460,6 +463,14 @@ func NewRouter(deps RouterDeps) http.Handler {
 	socialH := NewSocialHandler(deps.Queries)
 	adminH := NewAdminHandler(deps.Queries, deps.Transcode, deps.DirectPlay, deps.Hub, deps.Activity, deps.RingLog, deps.ImgProxy, deps.Watcher, deps.ArrClients, deps.StartTime, deps.Version, deps.Cfg.Cache.TranscodeDir)
 	adminH.SetEmbeddingInfo(deps.EmbeddingEnabled, deps.EmbeddingVersion)
+	// A restore closes the session and credential routes for its
+	// transaction (sessionGate, used below) and, once it has committed,
+	// drops the pairings that name the old database's accounts.
+	sessionGate := adminH.SessionGate()
+	adminH.OnRestored(deviceAuthH.ForgetGrants)
+	if deps.adminHandlerMade != nil {
+		deps.adminHandlerMade(adminH)
+	}
 	if deps.AIBackfill != nil {
 		adminH.SetAIBackfill(deps.AIBackfill)
 	}
@@ -751,9 +762,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 		// A restore's status, answered only to the ticket its upload carried
 		// (X-Aurora-Restore-Ticket; anything else is a 404). Outside the
-		// session checks on purpose: from a restore's wipe until it commits,
-		// and after one that fails past it, there are no tables to check a
-		// session against, and a successful one brings back no sessions, so
+		// session checks on purpose: while a restore's transaction runs they
+		// wait on its locks, and a successful one brings back no sessions, so
 		// the admin who started it could not otherwise learn how it went.
 		// The upload passed the full admin guard. See admin_restore.go.
 		r.Get("/api/restore/status", adminH.RestoreStatusByTicket)
@@ -766,12 +776,15 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// and register share the credential-guessing budget; refresh and
 			// logout share a roomier session-lifecycle budget so token rotation
 			// can't starve the login budget (and vice-versa).
-			r.With(deps.LoginLimiter.Middleware).Post("/login", authH.Login)
-			r.With(deps.LoginLimiter.Middleware).Post("/register", authH.Register)
-			r.With(deps.RefreshLimiter.Middleware).Post("/refresh", authH.Refresh)
+			// sessionGate: closed while a database restore's transaction
+			// may run (admin_restore_gate.go), on every route that makes or
+			// changes a session or a credential.
+			r.With(deps.LoginLimiter.Middleware, sessionGate.guardJSON()).Post("/login", authH.Login)
+			r.With(deps.LoginLimiter.Middleware, sessionGate.guardJSON()).Post("/register", authH.Register)
+			r.With(deps.RefreshLimiter.Middleware, sessionGate.guardJSON()).Post("/refresh", authH.Refresh)
 			r.With(deps.RefreshLimiter.Middleware).Post("/logout", authH.Logout)
 			r.Post("/device/start", deviceAuthH.Start)
-			r.Post("/device/poll", deviceAuthH.Poll)
+			r.With(sessionGate.guardJSON()).Post("/device/poll", deviceAuthH.Poll)
 			// Phase 3 → Phase A refactor: provider-agnostic OAuth.
 			// {provider} is resolved against OAuthHandler's registry
 			// at request time (currently: "google"; future: "discord",
@@ -784,20 +797,20 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// of `/oauth/{provider}/start`, so existing frontend links
 			// keep working without change.
 			r.Get("/oauth/{provider}/start", oauthH.Start)
-			r.Get("/oauth/{provider}/callback", oauthH.Callback)
+			r.With(sessionGate.guard(oauthH.renderRestoreRunning)).Get("/oauth/{provider}/callback", oauthH.Callback)
 
 			// Protected
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireAuth(deps.AuthSvc, tokenVerStore))
 				r.Get("/me", authH.Me)
 				r.Get("/device/preview", deviceAuthH.Preview)
-				r.Post("/device/authorize", deviceAuthH.Authorize)
+				r.With(sessionGate.guardJSON()).Post("/device/authorize", deviceAuthH.Authorize)
 				// Rate-limited: change-password verifies the current password
 				// with Argon2id (~100ms/attempt) but is still brute-forceable
 				// over the access-token lifetime (~10 min) by a stolen-token
 				// attacker. Its own limiter (audit MED) so it doesn't share a
 				// budget with login/refresh.
-				r.With(deps.ChangePasswordLimiter.Middleware).Post("/change-password", authH.ChangePassword)
+				r.With(deps.ChangePasswordLimiter.Middleware, sessionGate.guardJSON()).Post("/change-password", authH.ChangePassword)
 
 				// Multi-provider OAuth account linking (audit carve-out D).
 				// Authenticated: a signed-in user lists/connects/disconnects
@@ -808,7 +821,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// DELETE refuses to remove the user's last sign-in method.
 				r.Get("/oauth/links", oauthH.LinksStatus)
 				r.Post("/oauth/{provider}/link", oauthH.StartLink)
-				r.Delete("/oauth/{provider}/link", oauthH.Unlink)
+				r.With(sessionGate.guardJSON()).Delete("/oauth/{provider}/link", oauthH.Unlink)
 			})
 		})
 
@@ -822,7 +835,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Use(requireAdmin)
 				r.Get("/", authH.ListUsers)
 				r.Post("/invite", authH.CreateInvite)
-				r.Put("/{id}/role", authH.UpdateUserRole)
+				r.With(sessionGate.guardJSON()).Put("/{id}/role", authH.UpdateUserRole)
 				r.Delete("/{id}", authH.DeleteUser)
 			})
 
@@ -1079,7 +1092,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// SetDefault's account-wide persistent default; this is what
 				// read/playback rating-ceiling enforcement consults.
 				r.Post("/{id}/activate", profileH.ActivateProfile)
-				r.Put("/{id}/pin", profileH.SetProfilePIN)
+				r.With(sessionGate.guardJSON()).Put("/{id}/pin", profileH.SetProfilePIN)
 
 				// Watchlists (nested under profile)
 				r.Get("/{profileId}/watchlists", profileH.ListWatchlists)
@@ -1243,11 +1256,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// 2026-05-18 — admin restore endpoint. Same rationale (long-
 			// running). Streams the uploaded pg_dump custom-format
 			// archive to a temp file via MultipartReader (bounded
-			// memory), then runs pg_restore --single-transaction
-			// against it. Destructive — the handler runs a per-object
-			// wipe that preserves installed extensions before invoking
-			// pg_restore. See admin_backup.go header for the full
-			// pipeline rationale.
+			// memory), then, in one transaction, runs a per-object wipe
+			// that preserves installed extensions and restores the
+			// archive (admin_restore_pipeline.go). Destructive. See the
+			// admin_backup.go header for the full pipeline rationale.
 			r.With(requireAdmin).Post("/api/admin/restore", adminH.Restore)
 			// The latest restore since this process started: running, how it
 			// ended, whether Aurora needs a restart. A restore no longer ends

@@ -22,6 +22,7 @@ import { Spinner } from '@/components/ui/spinner'
 import { APIError, getSetupStatus, login as apiLogin, register, type SetupStatus, type User as ApiUser } from '@/lib/api'
 import { rememberDeviceIntent, rememberDevicePairing } from '@/lib/devicePairing'
 import { useRestoreRecord } from '@/hooks/useRestoreRecord'
+import { failureReason } from '@/lib/failureWords'
 import { OAUTH_SIGN_IN_PROVIDERS, type OAuthProvider } from '@/lib/oauth'
 
 /** A field of the two forms, by the end of its id (`auth-<field>`). */
@@ -64,6 +65,15 @@ export function refusalSays(err: unknown, making: boolean): Refusal {
   if (err instanceof APIError) {
     // The rate limiter, whatever its words.
     if (err.status === 429) return { says: 'Too many tries. Wait a moment and try again.', field: null }
+    // A database restore closes signing in until it ends.
+    if (err.status === 503 && failureReason(err) === 'restore_running') {
+      return {
+        says: making
+          ? 'A database restore is running on this server, so accounts cannot be made until it has finished.'
+          : 'A database restore is running on this server, so signing in is paused until it has finished.',
+        field: null,
+      }
+    }
     for (const [status, sentence, says, field] of ANSWERS) {
       if (err.status === status && err.message === sentence) return { says, field }
     }
@@ -141,10 +151,11 @@ export default function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void
   // On a fresh install (no account in the database) the first person to
   // register becomes the admin and needs no invite code.
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
-  // A database restore this browser started: from its wipe until it
-  // commits, and after one that fails past it or succeeds, the admin who
-  // started it is signed out and lands here, the one page that can still
-  // say how it went (by its ticket; hooks/useRestoreRecord).
+  // A database restore this browser started: while its transaction runs the
+  // server's session checks wait on it (and can fail after a minute), and
+  // one that succeeds ends every sign-in, so the admin who started it can
+  // land here, the one page that can still say how it went (by its ticket;
+  // hooks/useRestoreRecord).
   const restoreRecord = useRestoreRecord({})
   useEffect(() => {
     let cancelled = false

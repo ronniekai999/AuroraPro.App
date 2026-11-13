@@ -210,6 +210,14 @@ The viewer drain and any Ollama model pull now run before the first live file
 changes. They used to run after the swap, so for up to five minutes the old
 backend served the new frontend.
 
+The drain also waits for a database restore the server is running: the server
+counts one as a held session in `stream-state.json` (`"restore": 1`, included
+in `held_by_viewer`), and publishes the snapshot when the restore begins and
+ends. The status line then reads "Waiting for active stream sessions or a
+database restore to finish". Like a viewer, a restore is waited for five
+minutes at most; the restart then stops it, and it rolls back and has to be run
+again (see `backup-restore.md`). A server older than this counts no restore.
+
 Browser tabs left open across a deploy run the build they loaded, and the
 previous build's chunks are deleted. The SPA compares the build id it was loaded
 with (`<meta name="aurora-build">`, a hash of the bundle, `public/` and the page)

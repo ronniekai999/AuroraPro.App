@@ -102,7 +102,30 @@ type AdminHandler struct {
 	// restoreExec runs psql and pg_restore for a restore. Nil in production
 	// (execRestoreCommand); tests put a fake here.
 	restoreExec restoreCommand
+	// restoreTools names the real client programs and the wipe's lock
+	// timeout (admin_restore_pipeline.go); the zero value is production's.
+	// Tests point it at stand-ins.
+	restoreTools restoreTools
+	// sessionGate closes the routes that make or change sessions and
+	// credentials while a restore's transaction may run
+	// (admin_restore_gate.go); the router guards them with it.
+	sessionGate restoreSessionGate
+	// sessionDrain bounds the restore's wait for the requests already past
+	// sessionGate; zero is restoreSessionDrain. Tests shorten it.
+	sessionDrain time.Duration
+	// onRestored runs, in order, once a restore has committed and before the
+	// gate opens again: state kept in memory that names the old database's
+	// rows goes (OnRestored).
+	onRestored []func()
 }
+
+// SessionGate is the gate the router puts on the routes that make or change
+// sessions and credentials (admin_restore_gate.go).
+func (h *AdminHandler) SessionGate() *restoreSessionGate { return &h.sessionGate }
+
+// OnRestored registers fn to run once a restore has committed, before the
+// session routes open again. Wiring only: call it before serving.
+func (h *AdminHandler) OnRestored(fn func()) { h.onRestored = append(h.onRestored, fn) }
 
 // SetDatabaseURL wires the conninfo string used by the pg_dump-based
 // backup endpoint. See admin_backup.go for the streaming implementation.
@@ -139,6 +162,9 @@ func NewAdminHandler(
 	}
 	if len(transcodeDir) > 0 {
 		h.transcodeDir = transcodeDir[0]
+	}
+	if transcode != nil {
+		h.wireRestoreDrain(transcode)
 	}
 	return h
 }

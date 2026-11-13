@@ -48,6 +48,12 @@ export function beginRestore(): void {
   set({ out: state.out + 1 })
 }
 
+/** Restore requests this tab has out now, for code outside React (the scan
+ *  bar's poll, which holds back while one may be running). */
+export function restoreRequestsOut(): number {
+  return state.out
+}
+
 export function finishRestore(outcome: RestoreOutcome): void {
   set({ outcome, seen: state.panels > 0, out: Math.max(0, state.out - 1), ended: state.ended + 1 })
 }

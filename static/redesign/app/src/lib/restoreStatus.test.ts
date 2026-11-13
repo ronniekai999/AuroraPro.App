@@ -75,17 +75,22 @@ describe('the words for a record', () => {
 
   it('says a running restore is safe to leave, and when it has the database', () => {
     expect(words({ state: 'running', step: 'checking', database: 'unchanged' })).toMatchObject({ title: 'A restore is running', urgent: false })
-    const replacing = words({ state: 'running', step: 'restoring', database: 'empty' })!
+    const replacing = words({ state: 'running', step: 'restoring', database: 'unchanged' })!
     expect(replacing.urgent).toBe(true)
-    expect(replacing.says).toContain('Do not restart Aurora meanwhile')
+    expect(replacing.says).toContain('Do not restart Aurora meanwhile: that stops the restore, which then changes nothing and has to be run again.')
+    expect(replacing.says).not.toContain('empty')
   })
 
   it('says each way a restore ends, in the page’s words only', () => {
     expect(words({ state: 'succeeded', database: 'restored', restart_required: true })!.title).toBe('Restart Aurora now')
     const unchanged = words({ state: 'failed', step: 'checking', database: 'unchanged', message: 'bad archive' })!
     expect(unchanged).toEqual({ title: 'The restore from b.dump did not go through', says: 'The database was not changed.', urgent: false })
-    expect(words({ state: 'failed', step: 'restoring', database: 'empty' })!.says).toContain('the database is now empty')
-    expect(words({ state: 'failed', step: 'restoring', database: 'unknown' })!.title).toBe('The restore from b.dump was stopped part way')
+    // A failure in the transaction rolls it back: the database is as it was.
+    expect(words({ state: 'failed', step: 'restoring', database: 'unchanged', message: 'lock timeout' })).toEqual(unchanged)
+    const unknown = words({ state: 'failed', step: 'restoring', database: 'unknown' })!
+    expect(unknown.title).toBe('Aurora cannot tell whether the restore from b.dump went through')
+    expect(unknown.says).toContain('It ended without Aurora learning whether it took effect, so the database holds either what it held before or the backup.')
+    expect(unknown.urgent).toBe(true)
   })
 
   it('still says to restart after an earlier restore when a later one is refused', () => {
@@ -96,5 +101,9 @@ describe('the words for a record', () => {
   it('says a ticket the server no longer knows by whether it was seen running', () => {
     expect(lostRestoreWords('b.dump', true).says).toMatch(/^Aurora has restarted since that restore began/)
     expect(lostRestoreWords('b.dump', false).says).toMatch(/^If its upload did not finish, it never started/)
+    for (const seen of [true, false]) {
+      expect(lostRestoreWords('b.dump', seen).says).toContain('rolled back, so the database is as it was')
+      expect(lostRestoreWords('b.dump', seen).says).not.toContain('empty')
+    }
   })
 })

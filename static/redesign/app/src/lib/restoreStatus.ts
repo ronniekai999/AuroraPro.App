@@ -7,11 +7,11 @@
 //   - GET /api/admin/restore/status, behind the admin guard, for any admin
 //     the database can vouch for (getAdminRestoreStatus in lib/api).
 //   - GET /api/restore/status with the restore's ticket, which needs no
-//     session. From a restore's wipe until it commits there are no tables to
-//     check a session against, one that fails after its wipe leaves none, and
-//     one that succeeds brings back no sessions: a reload in any of those
-//     lands on the sign-in page, and the ticket is how that page can still
-//     say how the restore went.
+//     session. While a restore's transaction runs, a session check waits on
+//     its locks (a reload can hang, or fail after a minute), and one that
+//     succeeds brings back no sessions: a reload then lands on the sign-in
+//     page, and the ticket is how that page can still say how the restore
+//     went.
 //
 // The ticket is a secret this browser makes for each restore, sends with the
 // upload and keeps in localStorage, so a reload or a closed tab keeps it. It
@@ -27,9 +27,13 @@ export type RestoreState = 'none' | 'running' | 'succeeded' | 'failed'
 export interface RestoreStatus {
   state: RestoreState
   /** Where a running restore is, or where a failed one stopped. */
-  step?: 'checking' | 'clearing' | 'restoring'
-  /** What it has done to the database, as far as the server can tell. */
-  database?: 'unchanged' | 'unknown' | 'empty' | 'restored'
+  step?: 'checking' | 'restoring'
+  /** What it has done to the database, as far as the server can tell: the
+   *  wipe and the load are one transaction, so it is unchanged until that
+   *  commits, and `unknown` only when Aurora could not learn whether the
+   *  COMMIT took effect (psql cut off as it committed, or an internal error
+   *  in the transaction's step). */
+  database?: 'unchanged' | 'unknown' | 'restored'
   file?: string
   started_at?: string
   finished_at?: string
@@ -176,7 +180,8 @@ function timeOf(iso: string | undefined): string {
 export interface RestoreWords {
   title: string
   says: string
-  /** Something the admin must not miss: a restart, or an empty database. */
+  /** Something the admin must not miss: a restart, a restore a restart
+   *  would stop, or a database whose state is not known. */
   urgent: boolean
 }
 
@@ -191,17 +196,14 @@ export function restoreWords(st: RestoreStatus): RestoreWords | null {
     case 'running':
       return st.step === 'checking'
         ? { title: 'A restore is running', urgent: false, says: `Aurora is checking ${file} before it changes anything. The restore goes on on the server whether or not this page is open.` }
-        : { title: 'A restore is running', urgent: true, says: `Aurora is replacing its database with ${file}. Until it has finished nobody can sign in. Do not restart Aurora meanwhile: that stops the restore and can leave the database empty. It goes on on the server whether or not this page is open.` }
+        : { title: 'A restore is running', urgent: true, says: `Aurora is replacing its database with ${file}. Until it has finished, Aurora waits for it: pages hang (some fail after a minute) and signing in is paused. Do not restart Aurora meanwhile: that stops the restore, which then changes nothing and has to be run again. It goes on on the server whether or not this page is open.` }
     case 'succeeded':
       return { title: 'Restart Aurora now', urgent: true, says: `The database was restored from ${file}${timeOf(st.finished_at)}. Until Aurora is restarted, it goes on working from what it held before the restore. Sign-ins from before the restore have ended: sign in again with an account from the backup.` }
     case 'failed':
       if (st.database === 'unchanged') {
         return { title: `The restore from ${file} did not go through`, urgent: false, says: `The database was not changed.${earlier}` }
       }
-      if (st.database === 'empty') {
-        return { title: `The restore from ${file} failed`, urgent: true, says: 'It failed after the old data was cleared, so the database is now empty and nobody can sign in. Restore a backup from the server’s command line before restarting Aurora: started on an empty database, Aurora makes the first account anyone creates its admin.' }
-      }
-      return { title: `The restore from ${file} was stopped part way`, urgent: true, says: 'The database may be as it was, empty, or restored. Check it on the server before going on.' }
+      return { title: `Aurora cannot tell whether the restore from ${file} went through`, urgent: true, says: 'It ended without Aurora learning whether it took effect, so the database holds either what it held before or the backup. Check which on the server before going on; if it holds the backup, restart Aurora.' }
     default:
       return null
   }
@@ -214,7 +216,7 @@ export function lostRestoreWords(file: string, seenRunning: boolean): RestoreWor
     title: `Aurora has no record of the restore from ${file}`,
     urgent: true,
     says: seenRunning
-      ? 'Aurora has restarted since that restore began, or a newer restore has replaced it. If Aurora restarted while the restore was running, the restore did not finish and the database may be empty: check it on the server.'
-      : 'If its upload did not finish, it never started and nothing was changed. If it did start, Aurora has restarted since or a newer restore has replaced it; if Aurora restarted while the restore was running, the database may be empty: check it on the server.',
+      ? 'Aurora has restarted since that restore began, or a newer restore has replaced it. If Aurora restarted while the restore was running, the restore was stopped and rolled back, so the database is as it was, unless the restart came just as it was being committed: check on the server which it holds.'
+      : 'If its upload did not finish, it never started and nothing was changed. If it did start, Aurora has restarted since or a newer restore has replaced it; a restore stopped by a restart was rolled back, so the database is as it was, unless the restart came just as it was being committed: check on the server which it holds.',
   }
 }
