@@ -145,18 +145,31 @@ Fix or file each item, and delete it here when it is no longer true.
   way round, an alias, an animation given to a view-transition pseudo-element
   from outside `index.css` or under a name written with a CSS escape, or a
   later rule that restores an animation anywhere but on a view-transition
-  pseudo-element. On view-transition pseudo-elements in `index.css` it refuses
-  (Check 5c) any animation on `::view-transition-image-pair` or the
-  `::view-transition` overlay, which nothing stills; any `!important`
-  animation on a view-transition pseudo-element; and any `@view-transition`
-  rule. It reads them as a browser does: selectors, properties and at-rules in
-  any letter case, `-webkit-animation` and `-webkit-animation-name` as the
-  aliases they are, each rule by the declaration that wins its animation-name
-  (an `!important` one over any other, then the later), and a value it cannot
-  judge (a `var()`, `inherit`, `revert`) as an animation; and it checks that
-  reading against known answers on every run. App's wiring of the travel has
-  no test (jsdom has no view transitions), and Firefox and Safari were not
-  run.
+  pseudo-element. Its older checks (1 to 4) read property names in lower case
+  only, so `ANIMATION:` is not seen, and Check 1 reads only the `animation`
+  shorthand, so an animation set with the `animation-name` longhand is never
+  checked for a reduced-motion null. On view-transition pseudo-elements in
+  `index.css`, nested or not and in every selector of a list, Check 5c refuses
+  any animation on `::view-transition-image-pair` or the `::view-transition`
+  overlay, which nothing stills; any `!important` animation on a
+  view-transition pseudo-element; and any `@view-transition` rule, nested or
+  not. It reads names (pseudo-elements, properties, at-rules) in any letter
+  case and `-webkit-animation` and `-webkit-animation-name` as the aliases
+  they are; judges each rule by the declaration that wins its animation-name
+  within that rule (an `!important` one over any other, then the later), not
+  by cascading rules together, which errs toward refusing; and counts as an
+  animation any value but `none`, `initial` or `unset` alone, or a shorthand
+  whose every part is a time, a number, an easing function or one of its
+  keywords, so a quoted or escaped name, `var()`, `attr()`, `inherit` and
+  `revert` all count. Check 5b reads the stilling's selectors with names in
+  any letter case and the attribute's value exactly, so
+  `[data-effects="REDUCED"]` is not taken for `"reduced"`, and recognises a
+  stilling only written as those six selectors (spaced or quoted otherwise,
+  the check fails rather than passes). Both check their reading against known
+  answers on every run (27 for 5c, 6 for 5b); a break that none of those
+  answers exercises still passes, and so would deleting the self-test. App's
+  wiring of the travel has no test (jsdom has no view transitions), and
+  Firefox and Safari were not run.
 - Failure words: a step back can still be taken twice in the few milliseconds
   between a press on Back and the browser applying it. A request already out
   when a session ends still completes, and a toast it raises is shown to the
