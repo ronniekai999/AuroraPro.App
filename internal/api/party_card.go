@@ -385,7 +385,13 @@ func (h *PartyShareHandler) buildCardData(ctx context.Context, in cardInputs) ca
 		if img, err := h.fetchPosterImage(in.MediaPoster); err == nil {
 			d.Poster = img
 		} else {
-			slog.Debug("party card: poster fetch failed", "poster", in.MediaPoster, "error", err)
+			// Warn for the reason the share image's twin gives
+			// (party_share.go): the poster-less card is cached. It fires
+			// once per render, which here is per variant and per host tag,
+			// and the caller picks the Host; the route's per-IP limit, and
+			// the unsafe-Host Warn that already fires per request under
+			// it, bound this line the same way.
+			slog.Warn("party card: poster fetch failed", "code", in.Code, "poster", in.MediaPoster, "error", err)
 		}
 	}
 	if img := h.fetchAvatarImage(in.HostAvatar); img != nil {

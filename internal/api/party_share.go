@@ -115,6 +115,13 @@ type PartyShareHandler struct {
 	jwtSecret     string
 	secureCookies bool
 
+	// posterTransport is the RoundTripper fetchPosterImage's client uses.
+	// Nil in production, which means http.DefaultTransport. Tests set it
+	// to see the exact URL requested without touching the network. It
+	// sits below the client, so the allowlist check and CheckRedirect's
+	// per-hop re-validation run the same either way.
+	posterTransport http.RoundTripper
+
 	// Font faces are lazily initialized once on first use and reused
 	// across all renders. opentype.NewFace is non-trivially expensive
 	// (parses TTF, builds glyph tables) so caching matters even on a
@@ -427,7 +434,14 @@ func (h *PartyShareHandler) composeShareImage(code, partyName, mediaTitle, media
 		if posterImg, err := h.fetchPosterImage(mediaPoster); err == nil {
 			h.drawScaledPoster(rgba, posterImg)
 		} else {
-			slog.Debug("party share: poster fetch failed", "poster", mediaPoster, "error", err)
+			// Warn, not Debug: the image without its poster is cached until
+			// the party ends or changes title, so this line is the only
+			// trace of why, and at Debug a wrong poster URL went unseen. It
+			// fires once per render: after each media change (which drops
+			// the cache, an episode advance with the same poster included),
+			// once per overlapping cache miss, and on every request while
+			// the cache write fails.
+			slog.Warn("party share: poster fetch failed", "code", code, "poster", mediaPoster, "error", err)
 		}
 	}
 
@@ -452,10 +466,35 @@ func (h *PartyShareHandler) composeShareImage(code, partyName, mediaTitle, media
 	return buf.Bytes(), nil
 }
 
+// shareTMDBPosterBase is the TMDB image CDN at the size the share
+// surfaces fetch. w780 (780×1170) is a bandwidth trade: the share card
+// draws the poster smaller than that, while the share image draws it at
+// about 853×1280, a slight upscale.
+const shareTMDBPosterBase = "https://image.tmdb.org/t/p/w780/"
+
+// shareTMDBPosterURL builds the TMDB address for a path-style poster
+// value. Party creation stores the title's poster_path, which TMDB
+// enrichment writes in TMDB's own form, "/abc123.jpg" (TVDB enrichment
+// writes a full URL, which takes fetchPosterImage's other branch).
+// Change-media and a room's party start store whatever the client sent
+// instead. The web app's change-media sends back the stored value, and
+// no first-party client calls room start, but an API client can send the
+// bare "abc123.jpg" the web app's /api/images URLs carry.
+// Either way exactly one slash separates the size segment from the path:
+// appending the bare form to ".../w780" asked TMDB for ".../w780abc123.jpg".
+//
+// The constant prefix fixes the host: whatever the value holds lands in
+// the path, query or fragment of an image.tmdb.org URL, never the
+// authority (TestFetchPosterImage_PathFormsRequestTMDB pins that too).
+func shareTMDBPosterURL(path string) string {
+	return shareTMDBPosterBase + strings.TrimLeft(path, "/")
+}
+
 // fetchPosterImage retrieves the poster from a trusted image source.
-// Aurora's MediaPoster field stores either a TMDB-style path (e.g.
-// /abc123.jpg) or a full URL from TVDB/scanner enrichment; this function
-// handles both. Returns a decoded image.Image.
+// Aurora's MediaPoster field stores either a TMDB-style path (/abc123.jpg,
+// or abc123.jpg when a client sent it that way) or a full URL from
+// TVDB/scanner enrichment; this function handles both. Returns a decoded
+// image.Image.
 //
 // SSRF defense: full URLs are validated against shareAllowedImageHosts
 // BEFORE the request, and the http.Client's CheckRedirect re-validates
@@ -467,11 +506,9 @@ func (h *PartyShareHandler) fetchPosterImage(mediaPoster string) (image.Image, e
 	url := mediaPoster
 	isExternal := strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
 	if !isExternal {
-		// TMDB path — use the w780 size for quality/bandwidth balance.
-		// The composition scales it down to ~720×1080 anyway, so going
-		// larger than w780 just wastes bytes. Path-style media_poster is
-		// always TMDB by convention (TVDB enrichment writes full URLs).
-		url = "https://image.tmdb.org/t/p/w780" + url
+		// Path-style media_poster is always TMDB by convention (TVDB
+		// enrichment writes full URLs).
+		url = shareTMDBPosterURL(url)
 	} else {
 		// External URL — validate against allowlist before issuing the
 		// request. Rejecting here prevents the SSRF gadget where an
@@ -484,6 +521,8 @@ func (h *PartyShareHandler) fetchPosterImage(mediaPoster string) (image.Image, e
 
 	client := &http.Client{
 		Timeout: 10 * time.Second,
+		// nil (http.DefaultTransport) outside tests; see posterTransport.
+		Transport: h.posterTransport,
 		// Re-validate the host on every redirect. An allowlisted host
 		// could otherwise 302 to internal infrastructure. Matches the
 		// pattern in internal/metadata/imageproxy.go.
@@ -504,7 +543,9 @@ func (h *PartyShareHandler) fetchPosterImage(mediaPoster string) (image.Image, e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("poster fetch returned status %d", resp.StatusCode)
+		// The URL is in the error because it is what a wrong one looks
+		// like: the stored value alone hid ".../w780abc.jpg".
+		return nil, fmt.Errorf("poster fetch %s returned status %d", url, resp.StatusCode)
 	}
 
 	// Read up to 5MB. TMDB w780 posters are typically 100-300KB; cap
