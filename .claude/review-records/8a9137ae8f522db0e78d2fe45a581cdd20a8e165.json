@@ -1,0 +1,10 @@
+{
+  "sha": "8a9137ae8f522db0e78d2fe45a581cdd20a8e165",
+  "verdict": "lows-only",
+  "summary": "My Library writes, a third follow-up: the owner checks of the write path read a layout-effect mirror, so they move in a profile switch's own commit with the other two refs (an answer landing between the commit and its passive effects could still say a refusal under the new profile, or send the queue's closing read after a sign-out); the closing read's owner checks and the reverse case (a Parent's save out across a switch while the Kid's stored copy holds that title) are pinned. Independent reviewer, by reading: lows-only; the one low is that the closing read's two owner checks are pinned only together (a test-only change is with the builder). The phase of the owner refs has no deterministic test, which CLAUDE.md states.",
+  "reviewer": "fresh-context-agent-a4d2d468",
+  "findings": "1",
+  "diff_digest": "99e11c1a58ec018a9babce757741ea86e20c7cf633240728a66683a2a779dfbe",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T06:44:12Z"
+}
