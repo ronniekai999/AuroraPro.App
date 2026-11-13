@@ -131,10 +131,19 @@ describe('a restore that ends after the Admin page has gone', () => {
 
 describe('while a restore is out', () => {
   // The browser's own leave-this-page check: a cancelled beforeunload.
+  // Both halves of the ask, each checked on its own: the cancel (current
+  // browsers) and a truthy returnValue (Chrome and Edge before 119). jsdom
+  // has no BeforeUnloadEvent, and on its plain Event the legacy setter would
+  // cancel by itself, so returnValue is shadowed and the cancel is watched.
   const leavingIsChecked = () => {
     const e = new Event('beforeunload', { cancelable: true })
+    Object.defineProperty(e, 'returnValue', { value: undefined, writable: true })
+    const cancel = vi.spyOn(e, 'preventDefault')
     window.dispatchEvent(e)
-    return e.defaultPrevented
+    const cancelled = cancel.mock.calls.length > 0
+    const legacy = (e as unknown as { returnValue: unknown }).returnValue === true
+    expect(cancelled, 'the cancel and the legacy value go together').toBe(legacy)
+    return cancelled
   }
   async function startRestore(user: ReturnType<typeof userEvent.setup>) {
     const view = render(<Harness page adminUI />)

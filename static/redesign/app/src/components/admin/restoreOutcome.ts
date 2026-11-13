@@ -69,9 +69,11 @@ export function useRestoreOutcome(): State {
 // two restores cannot run at once on the server, but nothing here assumes it.
 let holds = 0
 const askBeforeLeaving = (e: BeforeUnloadEvent) => {
+  // Firefox, Safari, and Chrome and Edge from 119: a cancelled event asks.
   e.preventDefault()
-  // Older browsers look for a value set here.
-  e.returnValue = ''
+  // Chrome and Edge before 119 ignore the cancel here and ask only when
+  // returnValue is set to something truthy (an empty string asks nothing).
+  e.returnValue = true
 }
 
 /** Holds the check until the returned release is called (once). The

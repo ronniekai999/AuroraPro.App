@@ -380,6 +380,17 @@ describe('a role change that may have happened', () => {
 })
 
 describe('a thing already gone', () => {
+  it('hands the focus to the users table after deleting a user who was already gone', async () => {
+    const user = userEvent.setup()
+    api.listAdminUsers.mockResolvedValueOnce([{ id: 2, username: 'priya', email: '', role: 'user', created_at: '', updated_at: '' }]).mockResolvedValue([])
+    api.deleteUser.mockRejectedValue(new APIError(404, 'user not found', {}))
+    await openSection(user, 'Users')
+    await user.click(await screen.findByRole('button', { name: 'Actions for priya' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Delete user' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete user' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Users on this server' })).toHaveFocus())
+  })
   const PRIYA = { id: 2, username: 'priya', email: '', role: 'admin', created_at: '', updated_at: '' }
   it('closes the deny dialog, reads the requests again and says so', async () => {
     const user = userEvent.setup()

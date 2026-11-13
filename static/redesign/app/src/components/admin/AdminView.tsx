@@ -1061,6 +1061,7 @@ function AdminServerSettingsTab() {
         <p className="text-ink-2 text-xs mb-3">Delete cached TMDB poster/backdrop images. The cache repopulates on demand; useful after rescanning a large library or running out of disk.</p>
         <button
           ref={purgeRef}
+          {...purgeFlow.openerProps}
           onClick={e => { e.currentTarget.focus(); purgeFlow.ask(true) }}
           className="stage-btn stage-btn-ghost"
         >Purge image cache</button>
@@ -1245,9 +1246,14 @@ function AdminRoomsTab() {
 function AdminRequestsTab() {
   const [items, setItems] = useState<MediaRequest[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  // Tracks the request id with an in-flight approve/deny so we can disable
-  // both buttons on that row and avoid double-submits.
-  const [busy, setBusy] = useState<number | null>(null)
+  // The requests with an approve or deny out, so that row's buttons do
+  // nothing until it ends. A set, each id removed only by its own request:
+  // one id for the list let row B's answer unlock row A while A's approve was
+  // still out, and the server's approve checks then writes the status with
+  // nothing between, so two could both pass and the title be sent twice.
+  const [busyIds, setBusyIds] = useState<ReadonlySet<number>>(() => new Set())
+  const busyRef = useRef<Set<number>>(new Set())
+  const isBusy = (id: number) => busyIds.has(id) || busyRef.current.has(id)
   const reload = useCallback(async () => {
     try { setItems(await listPendingApprovals()); setErr(null) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
@@ -1258,18 +1264,22 @@ function AdminRequestsTab() {
   // when the request was already gone (the list is read again), else the
   // failure. A deny is answered in its dialog, an approve under its row.
   const act = useCallback(async (id: number, fn: (id: number) => Promise<void>, doing: string): Promise<Failure | null | 'gone'> => {
-    setBusy(id)
+    busyRef.current.add(id)
+    setBusyIds(new Set(busyRef.current))
     try { await fn(id); await reload(); return null }
     catch (e) {
       if (e instanceof APIError && e.status === 404) { await reload(); return 'gone' }
       return adminFailure(e, doing, { 400: 'The server refused this: the request may no longer be waiting for approval.' })
     }
-    finally { setBusy(null) }
+    finally {
+      busyRef.current.delete(id)
+      setBusyIds(new Set(busyRef.current))
+    }
   }, [reload])
   const [said, say] = useSaid()
   const [approveFailed, setApproveFailed] = useState<{ id: number; failure: Failure } | null>(null)
-  // The deny's dialog has its own busy flag: `busy` is one id for the
-  // list, and another row's approve ending must not unlock this dialog.
+  // The deny's dialog has its own busy flag, apart from the rows' marks:
+  // another row's answer must not unlock this dialog.
   const deny = useConfirmedAction<MediaRequest>(req => `denying the request for ${req.title}`)
   const headingRef = useRef<HTMLHeadingElement | null>(null)
 
@@ -1325,9 +1335,9 @@ function AdminRequestsTab() {
                 <button
                   // Not `disabled` while out: a refusal is said beside this
                   // button, and a disabled one drops the focus.
-                  aria-disabled={busy === req.id || undefined}
+                  aria-disabled={isBusy(req.id) || undefined}
                   onClick={async () => {
-                    if (busy === req.id) return
+                    if (isBusy(req.id)) return
                     setApproveFailed(null)
                     const failure = await act(req.id, approveRequest, `approve the request for ${req.title}`)
                     if (failure === 'gone') say(`The request for ${req.title} was already gone from the server.`)
@@ -1340,9 +1350,9 @@ function AdminRequestsTab() {
                   // Not `disabled` while its own deny is out: the dialog
                   // gives the focus back to it if the deny is refused.
                   {...deny.openerProps}
-                  aria-disabled={busy === req.id || deny.busy || undefined}
+                  aria-disabled={isBusy(req.id) || deny.busy || undefined}
                   onClick={e => {
-                    if (busy === req.id) return
+                    if (isBusy(req.id)) return
                     e.currentTarget.focus()
                     deny.ask(req)
                   }}
@@ -2984,8 +2994,10 @@ function UserRowMenu({
     } catch (err) {
       if (err instanceof APIError && err.status === 404) {
         say(`${user.username} was already gone from the server.`)
-        // The read takes the row away, this dialog with it.
+        // The read takes the row away, this dialog with it: the page hands
+        // the focus on as it does for a delete that went through.
         await reloadUsers()
+        onDeleted()
         return null
       }
       return adminFailure(err, `delete ${user.username}`)

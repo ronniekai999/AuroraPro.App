@@ -20,6 +20,7 @@ const api = vi.hoisted(() => ({
   getAdminLLM: vi.fn(), updateAdminLLM: vi.fn(),
   getAdminOAuth: vi.fn(), updateAdminOAuth: vi.fn(), getAdminReferralSummary: vi.fn(), getAllSettings: vi.fn(),
   listAdminUsers: vi.fn(), updateUserRole: vi.fn(),
+  purgeImageCache: vi.fn(),
   listRooms: vi.fn(), deleteRoom: vi.fn(), listAdminSessions: vi.fn(), deleteStreamSession: vi.fn(),
 }))
 vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof import('@/lib/api')>()), ...api }))
@@ -309,5 +310,48 @@ describe('a restore left by its way out', () => {
     await act(async () => { answer.resolve(new Response(JSON.stringify({ status: 'ok' }), { status: 200, headers: { 'content-type': 'application/json' } })) })
     await waitFor(() => expect(statusSays()).toContain('Restored the database from aurora.dump. Restart Aurora now.'))
     expect(screen.getByRole('region', { name: 'Restart Aurora now' })).toBeInTheDocument()
+  })
+})
+
+describe('the purge, asked again while one is out', () => {
+  it('opens nothing, and says why through the line its button is described by', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true })
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    api.purgeImageCache.mockReturnValue(never())
+    await openSection(user, 'Server settings')
+    const purge = await screen.findByRole('button', { name: 'Purge image cache' })
+    await user.click(purge)
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Purge image cache' }))
+    await act(async () => { vi.advanceTimersByTime(WAY_OUT_AFTER_MS) })
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Stop waiting' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(purge).toHaveAttribute('aria-disabled', 'true')
+    expect(purge).toHaveAccessibleDescription('Still waiting for the server: purging the image cache.')
+    await user.click(purge)
+    purge.focus()
+    await user.keyboard('{Enter}')
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(api.purgeImageCache).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('approves on two rows at once', () => {
+  it('keeps each row locked until its own answer: B ending does not unlock A', async () => {
+    const user = userEvent.setup()
+    api.listPendingApprovals.mockResolvedValue([req(5, 'Dune'), req(6, 'Arrival')])
+    const a = deferred<void>(), b = deferred<void>()
+    api.approveRequest.mockImplementation((id: number) => (id === 5 ? a.promise : b.promise))
+    await openSection(user, 'Requests')
+    const approveA = await screen.findByRole('button', { name: 'Approve Dune' })
+    await user.click(approveA)
+    await user.click(screen.getByRole('button', { name: 'Approve Arrival' }))
+    await act(async () => { b.resolve() })
+    await waitFor(() => expect(api.listPendingApprovals).toHaveBeenCalledTimes(2))
+    expect(approveA).toHaveAttribute('aria-disabled', 'true')
+    await user.click(approveA)
+    approveA.focus()
+    await user.keyboard('{Enter}')
+    expect(api.approveRequest.mock.calls.filter(([id]) => id === 5)).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'Deny Dune' })).toHaveAttribute('aria-disabled', 'true')
   })
 })
