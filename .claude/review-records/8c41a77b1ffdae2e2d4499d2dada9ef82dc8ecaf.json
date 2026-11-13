@@ -1,0 +1,10 @@
+{
+  "sha": "8c41a77b1ffdae2e2d4499d2dada9ef82dc8ecaf",
+  "verdict": "lows-only",
+  "summary": "Database restore as a server job that outlives its request, made atomic (wipe and load in one psql transaction, COMMIT only after pg_restore succeeded, restrict-key required), status route and the Admin page following the job across reloads and sign-ins, drain snapshot counts a running restore, client_connection_check_interval frees a killed restore's locks. Review R1 fix-first, R1b fix-first (2 mediums), re-check lows-only; 4 lows (message wording on a connection failure, a comment's cause, a stale follow across accounts in one tab pausing the scan bar, an early 500 as a reset mid-upload)",
+  "reviewer": "fresh-context-agent-a6f71328",
+  "findings": "4",
+  "diff_digest": "eda115388bbaa07ee3907a15044d22004b67eb1ad88a97bcafe2cae2181c3459",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T18:13:48Z"
+}
