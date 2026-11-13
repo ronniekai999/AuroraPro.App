@@ -1,0 +1,10 @@
+{
+  "sha": "65c7ee021a1bfd160efbf6e7658361d8aab063cb",
+  "verdict": "lows-only",
+  "summary": "Admin: the app's own dialogs and words in place of 35 native confirm and alert boxes; restore outcome kept across the page and the leave-page check while a restore is out; one question of a kind at a time; the app-wide native-box guard's allowlist emptied. Review 32 fix-first (1 high, mediums), check 32b fix-first (3 mediums), check 32c lows-only, 4 lows for a follow-up",
+  "reviewer": "fresh-context-agent-a36d6efc",
+  "findings": "4",
+  "diff_digest": "72772707766eeb45cd9452b2478acd09dc394334b07b58c01fa8f9f7f3f0af47",
+  "branch": "claude/affectionate-faraday-zwoxvl",
+  "recorded_at": "2026-11-13T10:02:26Z"
+}
