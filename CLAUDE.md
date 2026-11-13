@@ -2140,6 +2140,80 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   notice; a dialog taller than the window keeps its focused button in view
   and lets the title scroll away.
 
+### "Capture this page" (web app)
+
+Code: `lib/pageCapture.ts` (html-to-image), called by
+`components/BugReportForm.tsx`. Pinned by `scripts/verify-bug-capture.mjs`
+(in `audit:checks`: the built app under the production CSP, captures made
+through the form compared pixel by pixel with screenshots, mutation-tested)
+and `lib/pageCapture.test.ts`. The check runs the browser with font hinting
+and subpixel anti-aliasing off (its own fontconfig file and
+`--disable-lcd-text`) and leans on headless's hidden scrollbars: a visible
+scrollbar is drawn in the screenshot and not in the copy, and both font
+settings change the copy's text against the screen's (see the known gaps).
+The headless shell on the dev box is a wrapper that already passes
+`--font-render-hinting=none --disable-lcd-text`, and its fontconfig turns
+hinting off, which hid CI's failure there; the unwrapped
+`chrome-headless-shell.real` with a stock fontconfig reproduces CI.
+
+- The copy is laid out again inside an SVG image, which loads nothing. The
+  families the document has loaded go in as data: URLs read with `fetch`
+  (`cache: 'force-cache'`, allowed by connect-src 'self'), never
+  `skipFonts`: in a fallback face a large heading wrapped and was drawn
+  over the text under it. A file that cannot be read leaves its face out
+  of that capture and is tried again next time. The CSP is unchanged.
+- html-to-image shrinks every copied font size (`floor - 0.1px`);
+  `keepFontSizes` wraps `window.getComputedStyle` for the length of
+  `toBlob` so `font-size` reaches it unshrunk, and puts it back in
+  `finally`.
+- A `data-screenshot-exclude` part in the page's flow is copied as an empty
+  box drawn as nothing (nothing inside it is copied), so the page does not
+  move into its place; a fixed or absolutely placed one is left out, and so
+  is any excluded canvas, video, svg or iframe, whose copy html-to-image
+  does not make as the element itself (a canvas or video becomes an <img>
+  without the mark, an svg is copied whole). The filter reads the mark as
+  each node is copied, so a part that appears mid-capture is left out. An
+  excluded field's box is copied, so the form blanks its value first, in
+  `beforeCopy`, which runs after the fonts are read (a re-render while the
+  fields waited blank could put a value back). One capture runs at a time
+  from the press (`captureRunningRef`); `keepFontSizes` also holds if two
+  overlap.
+- The copy's body is moved by the scroll with `position: relative` and
+  `top`/`left`, and `overflow: visible`, in the copy's own style sheet with
+  `!important`: the copied logical insets win over plain `top`/`left`, and
+  the body's `overflow-x: hidden` made it a window-high scroll box that cut
+  off the picture's lower part on every scrolled page. A transform would
+  carry window-fixed parts (the phone's tab bar) with the page; sticky
+  parts stick in the copy as on screen.
+- The error screen's panel captures from the top of the page
+  (`captureFrom: 'top'`; opening it moves a phone's window down to it), the
+  dialog from where the window is.
+- Known gaps: an image `fetch` cannot read under the CSP (TMDB posters on
+  the request pages) is drawn as nothing; html-to-image reads every image
+  in the page, those below the window and lazy ones never loaded included,
+  so a capture of a long grid takes seconds (200 titles: about 16 s, as
+  before); an inner scroll box is drawn at its start (a rail scrolled
+  sideways shows its first cards); a backdrop blur picks up a faint tint at
+  its edges; fonts are matched by family only; checked in Chromium only,
+  not Safari or Firefox. The copy's text is always greyscale: on a screen
+  whose text has subpixel (colour-fringed) anti-aliasing, as on CI's runner
+  and many Linux desktops, the capture's text lacks the fringes (CI failed
+  the error screen at 390px by 1.7% on that, its paragraph and buttons as
+  much as anything). Text in a system font (the system's monospace:
+  the error screen's "What the app saw" block, party and device codes, some
+  admin text; fallback glyphs such as CJK or symbols outside the embedded
+  latin subsets) cannot be embedded, and on a Linux machine that hints its
+  fonts medium or full, at a device scale of 2, the copy (laid out at 1 and
+  scaled up) gives it other glyph widths than the screen: the error
+  screen's monospace lines end early (2.2% of that capture). Every box
+  keeps its size, so a line that came out wider could wrap and be drawn
+  over the text under it (not seen in today's app). The check turns both
+  off and sees neither. Laying the copy out at the
+  device scale (CSS `zoom`) was tried and made the embedded fonts' text
+  differ instead. The check's font coverage leans on the Bricolage
+  headings: where Inter is installed on the machine, a copy without
+  embedded fonts still draws Inter text right.
+
 ### Nullable database columns
 
 Go scalar fields use zero values as unknown sentinels. Queries projecting
