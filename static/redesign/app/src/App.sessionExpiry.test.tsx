@@ -31,12 +31,13 @@
 // load whose stored session turns out to be dead (the expiry fires then too)
 // still opens after the sign-in.
 
-import { Profiler } from 'react'
+import { Profiler, useLayoutEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, useLocation, useNavigate, type NavigateFunction } from 'react-router'
 import App from './App'
 import { resetSessionEndedLatch } from '@/lib/api'
+import { rememberDeviceIntent } from '@/lib/devicePairing'
 import { pageText } from '@/test/pageText'
 
 // The player is replaced by a marker that says what it was asked to play.
@@ -246,10 +247,15 @@ interface Commit {
 let go: NavigateFunction = () => {}
 function Where() {
   const loc = useLocation()
-  go = useNavigate()
+  const navigate = useNavigate()
+  useLayoutEffect(() => { go = navigate }, [navigate])
   return <div data-test-where={`${loc.pathname}${loc.search}`} hidden />
 }
 const where = () => document.querySelector('[data-test-where]')?.getAttribute('data-test-where') ?? null
+
+/** Run inside the next commits, before their passive effects, until it
+ *  returns true. */
+let duringCommit: (() => boolean) | null = null
 
 function renderApp(path: string, opts: Parameters<typeof stubServer>[0] = {}) {
   // api.ts ends a session once per sign-in; a test that ended one and never
@@ -273,6 +279,7 @@ function renderApp(path: string, opts: Parameters<typeof stubServer>[0] = {}) {
       averyUnread: /\b5 unread notification/.test(text),
       player: document.querySelector('[data-test-player]')?.getAttribute('data-media') ?? null,
     })
+    if (duringCommit?.()) duringCommit = null
   }
   render(
     <Profiler id="app" onRender={onRender}>
@@ -312,6 +319,7 @@ const PAGES: { path: string; shows: (a: Account) => string }[] = [
 ]
 
 afterEach(async () => {
+  duringCommit = null
   cleanup()
   // What was out when the test ended lands now, on the unmounted app, while
   // there is still a window; the handlers it runs may ask for more.
@@ -374,6 +382,34 @@ describe('a session found expired by a request', () => {
 })
 
 describe('a session that expires, then a sign-in as the same account', () => {
+  // The second clear runs once per expiry. Keyed on clearUserState instead,
+  // which changes with every user object, it ran again for the account now
+  // signed in: at the sign-in, and whenever another tab's write to the
+  // stored user brought a new /me, closing its player.
+  it('keeps what it opens after signing in when another tab updates the stored user', async () => {
+    const page = renderApp('/')
+    await screen.findAllByText(AVERY.recent.title, undefined, find)
+    page.expire()
+    await signInAs(AVERY)
+    await screen.findAllByText(AVERY.resume.title, undefined, find)
+    const hero = await waitFor(() => {
+      const section = document.querySelector<HTMLElement>('section[data-hero-kind]')
+      expect(section).not.toBeNull()
+      return section!
+    }, find)
+    fireEvent.click(within(hero).getByRole('button', { name: /^Resume/ }))
+    await waitFor(() => expect(page.commits.at(-1)!.player).toBe(String(AVERY.resume.id)), find)
+    const since = page.commits.length
+    // Another tab writes the stored user (an edit there): this tab asks /me
+    // again and is handed a new user object for the same account.
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: 'aurora_user', newValue: JSON.stringify(AVERY.user) }))
+    })
+    await settle(600)
+    expect(page.commits.length).toBeGreaterThan(since)
+    expect(page.commits.slice(since).filter(c => c.player !== String(AVERY.resume.id))).toEqual([])
+  }, 20_000)
+
   it('is back on the grid it was on, asked for again', async () => {
     const page = renderApp('/movies')
     await screen.findAllByText(AVERY.movie.title, undefined, find)
@@ -514,6 +550,33 @@ describe('a watch party across an expiry', () => {
     await settle()
     expect(page.commits.slice(since).filter(c => c.avery)).toEqual([])
     expect(screen.queryByText('Averyonly Party')).toBeNull()
+  }, 20_000)
+})
+
+// "Connect a TV with a code" on the sign-in page records the intent for the
+// next sign-in, and two things after that page is up used to forget it.
+// The expiry's second clear runs in the passive effects of the commit that
+// draws the page, so the page can be up, and pressed, before it; and an
+// expiry can be announced again once the page is up (here, as in the field,
+// a request of the ended session has its refresh refused after the first
+// announcement, and api.ts announces once per sign-in), which ran the whole
+// handler again. Recorded here inside that commit, before its effects; the
+// test fails if either forgets it.
+describe('the TV intent recorded on the sign-in page an expiry puts up', () => {
+  it('takes the next sign-in to pair the TV', async () => {
+    const page = renderApp('/')
+    await screen.findAllByText(AVERY.recent.title, undefined, find)
+    let recorded = false
+    duringCommit = () => {
+      if (!document.getElementById('auth-username')) return false
+      rememberDeviceIntent()
+      recorded = true
+      return true
+    }
+    page.expire()
+    expect(recorded).toBe(true)
+    await signInAs(BLAKE)
+    await waitFor(() => expect(where()).toBe('/device'), find)
   }, 20_000)
 })
 

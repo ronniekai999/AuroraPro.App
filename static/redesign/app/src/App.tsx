@@ -3669,9 +3669,10 @@ export default function App() {
   // having a signed-in user by a sign-out here or in another tab
   // (resetUserState, below) or a session that expires (the expiry listener
   // below). Not by a /me check that fails without the session ending: that
-  // is a bare setUser(false) (see the signed-out effect). Must clear every per-user cache (rails, grids, detail, player,
-  // …): on a shared browser a missed field shows the previous user's data to
-  // the next one to sign in on the tab. An expiry used to be a bare
+  // is a bare setUser(false) (see the signed-out effect). Must clear every
+  // per-user cache (rails, grids, detail, player, …): on a shared browser a
+  // missed field shows the previous user's data to the next one to sign in
+  // on the tab. An expiry used to be a bare
   // setUser(false), and on an account the app knew no profile for little
   // reset (the signed-out effect's hero, Continue Watching and search words,
   // the toasts, a cold load of Home's rails): the next account to sign in
@@ -3694,8 +3695,6 @@ export default function App() {
     setSearchQuery('')
     setSearchDescribe(null)
     forgetDescribedAnswer()
-    // "Connect a TV with a code" is the intent of whoever followed it.
-    forgetDeviceIntent()
     setLibraryServerFor(null)
     setHomeRails(undefined)
     // A failure of the previous session's load (its last requests are
@@ -3811,6 +3810,10 @@ export default function App() {
   // listener for why).
   const resetUserState = useCallback(() => {
     clearUserState()
+    // "Connect a TV with a code" is the intent of whoever followed it. Not
+    // in clearUserState: the sign-in page sets it for the next sign-in, and
+    // an expiry's second clear can run after that page is up.
+    forgetDeviceIntent()
     // My Library's list is cleared by its key going to null on every path;
     // here the save effect also writes this empty list under the outgoing
     // key, so a sign-out forgets this browser's snapshot of it. An expiry
@@ -3859,13 +3862,31 @@ export default function App() {
   // clears the stored user, which is the cross-tab logout signal below.)
   const leaveParty = party.leave
   const [expiries, setExpiries] = useState(0)
+  // The second clear below runs once per expiry, never because
+  // clearUserState's identity changed: that follows closePlayer, which
+  // follows `user`, so a clear keyed on it would run again at the next
+  // sign-in and at every /me another tab's stored-user write brings,
+  // closing the signed-in account's player and dropping its page.
   const clearUserStateRef = useRef(clearUserState)
   useLayoutEffect(() => { clearUserStateRef.current = clearUserState }, [clearUserState])
+  const expiriesClearedRef = useRef(0)
+  // Whether anyone is signed in, for the listener below. An expiry can be
+  // announced while the sign-in page is already up: another tab's sign-out
+  // put it there, and then one of this tab's own requests had its refresh
+  // refused (api.ts announces once per sign-in, per tab). There is nothing
+  // left to clear then, and running again forgot what the page had recorded
+  // for the next sign-in since ("Connect a TV with a code").
+  const signedInRef = useRef(false)
+  useLayoutEffect(() => { signedInRef.current = !!user }, [user])
   useEffect(() => {
     const onExpired = () => {
+      if (!signedInRef.current) return
       leaveParty()
       setUser(false)
       clearUserState()
+      // Now, not in the second clear below: the sign-in page may record a
+      // new one before that runs (see resetUserState).
+      forgetDeviceIntent()
       setExpiries(n => n + 1)
     }
     window.addEventListener(SESSION_EXPIRED_EVENT, onExpired)
@@ -3878,9 +3899,13 @@ export default function App() {
   // commit, while its effect still counts it as current, and put state back
   // (My requests' list set empty, so never asked for again, and the next
   // sign-in was told nothing had been requested). A sign-out has the same
-  // window, but nothing it starts lands in it every time.
+  // window and no second clear of its own, but nothing it starts lands in
+  // it every time (and a request it leaves out usually ends in an expiry,
+  // which brings one).
   useEffect(() => {
-    if (expiries > 0) clearUserStateRef.current()
+    if (expiries === expiriesClearedRef.current) return
+    expiriesClearedRef.current = expiries
+    clearUserStateRef.current()
   }, [expiries])
 
   // Cross-tab logout. A logout in another tab clears aurora_token

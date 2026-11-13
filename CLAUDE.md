@@ -1035,49 +1035,63 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     handler right after the expiry's, before that commit, while its effect
     still counts it as current, and it put state back (My requests' list set
     empty, so never asked for again, and the next sign-in told nothing had
-    been requested). Pinned by `App.sessionExpiry.test.tsx`, sampling every
-    commit: an account with no profile expires on Home, a grid, an open title
-    or My requests, and another account (with no profile, and with one) signs
-    in; no commit shows the first one's titles, request, grid total or unread
-    count, and removing the reset of the grids, the open title, the requests
-    list (pinned only when the next account has no profile: a profile changes
-    the list's key), the unread count or Home's rails fails it. Also pinned: a
-    card's menu, the composer and a PIN prompt open at the expiry are not
-    drawn for the next account; an expiry found by a request (opening My
-    requests) leaves its list to be asked for again, for either account; the
-    player is not booted again for either account; the party's room is told
-    the tab left; the same account is back on its grid and its title with each
-    asked for again; and a title link or a `/device?code=` link followed at a
-    cold load with a dead session opens after the sign-in (the same-account
-    and link cases fail if the expiry runs `resetUserState`). Not pinned on
-    this path, beyond what `App.tonight.test.tsx` and
-    `App.searchRequest.test.tsx` pin (the hero, Continue Watching, its wait,
-    the search field's words): the notification list (the bell is never
-    opened; the next sign-in's feed read also drops it, after its first
-    commit, or for an admin once its startup settles), the rail buffers, the
-    aborts, `libraryServerFor`, the described search's answer, the hero's
-    pause and pool generation, Home's error, the detail fields, the party
-    panel's flag and the other overlays. Still open: a failure handler that
-    navigates before that commit cannot be undone (a title's hydration refused
-    by the 401, on a Back or Forward to `/title/:id`, goes Home, so the
-    address kept is Home's). A sign-out has the same window before its commit,
-    with no request that lands in it every time, and runs no second clear. A
-    `/me` check that fails without the server ending the session (a network
-    error or a 5xx, at startup or after another tab changed the stored user)
-    drops to the sign-in page with a bare `setUser(false)`: only the
-    signed-out effects run (Tonight's hero, Continue Watching and its wait,
-    the search field's words, the open questions, the toasts, the badge) and,
-    on an account with profiles, the resets of the profile going to null; the
-    party is not left there. A push subscription stays registered on the
-    server for the expired account (deleting it there needs the session that
-    ended), so the device can keep getting that account's pushes until the
-    next sign-in, whose boot resync posts the browser's subscription again and
-    the server reassigns it to the account now signed in
-    (`ON CONFLICT (endpoint)`): that account gets pushes on this device
-    without having turned them on. True before this change too; unsubscribing
-    in the browser at the expiry would instead leave push off for the same
-    person after every expiry (the resync never subscribes). The grids' genre
-    filters and genre lists survive a sign-out and an expiry alike.
+    been requested). That second clear runs once per expiry, never because
+    `clearUserState` changed (it changes with every user object), or it would
+    run again for the account signed in next, at its sign-in and at every
+    `/me` another tab's write to the stored user brings. It also leaves alone
+    what the sign-in page records for the next sign-in, the TV intent: the
+    expiry forgets that at its moment, not in the second clear, which can run
+    after the page is up. An expiry announced while the tab is already signed
+    out is ignored (another tab's sign-out put the sign-in page up, then one
+    of this tab's requests had its refresh refused: api.ts announces once per
+    sign-in, per tab); running again, it forgot that intent. Pinned by
+    `App.sessionExpiry.test.tsx`, sampling every commit: an account with no
+    profile expires on Home, a grid, an open title or My requests, and another
+    account (with no profile, and with one) signs in; no commit shows the
+    first one's titles, request, grid total or unread count, and removing the
+    reset of the grids, the open title, the requests list (pinned only when
+    the next account has no profile: a profile changes the list's key), the
+    unread count or Home's rails fails it. Also pinned: a card's menu, the
+    composer and a PIN prompt open at the expiry are not drawn for the next
+    account; an expiry found by a request (opening My requests) leaves its
+    list to be asked for again, for either account; the account signed in
+    again keeps its player up when another tab writes the stored user; a TV
+    intent recorded as the sign-in page is first drawn survives the second
+    clear and a second announcement; the player is not booted again for either
+    account; the party's room is told the tab left; the same account is back
+    on its grid and its title with each asked for again; and a title link or a
+    `/device?code=` link followed at a cold load with a dead session opens
+    after the sign-in (the same-account and link cases fail if the expiry runs
+    `resetUserState`). Not pinned on this path, beyond what
+    `App.tonight.test.tsx` and `App.searchRequest.test.tsx` pin (the hero,
+    Continue Watching, its wait, the search field's words): the notification
+    list (the bell is never opened; the next sign-in's feed read also drops
+    it, after its first commit, or for an admin once its startup settles), the
+    rail buffers, the aborts, `libraryServerFor`, the described search's
+    answer, the hero's pause and pool generation, Home's error, the detail
+    fields, the party panel's flag and the other overlays. Still open: a
+    failure handler that navigates before that commit cannot be undone (a
+    title's hydration refused by the 401, on a Back or Forward to
+    `/title/:id`, goes Home, so the address kept is Home's). A sign-out has
+    the same window before its commit, with no request that lands in it every
+    time, and no second clear of its own (a request it leaves out usually ends
+    in an expiry, which brings one). A `/me` check that fails without the
+    server ending the session (a network error or a 5xx, at startup or after
+    another tab changed the stored user) drops to the sign-in page with a bare
+    `setUser(false)`: only the signed-out effects run (Tonight's hero,
+    Continue Watching and its wait, the search field's words, the open
+    questions, the toasts, the badge) and, on an account with profiles, the
+    resets of the profile going to null; the party is not left there. A push
+    subscription stays registered on the server for the expired account
+    (deleting it there needs the session that ended), so the device can keep
+    getting that account's pushes until the next sign-in, whose boot resync
+    posts the browser's subscription again and the server reassigns it to the
+    account now signed in (`ON CONFLICT (endpoint)`): that account gets pushes
+    on this device without having turned them on. True before this change too;
+    unsubscribing in the browser at the expiry would instead leave push off
+    for the same person after every expiry (the resync never subscribes). The
+    grids' genre filters and genre lists survive a sign-out and an expiry
+    alike.
 
 ### Member profiles and follows
 
