@@ -2,7 +2,9 @@
 // scanned, saying which, how far along, and where to see more.
 //
 // It polls `/api/libraries/{id}/scan/status` for every known library every
-// 4s while any are active. Idle, the component renders nothing.
+// 4s while any are active, one poll at a time, and not at all while a
+// database restore this browser knows of may be running. Idle, the component
+// renders nothing.
 //
 // Future: replace polling with a global WebSocket subscription to
 // the existing server-side `scan_progress` events. The polling
@@ -11,6 +13,25 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { getScanStatus, listLibraries, type Library, type ScanStatus } from '@/lib/api'
+import { rememberedRestore } from '@/lib/restoreStatus'
+import { RESTORE_UPLOAD_WINDOW_MS } from '@/hooks/useRestoreRecord'
+import { restoreRequestsOut } from './admin/restoreOutcome'
+
+/** The longest a restore runs once uploaded (restoreTimeout in
+ *  internal/api/admin_restore.go). */
+const RESTORE_RUN_MS = 60 * 60_000
+
+/** Whether a database restore this browser knows of may be running: this
+ *  tab's own request is out, or the restore this browser keeps was last read
+ *  as running, recently enough that it may still be. While one runs, its
+ *  transaction holds locks that these reads wait on (the session check
+ *  included), each holding one of the server's few database connections
+ *  until the restore ends; a poll every few seconds would stack them. */
+function restoreMayBeRunning(now = Date.now()): boolean {
+  if (restoreRequestsOut() > 0) return true
+  const kept = rememberedRestore()
+  return kept?.seen === 'running' && kept.at !== null && now - kept.at < RESTORE_UPLOAD_WINDOW_MS + RESTORE_RUN_MS
+}
 
 interface ProgressItem {
   library: Library
@@ -41,9 +62,15 @@ export function ScanProgressBar({ isAdmin, onScanComplete, onOpenLibraries }: {
   useEffect(() => {
     if (!isAdmin) return
     let cancelled = false
+    let listing = false
     const fetchLibs = async () => {
+      // One at a time: a restore's transaction (restoreMayBeRunning) holds
+      // this read too, and a list still out holds the next back.
+      if (listing) return
+      listing = true
       try { const ls = await listLibraries(); if (!cancelled) setLibraries(ls) }
       catch { /* non-fatal */ }
+      finally { listing = false }
     }
     void fetchLibs()
     const id = window.setInterval(fetchLibs, 30000)
@@ -56,7 +83,15 @@ export function ScanProgressBar({ isAdmin, onScanComplete, onOpenLibraries }: {
   useEffect(() => {
     if (!isAdmin || libraries.length === 0) return
     let cancelled = false
+    let polling = false
     const tick = async () => {
+      // One poll at a time, and none while a restore may be running
+      // (restoreMayBeRunning): a poll still out holds the next back.
+      if (polling || restoreMayBeRunning()) return
+      polling = true
+      try { await poll() } finally { polling = false }
+    }
+    const poll = async () => {
       // Collect only the libraries that ANSWERED, then merge over the previous
       // map. Rebuilding from empty each poll meant one failed request dropped
       // that library, which read as "no longer running" — indistinguishable

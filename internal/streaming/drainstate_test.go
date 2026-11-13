@@ -147,6 +147,47 @@ func TestDrainState_SumsTranscodeAndDirectPlay(t *testing.T) {
 	}
 }
 
+// TestDrainState_CountsARunningRestore — a restart stops a running database
+// restore, which then rolls back and has to be run again. The deploy scripts
+// read held_by_viewer alone, so the restore is counted there: their drain
+// then waits for it as it waits for a viewer, with no change to them.
+func TestDrainState_CountsARunningRestore(t *testing.T) {
+	tm := drainTestManager(t)
+	running := true
+	tm.SetDrainRestoreRunning(func() bool { return running })
+	tm.SetDrainExtraViewers(func() int { return 2 })
+
+	st := tm.DrainState()
+	if st.Restore != 1 || st.HeldByViewer != 3 {
+		t.Fatalf("with a restore running: Restore=%d HeldByViewer=%d, want 1 and 3 (2 direct play + the restore)", st.Restore, st.HeldByViewer)
+	}
+	running = false
+	st = tm.DrainState()
+	if st.Restore != 0 || st.HeldByViewer != 2 {
+		t.Fatalf("with no restore running: Restore=%d HeldByViewer=%d, want 0 and 2", st.Restore, st.HeldByViewer)
+	}
+
+	// The immediate publish writes a restore that started since the last
+	// tick, so the gate need not wait up to drainPublishInterval to see it.
+	path := filepath.Join(t.TempDir(), "stream-state.json")
+	if !tm.SetStreamStateFile(path) {
+		t.Fatal("SetStreamStateFile should enable publishing when the dir exists")
+	}
+	running = true
+	tm.PublishDrainState()
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read published state: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(blob, &raw); err != nil {
+		t.Fatalf("published state is not valid JSON: %v\n%s", err, blob)
+	}
+	if raw["held_by_viewer"] != float64(3) || raw["restore"] != float64(1) {
+		t.Fatalf("published %s; want held_by_viewer 3 and restore 1", blob)
+	}
+}
+
 // nil is the default and must not panic — direct play is optional wiring.
 func TestDrainState_NilExtraViewers(t *testing.T) {
 	tm := drainTestManager(t)

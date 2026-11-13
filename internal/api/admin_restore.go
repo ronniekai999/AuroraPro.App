@@ -6,19 +6,20 @@ package api
 // lost connection or a laptop lid cancelled it, pg_restore was killed, and its
 // single transaction rolled back onto the schema the wipe had already emptied.
 // Nothing recorded that it had happened. Now only the upload belongs to the
-// request. Once the file is on disk the rest (the check, the wipe, pg_restore)
-// runs on the server-lifecycle context with the overall timeout, holding the
+// request. Once the file is on disk the rest (the check, then the wipe and the
+// load in one transaction, admin_restore_pipeline.go) runs on the
+// server-lifecycle context with the overall timeout, holding the
 // backup/restore lock until it ends, and records each step here. The request
 // is answered when the restore ends if the client is still there; if not, the
 // record is the answer.
 //
-// Who can read the record. A restore takes the database the admin guard reads
-// away from under it: from the wipe until pg_restore commits there are no
-// tables, so RequireAuth's token-version check and the admin guard's session
-// lookup fail, and a restore that fails after the wipe leaves it that way. A
-// restore that succeeds brings back no sessions (dumps exclude refresh_tokens'
-// rows), so the admin's own session is gone and their access token is refused
-// by the admin guard (session_ended). An admin-guarded read alone would be
+// Who can read the record. While the restore's transaction runs it holds
+// exclusive locks on every table it dropped, so RequireAuth's token-version
+// check (once its 60 s cache lapses; it has no deadline of its own) and the
+// admin guard's session lookup wait on them until the restore ends. A restore
+// that succeeds brings back no sessions (dumps exclude refresh_tokens' rows),
+// so the admin's own session is gone and their access token is refused by the
+// admin guard (session_ended). An admin-guarded read alone would be
 // unreachable for the person who started the restore in exactly the states
 // they need it. So there are two reads of the one record:
 //
@@ -34,7 +35,11 @@ package api
 //
 // Memory only: a restart forgets it (docs/backup-restore.md says so). A
 // restart during a restore also ends it: the lifecycle context is cancelled at
-// shutdown, and systemd stops every process in the unit, pg_restore included.
+// shutdown, and systemd stops every process in the unit, psql and pg_restore
+// included. The transaction then rolls back, so the old data stays and the
+// restore has to be run again. The deploy scripts' viewer drain counts a
+// running restore (wireRestoreDrain), so an update waits up to its five
+// minutes for one before restarting.
 
 import (
 	"context"
@@ -84,21 +89,22 @@ func validRestoreTicket(s string) bool {
 type restoreStep string
 
 const (
-	// restoreStepChecking: pg_restore reads the whole archive to /dev/null.
-	// The database has not been touched.
+	// restoreStepChecking: the client programs, the archive's table of
+	// contents and a full read of the archive are checked. The database has
+	// not been touched.
 	restoreStepChecking restoreStep = "checking"
-	// restoreStepClearing: the wipe of the public schema.
-	restoreStepClearing restoreStep = "clearing"
-	// restoreStepRestoring: pg_restore --single-transaction.
+	// restoreStepRestoring: one transaction wipes the public schema and
+	// loads the archive. Nothing is committed until it has all loaded.
+	// (There used to be a "clearing" step: the wipe committed on its own.)
 	restoreStepRestoring restoreStep = "restoring"
 )
 
 // What a restore has done to the database, as far as the server can tell.
+// There is no "empty" any more: the wipe commits only with the load.
 const (
-	restoreDBUnchanged = "unchanged" // the wipe has not run, or failed as a whole
-	restoreDBUnknown   = "unknown"   // a step was stopped part way; it may or may not have landed
-	restoreDBEmpty     = "empty"     // wiped; pg_restore has not committed (running) or rolled back (failed)
-	restoreDBRestored  = "restored"  // pg_restore committed
+	restoreDBUnchanged = "unchanged" // nothing committed: running, or failed and rolled back
+	restoreDBUnknown   = "unknown"   // cut off as it committed, or an internal error: the old data or the backup
+	restoreDBRestored  = "restored"  // the transaction committed
 )
 
 // What a restore is.
@@ -121,8 +127,8 @@ type RestoreStatus struct {
 	Finished *time.Time `json:"finished_at,omitempty"`
 	// RestartRequired: a restore has succeeded since this process started,
 	// so it is serving a database its migrations have not seen and its pool
-	// may hold plans for tables that were dropped. A later restore that is
-	// refused before its wipe does not clear it.
+	// may hold plans for tables that were dropped. A later restore that does
+	// not succeed does not clear it.
 	RestartRequired bool `json:"restart_required"`
 	// Message is the server's account of a finished restore: the same text
 	// its request was (or would have been) answered with. The admin read
@@ -144,6 +150,27 @@ type restoreTracker struct {
 	mu              sync.Mutex
 	run             *restoreRun
 	restartRequired bool
+	// onChange runs (outside mu) when a restore begins and when it ends: the
+	// deploy drain's snapshot is published at once (wireRestoreDrain).
+	onChange func()
+}
+
+// running reports whether a restore is running now. The deploy drain counts
+// it (wireRestoreDrain).
+func (t *restoreTracker) running() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.run != nil && t.run.status.State == restoreStateRunning
+}
+
+// changed runs onChange, if one is set.
+func (t *restoreTracker) changed() {
+	t.mu.Lock()
+	fn := t.onChange
+	t.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // begin records a new restore as running its first step, replacing the
@@ -163,6 +190,7 @@ func (t *restoreTracker) begin(file, ticket string, now time.Time) *restoreRun {
 	t.mu.Lock()
 	t.run = run
 	t.mu.Unlock()
+	t.changed()
 	return run
 }
 
@@ -176,6 +204,7 @@ func (t *restoreTracker) step(run *restoreRun, step restoreStep, database string
 
 // finish records how a restore ended.
 func (t *restoreTracker) finish(run *restoreRun, res restoreResult, now time.Time) {
+	defer t.changed()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	run.status.Finished = &now
@@ -268,11 +297,58 @@ func execRestoreCommand(ctx context.Context, _ restoreStep, name string, args, e
 	return strings.TrimSpace(stderr.String()), err
 }
 
-func (h *AdminHandler) restoreCommand() restoreCommand {
+// restorePrograms runs a restore's external programs: the real ones
+// (restoreTools, admin_restore_pipeline.go), or, in tests, stand-ins.
+type restorePrograms interface {
+	// ready says why the client programs cannot run a restore (one is
+	// missing, or older than pg_restore --restrict-key), or "".
+	ready(ctx context.Context) string
+	// check refuses an archive before anything is touched: the answer's
+	// status and message, or 0 when it may be restored.
+	check(ctx context.Context, archive string) (status int, message string)
+	// replace runs the transaction: the wipe and the load.
+	replace(ctx context.Context, connURL string, env []string, archive string) replaceOutcome
+}
+
+func (h *AdminHandler) restorePrograms() restorePrograms {
 	if h.restoreExec != nil {
-		return h.restoreExec
+		return commandPrograms{run: h.restoreExec}
 	}
-	return execRestoreCommand
+	return h.restoreTools
+}
+
+// commandPrograms puts a restoreCommand (a test's stand-in for psql and
+// pg_restore) behind restorePrograms: the check is one command at
+// restoreStepChecking, and the whole transaction one command at
+// restoreStepRestoring, which commits when it succeeds.
+type commandPrograms struct{ run restoreCommand }
+
+func (c commandPrograms) ready(context.Context) string { return "" }
+
+func (c commandPrograms) check(ctx context.Context, archive string) (int, string) {
+	stderr, err := c.run(ctx, restoreStepChecking, "pg_restore", []string{"-f", os.DevNull, archive}, nil)
+	if err == nil {
+		return 0, ""
+	}
+	return http.StatusBadRequest, restoreUnreadableMessage(stderr)
+}
+
+func (c commandPrograms) replace(ctx context.Context, connURL string, env []string, archive string) replaceOutcome {
+	stderr, err := c.run(ctx, restoreStepRestoring, "psql", append(restorePsqlArgs(connURL), archive), env)
+	if err != nil {
+		return replaceOutcome{cause: err.Error(), stderr: stderr}
+	}
+	return replaceOutcome{committed: true}
+}
+
+// restoreUnreadableMessage is the answer for an archive pg_restore cannot
+// read in full.
+func restoreUnreadableMessage(stderr string) string {
+	msg := "upload is not a complete, readable pg_dump custom archive (pg_restore validation failed) — the database was NOT modified"
+	if stderr != "" {
+		msg += ": " + stderr
+	}
+	return msg
 }
 
 // restoreContext is the context the restore runs under once its upload is
@@ -323,9 +399,9 @@ func (h *AdminHandler) RestoreStatus(w http.ResponseWriter, r *http.Request) {
 
 // RestoreStatusByTicket handles GET /api/restore/status: the same record,
 // answered only to the latest restore's ticket (restoreTicketHeader), with no
-// session check, because while a restore runs, and after one that fails past
-// its wipe, there is no database to check a session against. Anything else is
-// the same 404, whether or not a restore exists.
+// session check, because while a restore's transaction runs the session
+// checks wait on its locks, and one that succeeds brings back no sessions.
+// Anything else is the same 404, whether or not a restore exists.
 func (h *AdminHandler) RestoreStatusByTicket(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	st, ok := h.restores.statusForTicket(r.Header.Get(restoreTicketHeader))
@@ -334,4 +410,22 @@ func (h *AdminHandler) RestoreStatusByTicket(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, st)
+}
+
+// restoreDrain is what the deploy drain needs of the stream-state snapshot
+// (streaming.TranscodeManager): to count a running restore, and to publish
+// at once when one begins or ends.
+type restoreDrain interface {
+	SetDrainRestoreRunning(fn func() bool)
+	PublishDrainState()
+}
+
+// wireRestoreDrain makes the deploy scripts' viewer drain wait for a running
+// restore: a restart stops it, and it then has to be run again. Called by
+// NewAdminHandler with the transcode manager, which writes the snapshot.
+func (h *AdminHandler) wireRestoreDrain(d restoreDrain) {
+	d.SetDrainRestoreRunning(h.restores.running)
+	h.restores.mu.Lock()
+	h.restores.onChange = d.PublishDrainState
+	h.restores.mu.Unlock()
 }

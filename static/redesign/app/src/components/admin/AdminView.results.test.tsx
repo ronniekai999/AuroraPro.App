@@ -268,18 +268,18 @@ describe('failures said beside what failed', () => {
     expect(alertLines(await screen.findByRole('alert'))).toEqual(['A backup or restore is already running. Try again when it has finished.', 'The server said: another backup or restore is already in progress'])
   })
 
-  it('says a restore that failed part way may have left the database empty, and keeps it in the panel once the dialog is put down', async () => {
+  it('says a restore that failed was rolled back unless it was cut off as it committed, and keeps it in the panel once the dialog is put down', async () => {
     const user = userEvent.setup()
     fetchAnswer = async url => url === '/api/admin/restore'
-      ? json(500, { error: { code: 500, message: 'restore failed; database is in wiped state' } })
+      ? json(500, { error: { code: 500, message: 'the restore failed and was rolled back, so the database was NOT modified: lock timeout' } })
       : json(503, { error: 'unavailable' })
     const view = await openSection(user, 'Backup and restore')
     await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
     await user.click(screen.getByRole('button', { name: 'Restore database' }))
     const d = await screen.findByRole('alertdialog')
     await user.click(within(d).getByRole('button', { name: 'Restore database' }))
-    const said = 'The restore did not finish. Depending on where it stopped, the database is either as it was or empty. Read what the server said before going on.'
-    expect(alertLines(await within(d).findByRole('alert'))).toEqual([said, 'The server said: restore failed; database is in wiped state'])
+    const said = 'The restore did not go through. Unless it was cut off as it was being committed, the database was not changed. Read what the server said before going on.'
+    expect(alertLines(await within(d).findByRole('alert'))).toEqual([said, 'The server said: the restore failed and was rolled back, so the database was NOT modified: lock timeout'])
     await user.click(within(d).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
     expect(screen.getByText(said)).toBeInTheDocument()

@@ -31,8 +31,8 @@ export function RestoreOutcomeAlert({ accountId }: { accountId: number }) {
                 {outcome.ok
                   ? 'Restart Aurora now'
                   // No answer is not a failure: the restore may still be
-                  // running on the server, past its wipe, and a restart now
-                  // would empty the database.
+                  // running on the server, and a restart now would stop it
+                  // (it would roll back, and have to be run again).
                   : outcome.lost
                     ? `No answer came back about the restore from ${outcome.file}`
                     : `The restore from ${outcome.file} did not go through`}

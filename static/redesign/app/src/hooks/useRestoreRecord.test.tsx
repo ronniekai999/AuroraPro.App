@@ -11,7 +11,7 @@ import type { RestoreStatus } from '@/lib/restoreStatus'
 const TICKET = 'k'.repeat(43)
 const keep = (seen: string | null, at: number | null = null) => localStorage.setItem('aurora.restore', JSON.stringify({ ticket: TICKET, file: 'b.dump', seen, at }))
 const json = (code: number, body: unknown) => new Response(JSON.stringify(body), { status: code, headers: { 'content-type': 'application/json' } })
-const rec = (over: Partial<RestoreStatus>): RestoreStatus => ({ state: 'running', step: 'restoring', database: 'empty', file: 'b.dump', started_at: '2026-11-13T15:00:00Z', restart_required: false, ...over })
+const rec = (over: Partial<RestoreStatus>): RestoreStatus => ({ state: 'running', step: 'restoring', database: 'unchanged', file: 'b.dump', started_at: '2026-11-13T15:00:00Z', restart_required: false, ...over })
 const settle = () => act(async () => { for (let i = 0; i < 5; i++) await Promise.resolve() })
 const tick = () => act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_POLL_MS) })
 

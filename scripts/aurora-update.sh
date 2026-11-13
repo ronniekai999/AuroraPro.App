@@ -1304,7 +1304,10 @@ ensure_llm_models
 # kills FFmpeg children immediately AND destroys the in-memory transcode
 # sessions, breaking playback for anyone watching. Wait up to 300 s for
 # viewers to finish organically; the _DRAIN_LOG_EVERY throttle keeps log
-# noise low.
+# noise low. The server counts a running database restore in the same
+# snapshot (as one held session), so this waits for that too: a restart
+# stops the restore, which then rolls back to the old data and has to be run
+# again.
 #
 # The gate used to be `pgrep -u aurora ffmpeg`, which measured the wrong
 # thing. Aurora reaps the encoder for a PAUSED viewer ("reaped idle transcode
@@ -1412,7 +1415,7 @@ if streams_busy; then
     if [ -z "$_DRAIN_HELD" ]; then
         log "drain gate: ffmpeg-only (no fresh $STREAM_STATE_FILE — old build or stale snapshot)"
     elif [ "$_DRAIN_HELD" -gt 0 ]; then
-        log "drain gate: server reports ${_DRAIN_HELD} session(s) held by viewers"
+        log "drain gate: server reports ${_DRAIN_HELD} session(s) held by viewers or a database restore"
     else
         # Snapshot is fresh and says nobody, yet we are waiting — so ffmpeg is
         # the reason (a stream started inside the publish window). Saying
@@ -1420,11 +1423,11 @@ if streams_busy; then
         # which defeats the point of logging why a deploy waits.
         log "drain gate: snapshot reports 0 held, but ffmpeg is still running — waiting on it"
     fi
-    write_status restarting "Waiting for active stream sessions to finish before restart (up to ${_DRAIN_MAX}s)…" "$OLD_SHA" "$NEW_SHA"
+    write_status restarting "Waiting for active stream sessions or a database restore to finish before restart (up to ${_DRAIN_MAX}s)…" "$OLD_SHA" "$NEW_SHA"
     while streams_busy && [ "$_DRAIN_WAITED" -lt "$_DRAIN_MAX" ]; do
         if [ "$_DRAIN_WAITED" -ge "$_DRAIN_NEXT_LOG" ]; then
             _DRAIN_HELD=$(viewers_held)
-            log "active stream sessions detected — waiting for viewers to finish (${_DRAIN_WAITED}/${_DRAIN_MAX}s${_DRAIN_HELD:+, ${_DRAIN_HELD} held by viewers})..."
+            log "active stream sessions detected — waiting for viewers (or a database restore) to finish (${_DRAIN_WAITED}/${_DRAIN_MAX}s${_DRAIN_HELD:+, ${_DRAIN_HELD} held by viewers or a restore})..."
             _DRAIN_NEXT_LOG=$((_DRAIN_NEXT_LOG + _DRAIN_LOG_EVERY))
         fi
         sleep 10

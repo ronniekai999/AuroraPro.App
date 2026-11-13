@@ -751,9 +751,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 		// A restore's status, answered only to the ticket its upload carried
 		// (X-Aurora-Restore-Ticket; anything else is a 404). Outside the
-		// session checks on purpose: from a restore's wipe until it commits,
-		// and after one that fails past it, there are no tables to check a
-		// session against, and a successful one brings back no sessions, so
+		// session checks on purpose: while a restore's transaction runs they
+		// wait on its locks, and a successful one brings back no sessions, so
 		// the admin who started it could not otherwise learn how it went.
 		// The upload passed the full admin guard. See admin_restore.go.
 		r.Get("/api/restore/status", adminH.RestoreStatusByTicket)
@@ -1243,11 +1242,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// 2026-05-18 — admin restore endpoint. Same rationale (long-
 			// running). Streams the uploaded pg_dump custom-format
 			// archive to a temp file via MultipartReader (bounded
-			// memory), then runs pg_restore --single-transaction
-			// against it. Destructive — the handler runs a per-object
-			// wipe that preserves installed extensions before invoking
-			// pg_restore. See admin_backup.go header for the full
-			// pipeline rationale.
+			// memory), then, in one transaction, runs a per-object wipe
+			// that preserves installed extensions and restores the
+			// archive (admin_restore_pipeline.go). Destructive. See the
+			// admin_backup.go header for the full pipeline rationale.
 			r.With(requireAdmin).Post("/api/admin/restore", adminH.Restore)
 			// The latest restore since this process started: running, how it
 			// ended, whether Aurora needs a restart. A restore no longer ends

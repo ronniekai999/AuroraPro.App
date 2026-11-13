@@ -141,10 +141,11 @@ export default function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void
   // On a fresh install (no account in the database) the first person to
   // register becomes the admin and needs no invite code.
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null)
-  // A database restore this browser started: from its wipe until it
-  // commits, and after one that fails past it or succeeds, the admin who
-  // started it is signed out and lands here, the one page that can still
-  // say how it went (by its ticket; hooks/useRestoreRecord).
+  // A database restore this browser started: while its transaction runs the
+  // server's session checks wait on it (and can fail after a minute), and
+  // one that succeeds ends every sign-in, so the admin who started it can
+  // land here, the one page that can still say how it went (by its ticket;
+  // hooks/useRestoreRecord).
   const restoreRecord = useRestoreRecord({})
   useEffect(() => {
     let cancelled = false

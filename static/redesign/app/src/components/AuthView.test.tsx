@@ -519,10 +519,10 @@ describe('a database restore this browser started', () => {
 
   it('says one is running, on the sign-in page and the first-run page alike', async () => {
     keep('running')
-    answer(json(200, { state: 'running', step: 'restoring', database: 'empty', file: 'aurora-backup.dump', started_at: '2026-11-13T15:00:00Z', restart_required: false }))
+    answer(json(200, { state: 'running', step: 'restoring', database: 'unchanged', file: 'aurora-backup.dump', started_at: '2026-11-13T15:00:00Z', restart_required: false }))
     await open()
     const note = await screen.findByRole('region', { name: 'A restore is running' })
-    expect(note).toHaveTextContent('Until it has finished nobody can sign in.')
+    expect(note).toHaveTextContent('Until it has finished, Aurora waits for it: pages and sign-ins hang, and some fail after a minute.')
     cleanup()
     await open('/', status({ has_users: false }))
     expect(await screen.findByRole('region', { name: 'A restore is running' })).toBeInTheDocument()
@@ -541,21 +541,21 @@ describe('a database restore this browser started', () => {
     expect(localStorage.getItem('aurora.restore')).toBeNull()
   })
 
-  it('says the database is empty after one that failed past its wipe', async () => {
+  it('says the database holds the old data or the backup after one cut off as it committed', async () => {
     keep('running')
-    answer(json(200, { state: 'failed', step: 'restoring', database: 'empty', file: 'aurora-backup.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:10:00Z', restart_required: false, message: 'restore failed; database is in wiped state' }))
+    answer(json(200, { state: 'failed', step: 'restoring', database: 'unknown', file: 'aurora-backup.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:10:00Z', restart_required: false, message: 'psql ended without reporting whether the COMMIT took effect' }))
     await open()
-    const note = await screen.findByRole('region', { name: 'The restore from aurora-backup.dump failed' })
-    expect(note).toHaveTextContent('Restore a backup from the server’s command line before restarting Aurora')
+    const note = await screen.findByRole('region', { name: 'Aurora cannot tell whether the restore from aurora-backup.dump went through' })
+    expect(note).toHaveTextContent('the database holds either what it held before or the whole backup, never a mix')
     // The server's own text is for the Admin page only.
-    expect(note).not.toHaveTextContent('wiped state')
+    expect(note).not.toHaveTextContent('COMMIT took effect')
   })
 
   it('says Aurora has no record of one it last saw running', async () => {
     keep('running')
     answer(json(404, { error: { code: 404, reason: 'restore_unknown', message: 'no restore with this ticket' } }))
     await open()
-    expect(await screen.findByRole('region', { name: 'Aurora has no record of the restore from aurora-backup.dump' })).toHaveTextContent('the restore did not finish and the database may be empty')
+    expect(await screen.findByRole('region', { name: 'Aurora has no record of the restore from aurora-backup.dump' })).toHaveTextContent('the restore was stopped and rolled back, so the database is as it was')
   })
 
   it('says nothing, and asks nothing, without a restore', async () => {

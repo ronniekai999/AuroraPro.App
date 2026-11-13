@@ -102,6 +102,10 @@ type AdminHandler struct {
 	// restoreExec runs psql and pg_restore for a restore. Nil in production
 	// (execRestoreCommand); tests put a fake here.
 	restoreExec restoreCommand
+	// restoreTools names the real client programs and the wipe's lock
+	// timeout (admin_restore_pipeline.go); the zero value is production's.
+	// Tests point it at stand-ins.
+	restoreTools restoreTools
 }
 
 // SetDatabaseURL wires the conninfo string used by the pg_dump-based
@@ -139,6 +143,9 @@ func NewAdminHandler(
 	}
 	if len(transcodeDir) > 0 {
 		h.transcodeDir = transcodeDir[0]
+	}
+	if transcode != nil {
+		h.wireRestoreDrain(transcode)
 	}
 	return h
 }

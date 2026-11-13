@@ -69,7 +69,7 @@ Aurora is a media server written in Go with a React single-page app on top. It s
 - **Installable PWA** — manifest + icons, and **web push** that reaches your devices with no tab open (request ready/failed, party invites & reminders, highlight reel ready, plus admin alerts for pending requests and completed scans). Zero configuration: the VAPID keypair is generated on first use. See [`docs/push.md`](docs/push.md)
 - **Admin dashboard**: users & roles, libraries, requests, flagged-match review, activity log, live transcode sessions, watch-party rooms, logs, server panel, LLM settings, OAuth config
 - **Signup attribution** — a one-shot "how did you hear about Aurora?" prompt for invite-free SSO signups, surfaced in the admin Users table
-- **Backup & restore** built into the admin UI (`pg_dump` under the hood); a restore runs on the server to its end even if the browser goes, and reports how it went ([runbook](docs/backup-restore.md))
+- **Backup & restore** built into the admin UI (`pg_dump` under the hood); a restore runs on the server to its end even if the browser goes, replaces the data in one transaction (a failure leaves the database as it was), and reports how it went ([runbook](docs/backup-restore.md))
 - **Auto-updater**: a 5-minute systemd timer plus an in-app **Update Now** button; optional signed-commit verification before anything is built as root
 - **Hardened systemd unit**: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, dedicated unprivileged `aurora` user
 - **In-app bug reporter** (optional) that files GitHub issues with a screenshot or 30-second screen recording — see [`docs/bug-report-setup.md`](docs/bug-report-setup.md)
@@ -224,7 +224,7 @@ systemctl restart aurora          # restart after a config change
 
 ## 🔄 Updating
 
-**Automatic** — `aurora-update.timer` checks your origin every 5 minutes and does `git fetch` → build the frontend and binary from that exact commit → wait for viewers → atomic swap → restart → verification. A deploy counts only when the running service is the binary just built, reports healthy with its database connected, and serves the frontend just installed; any failure once installation starts (including a failed restart) restores the previous binary, frontend and migration files. Browser tabs left open across an update show a **Reload** prompt. Admins can also hit **Update Now** in the UI (Server tab), which triggers the same pipeline through a systemd path unit — no sudo involved.
+**Automatic** — `aurora-update.timer` checks your origin every 5 minutes and does `git fetch` → build the frontend and binary from that exact commit → wait for viewers (and a running database restore) → atomic swap → restart → verification. A deploy counts only when the running service is the binary just built, reports healthy with its database connected, and serves the frontend just installed; any failure once installation starts (including a failed restart) restores the previous binary, frontend and migration files. Browser tabs left open across an update show a **Reload** prompt. Admins can also hit **Update Now** in the UI (Server tab), which triggers the same pipeline through a systemd path unit — no sudo involved.
 
 ```bash
 systemctl status aurora-update.timer

@@ -1435,7 +1435,10 @@ count restarts).
   `aurora-update.sh`, `install.sh` and `redeploy.sh`
   (`scripts/drain-gate-test.sh` checks the copies, the hostile-file cases, that
   it reads the path `DefaultStreamStateFile` writes, and that each script waits
-  before its first live change). `install.sh` re-runs and `redeploy.sh` used not
+  before its first live change). A running database restore counts as one
+  held session in the snapshot (`restore`, inside `held_by_viewer`, which is
+  all the block reads), so the drain waits for it too, up to its limit; see
+  Admin page dialogs and the restore. `install.sh` re-runs and `redeploy.sh` used not
   to wait at all; they skip with `AURORA_SKIP_DRAIN=1` / `--no-drain`, and when
   the service is not running. `install.sh` stages and swaps its release files
   (binary, migrations, frontend) in `install_release_files`, on the line after
@@ -2182,7 +2185,8 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
 `adminFailure.ts`, `restoreOutcome.ts`, `RestoreOutcomeAlert.tsx`),
 `components/settings/ConfirmDialog.tsx`, and for the restore's record
 `lib/restoreStatus.ts`, `hooks/useRestoreRecord.ts`,
-`components/RestoreRecordNote.tsx` and `internal/api/admin_restore.go`.
+`components/RestoreRecordNote.tsx`, `internal/api/admin_restore.go` and
+(the one transaction) `internal/api/admin_restore_pipeline.go`.
 
 - No native alert, confirm or prompt (the app-wide guard's allowlist is
   empty). Every confirmation is `ConfirmDialog` through
@@ -2209,28 +2213,67 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   server's text: see the failure-words bullet above.)
 - A restore outlives its request (`internal/api/admin_restore.go`, runbook
   `docs/backup-restore.md`). Only the upload is the request's: once the file
-  is on disk the check, the wipe and `pg_restore` run on the server-lifecycle
+  is on disk the check and the transaction run on the server-lifecycle
   context (`SetRootContext`) under the 60-minute `restoreTimeout`, on a
   goroutine that owns `backupRestoreMu` (the 409 for a second backup or
   restore) and the temp file, releasing both before it answers a client that
   stayed. A client that left gets nothing (logged as 499); the restore runs
-  on. A failure past the wipe tells the admin to restore from the command
-  line before restarting, never to retry: nobody can sign in to an empty
-  database, and a restart on one makes the first account registered its
-  admin. A shutdown
-  still ends it (the lifecycle context, and systemd stops the unit's
-  processes), as does the updater's deploy restart. A panic on that
+  on. A shutdown still ends it (the lifecycle context, and systemd stops the
+  unit's processes), and so does the updater's deploy restart once its
+  drain has waited its five minutes; it is then rolled back. A panic on that
   goroutine is recovered and recorded. The answers to a client that stayed
-  are the old ones (400/500/200 and their sentences); Aurora never answers a
-  restore with 502-504, which the web app reads as a proxy giving up.
+  are 400/500/200 with their sentences; Aurora never answers a restore with
+  502-504, which the web app reads as a proxy giving up.
+- The wipe and the load are ONE transaction (`admin_restore_pipeline.go`):
+  one `psql` session reads `BEGIN`, `SET LOCAL`s, the wipe
+  (`restoreWipeSQL`) and then `pg_restore -f -`'s SQL, and Aurora writes the
+  `COMMIT` only when `pg_restore` exited 0, everything it wrote reached
+  psql, and the context has not ended (`replace`'s guard). psql is never run
+  with `--single-transaction`, which commits at the end of its input whatever
+  became of `pg_restore` (`restorePsqlArgs` is the one place its arguments
+  are built). Any failure, a stop, a crash or a lost connection rolls back:
+  `database` is `unchanged`. `unknown` only when psql ended after the COMMIT
+  was sent and before it reported the result (markers `\warn`ed after it
+  decide), or on a recovered panic. Safety rests on `pg_restore
+  --restrict-key` (psql obeys backslash commands in the stream; without the
+  `\restrict` pair a crafted archive could run shell commands): a missing or
+  older client is refused before the upload is read (`ready`, a 500 that says
+  which). The check refuses, before the transaction takes a lock, an archive
+  `pg_restore -l` lists with an entry that cannot run in one transaction
+  (large objects, which `pg_restore` wraps in their own `BEGIN`/`COMMIT`;
+  database-level entries; anything unknown), one with no `TABLE` entry
+  (`pg_restore` reads some "PGDMP"-prefixed garbage as an empty archive and
+  restores it without an error: an empty database would have committed), and
+  one it cannot read in full. While the transaction runs it holds ACCESS
+  EXCLUSIVE locks on everything it dropped, so the rest of the server waits:
+  requests hang (the session lookup fails at 60 s; the token-version check
+  has no deadline once its 60 s cache lapses), and they can take every pool
+  connection until the restore ends. The old table files stay until COMMIT,
+  so the disk needs room for both copies. The wipe waits 30 s for locks
+  (`restoreLockTimeout`), then fails, rolled back. `SET LOCAL
+  client_connection_check_interval = '1s'` frees a killed psql's locks
+  within about a second (the long statements, the vector index build and the
+  foreign keys, come last). A stop sends SIGINT before the committing marker
+  (SIGKILL after 15 s), and leaves a COMMIT already sent up to 60 s; the
+  programs run in their own process groups (`Setpgid`), signalled as groups,
+  and on Linux `restoreProcs.wait` (waitid with WNOWAIT) keeps a group's pid
+  from being signalled after it is reaped (elsewhere a plain `Wait`).
+- The deploy drain waits for a running restore: the tracker's `running`
+  feeds the stream-state snapshot (`SetDrainRestoreRunning`, wired by
+  `NewAdminHandler` through `wireRestoreDrain`; `restore` and
+  `held_by_viewer` count it as one), which is published at once when a
+  restore begins and ends (`PublishDrainState`), so the updater,
+  `install.sh` and `redeploy.sh` wait for it as for a viewer, at most their
+  five minutes, without a change to the shared drain block. The scan bar
+  polls one request at a time and asks nothing while a restore may be
+  running (this tab's request out, or the kept ticket last read running
+  within the upload window plus `restoreTimeout`), since each read would
+  hold a pool connection until the restore ended.
 - The record (`restoreTracker`, memory only, so a restart forgets it): the
   latest restore that got past its upload (refusals of the upload itself
   record nothing): `state` none/running/succeeded/failed, `step`
-  checking/clearing/restoring, `database` unchanged/unknown/empty/restored
-  (`unknown` while the wipe runs, and for a wipe or `pg_restore` the context
-  cut short, a wipe whose psql lost its connection mid-statement
-  (`wipeLeftDatabase`, which reads psql's exit code and, by line, libpq's
-  words) or a recovered panic; a check cut short is `unchanged`),
+  checking/restoring, `database` unchanged/unknown/restored (`unchanged`
+  through the transaction and after any failure; `unknown` as above),
   file, times, message, and `restart_required` (a restore succeeded since
   boot; a later refusal does not clear it). Two reads of it:
   `GET /api/admin/restore/status` behind `requireAdmin`, and
@@ -2240,11 +2283,11 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   compared in constant time; any other value is the same 404
   `restore_unknown`; without `message`, which can quote a row of the failing
   table and the ticket outlives the restore in that browser). The ticket read exists because the admin read cannot
-  serve the person who started the restore when it matters: from the wipe
-  until the commit there are no tables, so `RequireAuth`'s token-version
-  check and the admin guard fail; a failure after the wipe leaves it so; and
-  a success restores no sessions (dumps exclude `refresh_tokens` rows), so
-  the admin guard answers `session_ended`. A malformed ticket on the upload
+  serve the person who started the restore when it matters: while the
+  transaction runs `RequireAuth`'s token-version check and the admin guard
+  wait on its locks (the guard fails after 60 s), and a success restores no
+  sessions (dumps exclude `refresh_tokens` rows), so the admin guard answers
+  `session_ended`. The ticket read touches no database. A malformed ticket on the upload
   is a 400 before the lock.
 - The web app makes a ticket per restore (`lib/restoreStatus.ts`), keeps it in
   localStorage before the upload starts (put back on a 409, so another
@@ -2273,7 +2316,7 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   (`restoreOutcome`'s outcome, with `lost` for no answer or a 502-504), and
   always while a restore runs, with the restore button and file input
   disabled, and in place of this tab's own answer when the record says more
-  (a failure that touched the database) or says otherwise (running or
+  (`unknown`: a restore cut off as it committed) or says otherwise (running or
   succeeded where this tab heard it failed); the other sections say a running
   restore and, when this tab has no answer and no request out, one the admin
   must act on (urgent words, or a lost ticket). The panel says nothing of the
@@ -2285,18 +2328,29 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   502) is a proxy that gave up, said as no answer (`restoreFailure`'s
   `fromAurora`), since the restore may be running still. `RestoreOutcomeAlert` titles an answer that never came "No answer
   came back about the restore from …", never "did not go through": it may
-  still be running past its wipe. The server's text (`message`) is shown on the Admin page only
+  still be running, and a restart now would stop it. The server's text (`message`) is shown on the Admin page only
   (`restoreServerLine`); the sign-in page uses the page's words. The
   outcome of this tab's request still goes to the module store keyed by the
   account id from before the restore; the backup panel says it, or
   `RestoreOutcomeAlert` (mounted by App for `adminUI && user`) does when no
   backup panel is mounted as it lands. Nothing holds the page any more (the
   leave-this-page prompt is gone).
-- Known gaps: a restart (a deploy by the auto-updater included, which does
-  not wait for a restore: the drain block does not know of one, and the
-  dialog and panel tell the admin to pause `aurora-update.timer`) still ends
-  a running restore and forgets the record, so the browser that started it can say only that Aurora has no
-  record of it; a restore cannot be cancelled; the ticket lives in one
+- Known gaps: a restart (a deploy by the auto-updater included, once its
+  drain has waited five minutes, so the dialog and panel tell the admin to
+  pause `aurora-update.timer` for a large backup) still stops a running
+  restore, which rolls back and has to be run again, and forgets the record,
+  so the browser that started it can say only that Aurora has no record of
+  it; while the transaction runs the whole server waits on it (pages and
+  sign-ins hang, the 60 s route timeouts and the session lookup's deadline
+  fail some, and nothing bounds how many requests pile up on the pool); a
+  restore needs disk for two copies of the data and fails, rolled back, when
+  it runs out; a backup with large objects cannot be restored from the page
+  (the runbook's shell restore can); systemd's stop sends SIGTERM to psql
+  and pg_restore with Aurora, so a stop that lands just as the COMMIT is
+  sent can leave `unknown` with no record (a restart forgets it), which the
+  runbook tells the admin to check by looking at the data; the
+  waitid guard is Linux-only (elsewhere a reaped pid could in principle be
+  reused before its group is signalled); a restore cannot be cancelled; the ticket lives in one
   browser's localStorage (a private window or cleared site data loses it,
   and then only the admin read is left); a client older than the ticket
   restores without one; this tab's own outcome is still memory only and keyed

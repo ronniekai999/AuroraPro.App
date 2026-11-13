@@ -155,10 +155,11 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
   // This tab's own answer, when it is one: Aurora said how the restore went.
   const answered = !!mine && (mine.ok || !mine.lost)
   const recordSays = (!!record.status && record.status.state !== 'none') || !!record.lost || !!record.waiting
-  // A record of a failure that touched the database says more than this
-  // tab's answer does (that the database is empty, and what to do), so it is
-  // said in its place.
-  const recordFailedPastWipe = record.status?.state === 'failed' && record.status.database !== 'unchanged'
+  // A record of a failure that may have reached the database (one cut off as
+  // it committed) says more than this tab's answer does (that the database
+  // holds the old data or the backup, and what to do), so it is said in its
+  // place.
+  const recordFailedUnknown = record.status?.state === 'failed' && record.status.database !== 'unchanged'
   // A record that says the restore is running or succeeded outranks this
   // tab's word that it failed: a proxy's own refusal can pass for Aurora's.
   const recordContradicts = !!mine && !mine.ok && (record.status?.state === 'running' || record.status?.state === 'succeeded')
@@ -166,7 +167,7 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
   // restore; a restore running now is always said. Not while this tab has a
   // restore out (`out`, which outlives a remount of this panel): its record
   // does not exist until the upload ends.
-  const showRecord = out === 0 && recordSays && (serverRunning || !answered || recordFailedPastWipe || recordContradicts)
+  const showRecord = out === 0 && recordSays && (serverRunning || !answered || recordFailedUnknown || recordContradicts)
   const restored = mine?.ok ? mine.file : null
   // An outcome that lands while this panel is up is said in its status line,
   // whichever panel sent the restore (the admin may have left the section
@@ -179,7 +180,7 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
   }, [outcome, accountId, sayRestore])
   // A request that got no answer is said only until the record can say more,
   // and this tab's failure not beside a record of it that says more.
-  const lastFailure = mine && !mine.ok && (!mine.lost || !recordSays) && !(showRecord && (recordFailedPastWipe || recordContradicts)) ? mine.failure : null
+  const lastFailure = mine && !mine.ok && (!mine.lost || !recordSays) && !(showRecord && (recordFailedUnknown || recordContradicts)) ? mine.failure : null
   const restoreRef = useRef<HTMLButtonElement | null>(null)
   const noticeRef = useRef<HTMLDivElement | null>(null)
   // The restore POST can take minutes — guard against setState after
@@ -311,12 +312,13 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
         </p>
         <p className="text-ink-2 text-xs mb-4 leading-relaxed">
           Once the file is uploaded, the restore runs on the server to its end whether or not this
-          page stays open, and this browser shows how it went: here, or on the sign-in page. Restarting
-          Aurora stops it, and so does an automatic update: pause <code>aurora-update.timer</code> first.
-          While it replaces the data nobody can sign in. It wraps every change in a single transaction: if any
-          statement fails, the restore rolls back and the database is left empty, and nobody can sign
-          in to restore again from here, so restore a backup from the server's command line before
-          restarting Aurora. Legacy <code>.sql.gz</code> backups need to be restored via the
+          page stays open, and this browser shows how it went: here, or on the sign-in page. Clearing
+          the old data and loading the backup are one transaction: if anything fails, the restore rolls
+          back and the database is left as it was. While it runs, Aurora waits for it: pages and sign-ins
+          hang, and some fail after a minute. The server needs free disk space for a second copy of the
+          data meanwhile. Restarting Aurora stops it, and it then has to be run again; an automatic update
+          waits up to five minutes for it and then restarts anyway, so pause <code>aurora-update.timer</code>
+          first for a large backup. Legacy <code>.sql.gz</code> backups need to be restored via the
           command line: <code>gunzip &lt; file.sql.gz | psql $DATABASE_URL</code>.
         </p>
         {showRecord && <RestoreRecordNote record={record} server={restoreServerLine(record.status)} className="mb-4" />}
@@ -350,8 +352,9 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
         <StatusLine said={restoreSaid} className="mt-3" />
         <div className="mt-3 empty:hidden">{restoreFlow.panelNotes}</div>
         {/* The last restore's failure, kept in the panel once its dialog is
-            put down (or said here first, when the dialog was left): one that
-            stopped part way can have left the database empty. */}
+            put down (or said here first, when the dialog was left): one cut
+            off as it committed leaves the admin to check which data the
+            database holds. */}
         {!restoreFlow.dialog.open && !restoreFlow.busy && <FailureNote failure={lastFailure} className="mt-3" />}
       </div>
 
@@ -375,18 +378,20 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
         accounts, profiles, libraries, watch history, lists and settings. What is there now cannot be brought
         back except from another backup. Once the file is uploaded the restore runs on the server to its end:
         reloading or closing this tab does not stop it, and this browser shows how it went, here or on the
-        sign-in page. Restarting Aurora does stop it, and so does an automatic update, which does not wait for
-        it: pause aurora-update.timer first. Everyone is signed out by it. Restart Aurora once it has succeeded;
-        if it fails, read what it says before restarting.
+        sign-in page. Until it ends Aurora waits for it, and pages and sign-ins hang. Restarting Aurora stops
+        it (nothing is then changed, and it has to be run again), and so does an automatic update that has
+        waited five minutes for it: pause aurora-update.timer first for a large backup. If it fails, the
+        database is left as it was. Everyone is signed out by it. Restart Aurora once it has succeeded.
       </ConfirmDialog>
     </div>
   )
 }
 
 /** What a restore that did not finish is said to have done, and whether
- *  Aurora answered at all (`lost`: the server's record then says more). Where it stopped
- *  decides the database's state: every refusal of the file comes before the
- *  old data is cleared, and a failure of the restore itself comes after. */
+ *  Aurora answered at all (`lost`: the server's record then says more). The
+ *  old data is cleared and the backup loaded in one transaction, so a failure
+ *  leaves the database as it was, unless the restore was cut off as it
+ *  committed (the server's message then says so). */
 function restoreFailure(e: unknown, fromAurora = true): { failure: Failure; lost: boolean } {
   // Aurora itself never answers a restore with 502, 503 or 504, and answers
   // every failure as JSON: a 5xx that is not Aurora's own (`fromAurora`),
@@ -399,7 +404,7 @@ function restoreFailure(e: unknown, fromAurora = true): { failure: Failure; lost
   const lost = 'The connection to the server was lost during the restore. If the upload had finished, the restore goes on on the server without this page: do not restart Aurora until you know how it ended, since a restart stops a restore still running. Admin, under Backup and restore, shows how it ends once Aurora can be asked, and so does the sign-in page in this browser.'
   return {
     lost: noAnswer,
-    failure: adminFailure(e, 'restore the database', { ...(noAnswer && e instanceof APIError ? { [e.status]: lost } : {}), 502: lost, 503: lost, 504: lost, 400: 'The server refused this file, and the database was not changed.', 409: 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.', 413: 'The file is too large to restore from here, and the database was not changed.', noAnswer: lost, otherwise: 'The restore did not finish. Depending on where it stopped, the database is either as it was or empty. Read what the server said before going on.' }),
+    failure: adminFailure(e, 'restore the database', { ...(noAnswer && e instanceof APIError ? { [e.status]: lost } : {}), 502: lost, 503: lost, 504: lost, 400: 'The server refused this file, and the database was not changed.', 409: 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.', 413: 'The file is too large to restore from here, and the database was not changed.', noAnswer: lost, otherwise: 'The restore did not go through. Unless it was cut off as it was being committed, the database was not changed. Read what the server said before going on.' }),
   }
 }
 
