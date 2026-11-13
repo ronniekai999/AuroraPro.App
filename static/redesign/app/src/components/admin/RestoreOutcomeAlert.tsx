@@ -2,6 +2,9 @@
 // not there to (restoreOutcome.ts says when that happens). Mounted by App for
 // a session that has the admin UI, so a profile with a limit is never shown
 // it; it waits until an admin session in this tab has the admin UI again.
+// While mounted it also keeps the restore's status read (the restore runs on
+// the server, and the tab follows it from wherever the admin is), and looks
+// once for a restore already running, so a reload mid-restore finds it.
 //
 // Kept out of the Admin page's chunk: App loads it with the rest of the app.
 
@@ -12,10 +15,11 @@ import {
 import { buttonVariants } from '@/components/ui/button'
 import { useReturnFocus } from '@/lib/returnFocus'
 import { FailureText } from './AdminNotes'
-import { markRestoreSeen, useRestoreOutcome } from './restoreOutcome'
+import { markRestoreSeen, useRestoreOutcome, useRestoreWatch } from './restoreOutcome'
 
 export function RestoreOutcomeAlert({ accountId }: { accountId: number }) {
   const { outcome, seen } = useRestoreOutcome()
+  useRestoreWatch(accountId)
   const returnFocus = useReturnFocus()
   // Said once, and only to the account whose restore it was (another
   // account signed in on this tab never sees it). A backup panel that is up

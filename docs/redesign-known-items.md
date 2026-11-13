@@ -37,17 +37,26 @@ Fix or file each item, and delete it here when it is no longer true.
   pins. Playback health cannot tell a playback whose page the browser set
   aside from one that ended well, nor a window where nothing was watched from
   a measured 0% of buffering; it says so, and the missing denominators are
-  server work. A restore's outcome is kept for the account's id from before
-  the restore, so after a restore from another install's backup the admin may
-  not be told; it is kept in memory, so a reload loses it. On the Admin page,
-  an answer that lands after its section has been left is said nowhere, except
+  server work. A restore runs as a job on the server and the page follows it
+  through a status route, but that route sits behind the admin guards, which
+  read the session from the database the restore is replacing: from the wipe
+  until the restore commits it cannot be read (the page says so), and after a
+  restore that failed past the wipe it cannot be read until the server
+  restarts, which forgets the outcome, so then only the server's log says
+  what happened. A successful restore ends every session, so the admin is
+  told after signing in again (not checked: whether signing in works before
+  the restart the restore asks for), and only when the restored data has the
+  same account id. The status is kept in the server's memory; a restart loses
+  it. A restore still running when a server stop's wait (4 minutes) or the
+  updater's drain (5 minutes) runs out is stopped and can leave the database
+  empty (server: making the restore atomic would remove that). On the Admin
+  page, an answer that lands after its section has been left is said nowhere, except
   a restore's outcome and the AI settings' restart notice (shown when that
   section is opened again). The server's approve checks a request's status and
   then writes it with nothing atomic between, so two approves of one request
   at once could both pass and send it to the downloader twice (server, older
   than the redesign); the page no longer sends a second approve while one is
-  out. The browser's leave-this-page check, held while a restore is out, was
-  not seen in a real browser.
+  out.
 - Report a bug: a pick from the picker that an unreadable startup binding
   opens is not counted as a switch, so a dialog opened in that moment stays
   open across it; a remembered title page that the profile may no longer see

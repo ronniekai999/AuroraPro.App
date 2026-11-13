@@ -26,7 +26,7 @@ const api = vi.hoisted(() => ({
 vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof import('@/lib/api')>()), ...api }))
 
 import AdminView from './AdminView'
-import { resetRestoreOutcomeForTest } from './restoreOutcome'
+import { resetRestoreOutcomeForTest, setRestorePollForTest } from './restoreOutcome'
 
 type User = ReturnType<typeof userEvent.setup>
 const LIB: Library = { id: 1, name: 'Movies', type: 'movie', paths: ['/m'], scan_interval_minutes: 0, owner_id: 1, created_at: '', updated_at: '' }
@@ -279,9 +279,19 @@ describe('a second question of a kind while one is out', () => {
 })
 
 describe('a restore left by its way out', () => {
+  // The restore's job, once the upload is taken: it has ended, and its
+  // status says so.
+  let started = false
+  const statusAnswer = () => new Response(JSON.stringify(started
+    ? { running: null, last: { id: 'j1', file: 'aurora.dump', started_at: '', ended_at: '', succeeded: true, phase: 'restoring', database: 'restored', message: 'Restore complete.' } }
+    : { running: null, last: null }), { status: 200, headers: { 'content-type': 'application/json' } })
   async function leaveRestore(answer: Promise<Response>) {
+    started = false
+    setRestorePollForTest(10)
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true })
-    vi.stubGlobal('fetch', (url: RequestInfo | URL) => String(url) === '/api/admin/restore' ? answer : Promise.resolve(new Response('{}', { status: 503 })))
+    vi.stubGlobal('fetch', (url: RequestInfo | URL) => String(url) === '/api/admin/restore'
+      ? answer.then(r => { started = r.status === 202; return r })
+      : String(url) === '/api/admin/restore/status' ? Promise.resolve(statusAnswer()) : Promise.resolve(new Response('{}', { status: 503 })))
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
     render(<MemoryRouter><AdminView currentAdminId={1} /></MemoryRouter>)
     await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
@@ -307,7 +317,7 @@ describe('a restore left by its way out', () => {
     const user = await leaveRestore(answer.promise)
     await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Logs' }))
     await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
-    await act(async () => { answer.resolve(new Response(JSON.stringify({ status: 'ok' }), { status: 200, headers: { 'content-type': 'application/json' } })) })
+    await act(async () => { answer.resolve(new Response(JSON.stringify({ running: { id: 'j1', file: 'aurora.dump', phase: 'validating', started_at: '' }, last: null }), { status: 202, headers: { 'content-type': 'application/json' } })) })
     await waitFor(() => expect(statusSays()).toContain('Restored the database from aurora.dump. Restart Aurora now.'))
     expect(screen.getByRole('region', { name: 'Restart Aurora now' })).toBeInTheDocument()
   })

@@ -1367,6 +1367,17 @@ count restarts).
   an idle tick used to delete an install.sh re-run's staged frontend. The block reads
   numbers with `10#` and a length cap: the aurora user writes the snapshot, and
   an invalid-octal timestamp used to abort the updater under `set -e`.
+- A running database restore counts as one in the snapshot's `held_by_viewer`
+  (its own field, `restore`, beside it; published at once when a restore
+  starts or ends), so all three scripts' drain waits for it as for a viewer,
+  with no change to them, and restarts anyway after its 5 minutes. The restart
+  itself then waits too: `scripts/aurora.service` sets `KillMode=mixed` (the
+  stop's SIGTERM reaches the server alone, not `pg_restore`) and
+  `TimeoutStopSec=5min`, and the server's shutdown waits up to 4 minutes for
+  the restore (see "Admin page dialogs and the restore"). A box keeps its old
+  `aurora.service` (control-group, 90 s) until `install.sh` or `redeploy.sh`
+  reinstalls it; under the old unit a restart's SIGTERM reaches `pg_restore`
+  directly.
 
 ### Node build floor
 
@@ -2027,7 +2038,12 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   among them), the update trigger, the AI providers' test, the stream
   diagnosis and the referral question's save as their only line, the
   download clients' connection test after "Failed:", and the manual match
-  dialog after its own sentence (known gap). The browser's own alert,
+  dialog after its own sentence (known gap). The same secondary line is
+  shown by `RestoreOutcomeAlert`, which App mounts outside the Admin page
+  for a session with the admin UI only. A restore's progress and outcome
+  are said by what its status reports (the phase, what the database was
+  left in, why the server stopped it), never by the server's sentence,
+  which follows as that line. The browser's own alert,
   confirm and prompt boxes are not used: `noNativeDialogs.test.ts` reads
   every source file with a scanner that blanks comments only (it knows
   strings, template literals, regular expressions and both comment kinds;
@@ -2094,7 +2110,8 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
 
 Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
 `adminFailure.ts`, `restoreOutcome.ts`, `RestoreOutcomeAlert.tsx`) and
-`components/settings/ConfirmDialog.tsx`.
+`components/settings/ConfirmDialog.tsx`; the restore's server side in
+`internal/api/admin_backup.go` and `admin_restore_job.go`.
 
 - No native alert, confirm or prompt (the app-wide guard's allowlist is
   empty). Every confirmation is `ConfirmDialog` through
@@ -2119,26 +2136,96 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   said to have maybe happened. (The panel loads, two actions (the update
   trigger and the referral question's save) and two tests still show the
   server's text: see the failure-words bullet above.)
-- A restore runs on its request's context on the server
-  (`internal/api/admin_backup.go`), so a reload, a closed tab or a lost
-  connection stops `pg_restore` part way and can leave the database empty.
-  The confirm says so before anything is sent. While a restore request is
-  out the page holds the browser's leave-this-page prompt
-  (`holdPageForRestore`: `preventDefault()` and a truthy `returnValue`,
-  for current browsers and for Chrome and Edge before 119), released in
-  the request's `finally`, whatever the Admin page does meanwhile. The
-  outcome goes to a module store keyed by the account id from before the
-  restore; the backup panel says it, or `RestoreOutcomeAlert` (mounted by
-  App for `adminUI && user`) does when no backup panel is mounted as it
-  lands (another Admin section, or another page).
-- Known gaps: the server-side hazard itself is unfixed (a restore should
-  outlive its request); the outcome is memory only (a reload loses it) and
-  keyed by the pre-restore account id (after a restore from another
-  install's backup the admin may not be told); the leave-page prompt was
-  seen in no real browser; an answer that lands after its section was left
-  is said nowhere, except a restore's outcome and the AI settings' restart
-  notice; a dialog taller than the window keeps its focused button in view
-  and lets the title scroll away.
+- A restore runs as a job the server owns
+  (`internal/api/admin_restore_job.go`). `POST /api/admin/restore`
+  receives the upload, spills it to a temp file and runs the cheap checks
+  (the magic bytes, the size) on the request, then answers 202 with the
+  job's status. The full read of the archive (`pg_restore -f /dev/null`),
+  the wipe and `pg_restore --single-transaction` run in the job, on a
+  context derived from the server's lifecycle (main builds `RestoreJobs` on
+  its root context and hands it to the router, `RouterDeps.RestoreJobs`),
+  bounded to 60 minutes; the request's going (a reload, a closed tab, a
+  dropped connection, a proxy that gives up) no longer stops it. The
+  validation moved into the job because it reads the whole archive, as long
+  as the restore's own read of it; its failure is reported through the
+  status with the database unchanged. The backup/restore lock is held from
+  the upload to the job's end, however it ends (the job releases it, and
+  removes the temp file); a second restore or a backup meanwhile is a 409.
+  `GET /api/admin/restore/status`, behind the admin guard, answers the
+  running job (id, file, phase `validating`/`wiping`/`restoring`, start)
+  and the last one's outcome (succeeded, the phase it ended in, `database`
+  `unchanged`/`may_be_empty`/`restored`, the server's sentence, the capped
+  stderr tail, `stopped` `shutdown`/`timeout`). It is in memory: a server
+  restart forgets the running job (which the restart killed or let finish)
+  and the last outcome. On shutdown main calls `RestoreJobs.Drain` after
+  the signal and before it cancels the root context: it waits up to 4
+  minutes (`restoreShutdownGrace`) while the server still serves, and from
+  then on refuses a new restore (503, reason `shutting_down`). Past that
+  wait the cancel kills the restore. `scripts/aurora.service` sets
+  `KillMode=mixed` and `TimeoutStopSec=5min` so the wait holds under
+  systemd, and the restore counts in the deploy drain (see the updater
+  section).
+- The web app follows the job (`restoreOutcome.ts`). The upload's dialog
+  stays up while the file is sent (the way out after 10 s, "Close and keep
+  it running", is unchanged) and closes on the 202; the panel then says the
+  phase ("Restoring the database from X: checking the file / clearing the
+  old data / loading the backup", a region that takes the focus) with the
+  restore button `disabled` until the job ends. The status is read every 3 s
+  (10 s while it cannot be read) only while the backup panel or
+  `RestoreOutcomeAlert` (mounted by App for `adminUI && user`) is mounted
+  for the account that follows the restore, so a signed-out tab asks
+  nothing; each of them, on mount, looks once for a running restore and
+  follows it, so a page opened or reloaded mid-restore finds it (a failed
+  look is said in the panel: a restore may be running). The outcome is said
+  by the panel, or by the alert when no panel is mounted as it lands, to the
+  account that followed it in this tab; its words come from the phase it
+  ended in and what it left (refused with the database unchanged; stopped
+  while clearing, as it was or empty; failed after the clearing, may now be
+  empty; prefixed when the server stopped it), and the server has no record
+  of a followed restore after a restart, which is said too. A status that
+  cannot be read is said as that, never as an outcome: no answer, or, once
+  the job is past its validation, any 401 or 5xx, since the admin guards
+  read the session from the database being replaced. An upload that got no
+  answer from Aurora (no answer, a 502, a 504, a 503 without Aurora's
+  `shutting_down`) may have started a restore, so the page says so and looks
+  for it. No leave-this-page prompt is held any more: the confirm says that
+  closing or reloading the tab does not stop the restore once the file is
+  uploaded, and that restarting or updating the server can. Pinned by
+  `restoreOutcome.test.tsx` (each phase to the outcome, the outcome by what
+  it left, no record, a page opened mid-restore in the panel and in the
+  app, a failed look, an unreadable status before and after the wipe, the
+  alert elsewhere, no reads with no watcher, another account, an upload with
+  no answer) and `AdminView.results`/`confirms`/`waiting` tests; server side
+  by `admin_restore_job_test.go` (the request's context cancelled while the
+  job runs, the lock for the job's life, the phases, the drain's wait and
+  refusal, the cancel past it, the validation before the wipe with the real
+  `pg_restore`, the router's wiring and the restricted refusal), the
+  `TEST_BACKUP_DATABASE_URL` tests in `admin_backup_test.go` (a request
+  cancelled after the wipe while the restore still completes, a truncated
+  archive refused in the job with the data intact, a shutdown past the wait
+  leaving the tables gone) and `cmd/aurora/restore_shutdown_test.go` (main's
+  order and the unit's timeout, by reading the sources).
+- Known gaps: from the wipe until `pg_restore` commits the status route
+  answers 401 or 500 to everyone, the admin who started it included, and
+  after a restore that failed past the wipe it does until the server
+  restarts, which forgets the outcome, so then only the server's log says
+  what happened. A successful restore ends every session (a backup holds
+  none), so the admin is told after signing in again, only when the
+  restored data has the same account id, and only if the server has not
+  restarted meanwhile (whether signing in works before the restart the
+  restore asks for was not checked: the server's own database connections
+  can need it). A restore still running when the shutdown's 4-minute
+  wait, the deploy drain's 5 minutes or systemd's stop timeout runs out is
+  killed and can leave the database empty; under a unit installed before
+  `KillMode=mixed` the stop's SIGTERM reaches `pg_restore` at once, so the
+  wait holds nothing there (the drain still waits); a server error that
+  cancels the root context stops it at once; and the restore is still not
+  atomic (one that fails after the wipe leaves the database empty). An
+  answer that lands after its section was left is said nowhere, except a
+  restore's outcome and the AI settings' restart notice; a dialog taller
+  than the window keeps its focused button in view and lets the title
+  scroll away. None of this was run in a real browser or under a real
+  systemd unit.
 
 ### Nullable database columns
 

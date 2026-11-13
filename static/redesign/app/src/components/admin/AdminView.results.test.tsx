@@ -30,7 +30,7 @@ const api = vi.hoisted(() => ({
 vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof import('@/lib/api')>()), ...api }))
 
 import AdminView from './AdminView'
-import { resetRestoreOutcomeForTest } from './restoreOutcome'
+import { resetRestoreOutcomeForTest, setRestorePollForTest } from './restoreOutcome'
 
 type User = ReturnType<typeof userEvent.setup>
 const LIB: Library = { id: 1, name: 'Movies', type: 'movie', paths: ['/media/movies'], scan_interval_minutes: 0, owner_id: 1, created_at: '', updated_at: '' }
@@ -43,6 +43,8 @@ const json = (status: number, body: unknown) => new Response(JSON.stringify(body
 beforeEach(() => {
   // A restore's outcome outlives the page by design: each test starts clean.
   resetRestoreOutcomeForTest()
+  // A restore is followed by reading its status: quickly, here.
+  setRestorePollForTest(10)
   fetchAnswer = async () => json(503, { error: 'unavailable' })
   vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => fetchAnswer(String(url))))
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
@@ -60,7 +62,11 @@ beforeEach(() => {
   api.getAIRematchStatus.mockResolvedValue({ enabled: true })
   api.listFlaggedItems.mockResolvedValue([])
 })
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { resetRestoreOutcomeForTest(); vi.unstubAllGlobals() })
+
+/** A restore job's status as the server reports it. */
+const RUN = { id: 'j1', file: 'aurora.dump', phase: 'validating', started_at: '2026-11-13T10:00:00Z' }
+const ENDED = { id: 'j1', file: 'aurora.dump', started_at: '2026-11-13T10:00:00Z', ended_at: '2026-11-13T10:05:00Z', succeeded: true, phase: 'restoring', database: 'restored', message: 'Restore complete.' }
 
 async function openSection(user: User, name: string) {
   const view = render(<MemoryRouter><AdminView currentAdminId={1} /></MemoryRouter>)
@@ -122,9 +128,12 @@ describe('results said once in their panel', () => {
 describe('what the admin still has to do', () => {
   it('keeps the restart notice after a restore, across the page’s sections, until it is dismissed', async () => {
     const user = userEvent.setup()
-    fetchAnswer = async url => url === '/api/admin/restore'
-      ? json(200, { status: 'ok' })
-      : json(503, { error: 'unavailable' })
+    let started = false
+    fetchAnswer = async url => {
+      if (url === '/api/admin/restore') { started = true; return json(202, { running: RUN, last: null }) }
+      if (url === '/api/admin/restore/status') return json(200, started ? { running: null, last: ENDED } : { running: null, last: null })
+      return json(503, { error: 'unavailable' })
+    }
     const view = await openSection(user, 'Backup and restore')
     await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
     await user.click(screen.getByRole('button', { name: 'Restore database' }))
@@ -264,21 +273,27 @@ describe('failures said beside what failed', () => {
     expect(alertLines(await screen.findByRole('alert'))).toEqual(['A backup or restore is already running. Try again when it has finished.', 'The server said: another backup or restore is already in progress'])
   })
 
-  it('says a restore that failed part way may have left the database empty, and keeps it in the panel once the dialog is put down', async () => {
+  it('says a restore that failed after the wipe may have left the database empty, beside the button that asked', async () => {
     const user = userEvent.setup()
-    fetchAnswer = async url => url === '/api/admin/restore'
-      ? json(500, { error: { code: 500, message: 'restore failed; database is in wiped state' } })
-      : json(503, { error: 'unavailable' })
+    // The upload is taken (202); the job then fails, as its status says.
+    let started = false
+    fetchAnswer = async url => {
+      if (url === '/api/admin/restore') { started = true; return json(202, { running: RUN, last: null }) }
+      if (url === '/api/admin/restore/status') {
+        return json(200, started
+          ? { running: null, last: { ...ENDED, succeeded: false, database: 'may_be_empty', message: 'restore failed; database is in wiped state' } }
+          : { running: null, last: null })
+      }
+      return json(503, { error: 'unavailable' })
+    }
     const view = await openSection(user, 'Backup and restore')
     await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
     await user.click(screen.getByRole('button', { name: 'Restore database' }))
     const d = await screen.findByRole('alertdialog')
     await user.click(within(d).getByRole('button', { name: 'Restore database' }))
-    const said = 'The restore did not finish. Depending on where it stopped, the database is either as it was or empty. Read what the server said before going on.'
-    expect(alertLines(await within(d).findByRole('alert'))).toEqual([said, 'The server said: restore failed; database is in wiped state'])
-    await user.click(within(d).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
-    expect(screen.getByText(said)).toBeInTheDocument()
+    const said = 'The restore failed after the old data had been cleared, so the database may now be empty. Read what the server said, then restore again from a backup that works.'
+    expect(alertLines(await screen.findByRole('alert'))).toEqual([said, 'The server said: restore failed; database is in wiped state'])
   })
 
   it('says a sweep that did not start, and a suggestion that could not be accepted, beside each', async () => {
@@ -463,11 +478,15 @@ describe('a restore’s other answers', () => {
     await user.click(within(d).getByRole('button', { name: 'Restore database' }))
     return alertLines(await within(d).findByRole('alert'))[0]
   }
-  const LOST = 'The connection to the server failed during the restore, so it is not known how far it got: the database may be as it was, restored, or empty. Check the server before going on.'
+  const LOST = 'No answer came back from the server while the file was sent, so it is not known whether the restore started. If it did, it runs on the server: this page looks for it, and the server’s log says what happened.'
   it.each([
     ['no answer', () => Promise.reject(new TypeError('Failed to fetch')), LOST],
     ['a proxy that gave up (504)', async () => json(504, { error: 'gateway timeout' }), LOST],
     ['a proxy that gave up (502)', async () => new Response('<html>Bad gateway</html>', { status: 502, headers: { 'content-type': 'text/html' } }), LOST],
+    ['a proxy that gave up (503, no reason of Aurora’s)', async () => json(503, { error: 'service unavailable' }), LOST],
+    ['a server shutting down (503 shutting_down)', async () => json(503, { error: { code: 503, reason: 'shutting_down', message: 'the server is shutting down; no restore was started' } }), 'The server is shutting down, so the restore did not start and the database was not changed. Try again once it is back.'],
+    ['a file refused (400)', async () => json(400, { error: { code: 400, message: 'upload is not a pg_dump custom archive' } }), 'The server refused this file, and the database was not changed.'],
+    ['a server error before the job (500)', async () => json(500, { error: { code: 500, message: 'failed to create temp file for upload' } }), 'The restore did not start, and the database was not changed. Read what the server said before trying again.'],
     ['another restore running (409)', async () => json(409, { error: { code: 409, message: 'another backup or restore is already in progress' } }), 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.'],
     ['a file too large (413)', async () => json(413, { error: { code: 413, message: 'upload exceeds the 50 GB limit' } }), 'The file is too large to restore from here, and the database was not changed.'],
   ])('says %s', async (_what, answer, says) => {

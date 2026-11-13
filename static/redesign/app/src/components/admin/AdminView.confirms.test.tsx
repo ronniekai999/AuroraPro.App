@@ -57,7 +57,8 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   fetchMock.mockClear()
-  restoreAnswer = async () => json(200, { status: 'ok', message: 'Restore complete. RESTART AURORA NOW.' })
+  // The server has the file and has started the restore as a job.
+  restoreAnswer = async () => json(202, { running: { id: 'j1', file: 'aurora.dump', phase: 'validating', started_at: '2026-11-13T10:00:00Z' }, last: null })
   for (const fn of Object.values(api)) fn.mockReset()
   for (const fn of [api.getAdminDashboard, api.getEmbeddingStatus, api.getSkipMarkerStatus, api.getLibraryHealth]) fn.mockRejectedValue(new Error('off'))
   api.listLibraries.mockResolvedValue([LIB])
@@ -249,8 +250,9 @@ const CASES: Case[] = [
     },
     refusal: { status: 400, says: 'The server refused this file, and the database was not changed.' },
     succeed: () => { /* the default answer */ },
-    // The button that asked is locked once the restore is done.
-    focusAfter: () => screen.getByRole('region', { name: 'Restart Aurora now' }),
+    // The button that asked is disabled while the restore it started runs:
+    // the line that follows the restore takes the focus.
+    focusAfter: () => screen.getByRole('region', { name: 'Restore in progress' }),
   },
 ]
 

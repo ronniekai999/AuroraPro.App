@@ -2871,6 +2871,43 @@ export async function getUpdateStatus(signal?: AbortSignal): Promise<UpdateStatu
   return apiFetch<UpdateStatus>('/api/admin/system/update/status', { signal })
 }
 
+// A database restore runs as a job on the server (POST /api/admin/restore
+// answers 202 with this status once it has started); the Admin page follows
+// it here. In memory on the server: a restart forgets both halves.
+export type RestorePhase = 'validating' | 'wiping' | 'restoring'
+export interface RestoreRun {
+  id: string
+  /** The uploaded file's name, as the browser gave it. */
+  file: string
+  phase: RestorePhase
+  started_at: string
+}
+export interface RestoreResult {
+  id: string
+  file: string
+  started_at: string
+  ended_at: string
+  succeeded: boolean
+  /** The phase it ended in. */
+  phase: RestorePhase
+  /** What it left: nothing changed, possibly an empty database, or the backup. */
+  database: 'unchanged' | 'may_be_empty' | 'restored'
+  /** The server's own sentence. */
+  message: string
+  /** What psql or pg_restore wrote, capped by the server. */
+  stderr?: string
+  /** Why the server stopped it: it was shutting down, or 60 minutes passed. */
+  stopped?: 'shutdown' | 'timeout'
+}
+export interface RestoreStatus {
+  running: RestoreRun | null
+  last: RestoreResult | null
+}
+
+export async function getRestoreStatus(signal?: AbortSignal): Promise<RestoreStatus> {
+  return apiFetch<RestoreStatus>('/api/admin/restore/status', { signal })
+}
+
 // Kicks off the updater service. Returns 202 with {started: true}
 // when the systemctl trigger succeeds; the actual update runs
 // asynchronously. Callers should poll getUpdateStatus to render
