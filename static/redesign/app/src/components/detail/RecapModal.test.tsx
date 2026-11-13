@@ -349,13 +349,14 @@ describe('RecapModal Ask Previously', () => {
 		api.getRecapConversation
 			.mockResolvedValueOnce({ available: true, can_ask: true, turns: [turn({ id: 10, question: 'Unsafe E10 question', up_to: e10 })], current_up_to: e10, hidden_turn_count: 0 })
 			.mockResolvedValueOnce({ available: true, can_ask: true, turns: [], current_up_to: e5, hidden_turn_count: 1 })
-		api.askPreviously.mockRejectedValueOnce(new api.APIError(409, 'Viewing progress changed.'))
+		api.askPreviously.mockRejectedValueOnce(new api.APIError(409, 'viewing progress changed while answering'))
 		renderModal({ upTo: e10 })
 		await user.click(screen.getByRole('button', { name: 'Ask Previously' }))
 		await user.type(await screen.findByRole('textbox', { name: 'Ask about what you’ve watched' }), 'What changed?')
 		await user.keyboard('{Enter}')
-		expect(await screen.findByText('Could not answer that.')).toBeInTheDocument()
-		expect(screen.queryByText('Viewing progress changed.')).toBeNull()
+		// A race the reload has settled: asking again works, and the page says so.
+		expect(await screen.findByText('That could not be answered just then. Ask again.')).toBeInTheDocument()
+		expect(screen.queryByText(/viewing progress changed/)).toBeNull()
 		expect(screen.queryByText('Unsafe E10 question')).not.toBeInTheDocument()
 	})
 

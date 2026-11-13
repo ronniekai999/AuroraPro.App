@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VideoPlayer, type PlayTarget, type PartySync } from './VideoPlayer'
 import { createSession, getStreamInfo, keepalive, createCastToken, deleteSession } from '@/lib/streaming'
-import { markWatched, reportProgress } from '@/lib/api'
+import { APIError, markWatched, reportProgress } from '@/lib/api'
 import { CastMediaLoadError, CastSaidError, type CastLoadArgs } from '@/lib/cast'
 import { pushEscapeLayer } from '@/lib/escapeLayers'
 const fake = vi.hoisted(() => ({
@@ -837,6 +837,18 @@ describe('Successful ACK and receiver status association', () => {
     fake.cast.start.mockRejectedValueOnce(new CastSaidError('No Cast devices were found. Check that your Chromecast is on and on the same Wi-Fi network.'))
     fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
     expect(onToast).toHaveBeenCalledWith('Cast failed: No Cast devices were found. Check that your Chromecast is on and on the same Wi-Fi network.', 'error')
+  })
+
+  // The stream a cast plays is minted on the server, which caps streams
+  // with a 429: the toast says what to do about a cap.
+  it('says a capped cast stream as a cap, not as too many tries', async () => {
+    const onToast = vi.fn()
+    vi.mocked(createCastToken).mockReset().mockRejectedValue(new APIError(429, 'maximum transcode sessions reached, try again later', null))
+    const element = () => <VideoPlayer target={movie} onClose={() => {}} onToast={onToast} />
+    const view = render(element()); await bootHls()
+    fireEvent.click(screen.getByRole('button', { name: 'Cast' })); await settle(); view.rerender(element()); await settle()
+    expect(onToast).toHaveBeenCalledWith('Too many streams are running. Close one you have open on another device or tab, or try again later.', 'error')
+    expect(onToast.mock.calls.flat().join(' ')).not.toMatch(/Too many tries|maximum transcode/)
   })
 
   it('also declines an existing TV clock discovered during the initial device picker', async () => {

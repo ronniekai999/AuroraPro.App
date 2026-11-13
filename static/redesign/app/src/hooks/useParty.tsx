@@ -161,10 +161,13 @@ const MAX_CHAT = 200
 const MAX_REACTIONS = 100
 
 /** What a join came to. `error` is the app's own sentence, for a person.
- *  `reason`, beside it, is for code to branch on, never words: 'offline_room'
- *  for a code that names a persistent room with no live party; when the
- *  code's lookup failed, the server's `error.reason` if it sent one, else
- *  `http_<status>` for a refusal, or 'network' when no answer came. */
+ *  `reason`, beside it, is for code to branch on, never words:
+ *  'invalid_code' for a code that is not six letters or digits;
+ *  'signed_out' with nobody signed in; 'offline_room' for a code that names
+ *  a persistent room with no live party; when the code's lookup failed, the
+ *  server's `error.reason` if it sent one, else `http_<status>` for a
+ *  refusal ('http_404': no party holds that code now), or 'network' when no
+ *  answer came. A failure after the lookup carries none. */
 export interface JoinResult {
   ok: boolean
   error?: string
@@ -1216,7 +1219,7 @@ export function useParty(currentUserId?: number, actingProfileId: number | null 
     if (!/^[A-Z0-9]{6}$/.test(code)) {
       const error = 'Party code must be 6 letters or digits.'
       setStatePatch({ error })
-      return { ok: false, error }
+      return { ok: false, error, reason: 'invalid_code' }
     }
     // Tear down anything prior.
     activeCodeRef.current = null
@@ -1264,7 +1267,7 @@ export function useParty(currentUserId?: number, actingProfileId: number | null 
     if (!getStoredUser()) {
       const error = 'You must be signed in to join a party.'
       setStatePatch({ joining: false, error })
-      return { ok: false, error }
+      return { ok: false, error, reason: 'signed_out' }
     }
     activeCodeRef.current = code
     userInitiatedLeaveRef.current = false

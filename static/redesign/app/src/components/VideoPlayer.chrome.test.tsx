@@ -957,6 +957,7 @@ describe('menus and the things around the player', () => {
   // The error screen draws no menus. One left "open" behind it kept the
   // party's dock, ticker and voice pill hidden for as long as the error stood.
   it('closes an open menu, and the picker, when a fatal error replaces the picture', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     for (const open of ['More', 'Send a reaction']) {
       const view = render(<VideoPlayer target={movie} party={partyOf()} onSendReaction={() => {}} onClose={() => {}} />); await bootHls()
       fireEvent.click(screen.getByRole('button', { name: open }))
@@ -965,6 +966,8 @@ describe('menus and the things around the player', () => {
       // hls.js's own detail ("internalException") is for a developer.
       expect(screen.getByText('Playback failed — this title could not be played.')).toBeInTheDocument()
       expect(screen.queryByText(/internalException/)).toBeNull()
+      // Not on screen, but in the console a bug report carries.
+      expect(warn).toHaveBeenCalledWith('[Aurora Player] fatal hls error:', 'otherError', 'internalException')
       expect(document.documentElement.hasAttribute('data-player-menu'), open).toBe(false)
       const reachedApp = vi.fn()
       window.addEventListener('keydown', reachedApp)

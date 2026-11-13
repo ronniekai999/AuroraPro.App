@@ -3,7 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { APIError, WRONG_CURRENT_PASSWORD, type Profile, type User } from '@/lib/api'
+import { APIError, NetworkError, WRONG_CURRENT_PASSWORD, type Profile, type User } from '@/lib/api'
 import { AccountPane, SignInMethodsCard, passwordBytes, passwordErrorMessage } from './AccountPane'
 
 const api = vi.hoisted(() => ({ listOAuthLinks: vi.fn(), unlinkOAuth: vi.fn(), startOAuthLink: vi.fn(), changePassword: vi.fn() }))
@@ -52,6 +52,21 @@ describe('AccountPane', () => {
     api.listOAuthLinks.mockResolvedValue({ linked: [{ provider: 'google', linkedAt: NOW }], available: ['discord'], hasPassword: true, canUnlinkAny: true })
     api.unlinkOAuth.mockResolvedValue(undefined)
     api.changePassword.mockResolvedValue(undefined)
+  })
+
+  // Connecting and disconnecting a sign-in method: a refusal in the app's words.
+  it('says a connect and a disconnect that did not go through in the app\'s words', async () => {
+    const user = userEvent.setup()
+    api.startOAuthLink.mockRejectedValue(new NetworkError('Failed to fetch'))
+    api.unlinkOAuth.mockReset().mockRejectedValue(new APIError(500, 'pq: connection refused', null))
+    const onToast = vi.fn()
+    render(<AccountPane user={USER} activeProfile={profile()} profileKnown onLogout={vi.fn()} onToast={onToast} />)
+    await user.click(await screen.findByRole('button', { name: 'Connect Discord' }))
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith('Could not reach the server. Check the connection and try again.', 'error'))
+    await user.click(screen.getByRole('button', { name: 'Disconnect Google' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Disconnect' }))
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith('Could not disconnect Google just now.', 'error'))
+    expect(onToast.mock.calls.flat().join(' ')).not.toMatch(/pq:|Failed to fetch/)
   })
 
   // A list that could not be read is said in the app's words.

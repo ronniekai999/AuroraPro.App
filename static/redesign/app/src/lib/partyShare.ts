@@ -92,9 +92,6 @@ export function triggerDownload(blob: Blob, filename: string, doc: Document = do
   setTimeout(() => URL.revokeObjectURL(href), 1000)
 }
 
-// downloadCard fetches the PNG and saves it. Returns an error string
-// rather than throwing so the modal can render it inline — a failed
-// download is a normal thing to report, not an exception to bubble.
 /** The words for a card that could not be fetched: the browser's own
  *  ("Failed to fetch") are for a developer, and a status number for nobody.
  *  A 404 is a card no longer there (an ended party's). */
@@ -102,6 +99,9 @@ function cardFailure(status: number | null, doing: 'downloaded' | 'shared'): str
   return status === 404 ? 'That card is not available.' : `The card could not be ${doing} just now.`
 }
 
+// downloadCard fetches the PNG and saves it. Returns an error string
+// rather than throwing so the modal can render it inline — a failed
+// download is a normal thing to report, not an exception to bubble.
 export async function downloadCard(
   url: string,
   code: string,

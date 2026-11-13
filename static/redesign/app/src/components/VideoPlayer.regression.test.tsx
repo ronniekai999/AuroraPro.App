@@ -124,11 +124,12 @@ describe('WEB regressions through the real VideoPlayer', () => {
     expect(audio.mock.calls).toEqual([[1, 35000], [0, 35000]])
   })
   it.each(['close then open', 'replace target while error visible'])('binds listeners after an error: %s', async mode => {
-    vi.mocked(getStreamInfo).mockRejectedValueOnce(new APIError(503, 'session cap', null))
+    vi.mocked(createSession).mockRejectedValueOnce(new APIError(429, 'you have too many active streams — close one and try again', null))
     const ended = vi.fn(); const element = (target: PlayTarget | null) => <VideoPlayer target={target} onClose={() => {}} onEnded={ended} />
-    // The server's words are for whoever runs it: the screen says the kind of failure.
-    const view = render(element(movie)); await settle(); expect(screen.getByText('Could not start playback just now.')).toBeInTheDocument()
-    expect(screen.queryByText('session cap')).toBeNull()
+    // The server caps streams with a 429 and words for a log: the screen says
+    // what to do, and does not call a cap "too many tries".
+    const view = render(element(movie)); await settle(); expect(screen.getByText('Too many streams are running. Close one you have open on another device or tab, or try again later.')).toBeInTheDocument()
+    expect(screen.queryByText(/too many active streams|Too many tries/)).toBeNull()
     if (mode === 'close then open') { view.rerender(element(null)); await settle() }
     localStorage.setItem('aurora_prefs', JSON.stringify({ player_volume: 0.4 }))
     view.rerender(element({ ...movie, mediaItemId: 2, fileId: 20, title: 'Next' })); await bootHls()
@@ -342,11 +343,11 @@ describe('Independent adversarial timing checks', () => {
     expect(audio.mock.calls).toEqual([[1, 80000], [0, 80000]])
   })
   it('rebinds party broadcasts after a direct target replacement while an error is visible', async () => {
-    vi.mocked(getStreamInfo).mockRejectedValueOnce(new APIError(503, 'session cap', null))
+    vi.mocked(createSession).mockRejectedValueOnce(new APIError(429, 'you have too many active streams — close one and try again', null))
     const requestPause = vi.fn()
     const baseParty: PartySync = { isHost: true, currentUserId: 1, partyMediaItemId: 1, partyEpisodeId: null, isPlaying: true, rev: 1, hlsStartSec: 0, tickRef: { current: null }, seekRef: { current: null }, helloAbsMsRef: { current: 0 }, requestPlay: vi.fn(), requestPause, requestSeek: vi.fn() }
     const view = render(<VideoPlayer target={movie} party={baseParty} onClose={() => {}} />); await settle()
-    expect(screen.getByText('Could not start playback just now.')).toBeInTheDocument()
+    expect(screen.getByText('Too many streams are running. Close one you have open on another device or tab, or try again later.')).toBeInTheDocument()
     const next = { ...movie, mediaItemId: 2, fileId: 20, title: 'Next' }
     const nextParty = { ...baseParty, partyMediaItemId: 2 }
     view.rerender(<VideoPlayer target={next} party={nextParty} onClose={() => {}} />); await bootHls()
@@ -422,7 +423,7 @@ describe('Independent missing cast anchor', () => {
 })
 
 it('binds the guest mirror to the replacement element after an error', async () => {
-  vi.mocked(getStreamInfo).mockRejectedValueOnce(new APIError(503, 'session cap', null))
+  vi.mocked(createSession).mockRejectedValueOnce(new APIError(429, 'you have too many active streams — close one and try again', null))
   const party: PartySync = { isHost: false, currentUserId: 2, partyMediaItemId: 1, partyEpisodeId: null, isPlaying: true, rev: 1, hlsStartSec: 0, tickRef: { current: null }, seekRef: { current: null }, helloAbsMsRef: { current: 0 }, requestPlay: vi.fn(), requestPause: vi.fn(), requestSeek: vi.fn() }
   const view = render(<VideoPlayer target={movie} party={party} onClose={() => {}} />); await settle()
   const next = { ...movie, mediaItemId: 2, fileId: 20, title: 'Next' }

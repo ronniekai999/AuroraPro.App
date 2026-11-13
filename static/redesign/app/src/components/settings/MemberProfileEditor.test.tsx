@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
-import type { Profile } from '@/lib/api'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { APIError, NetworkError, type Profile } from '@/lib/api'
 import { MemberProfileSection } from './MemberProfileEditor'
 
-const api = vi.hoisted(() => ({ getMyProfile: vi.fn() }))
+const api = vi.hoisted(() => ({ getMyProfile: vi.fn(), updateMyProfile: vi.fn() }))
 vi.mock('@/lib/api', async importOriginal => ({ ...(await importOriginal<typeof import('@/lib/api')>()), ...api }))
 
 const profile = (extra: Partial<Profile> = {}): Profile => ({
@@ -34,5 +34,20 @@ describe('MemberProfileSection', () => {
     render(<MemberProfileSection activeProfile={profile()} profileKnown />)
     await waitFor(() => expect(api.getMyProfile).toHaveBeenCalled())
     expect(screen.queryByText(/member profile can only be edited/)).toBeNull()
+  })
+
+  // A refused save or sharing change is said in the app's words.
+  it('says a save and a sharing change that did not go through in the app\'s words', async () => {
+    api.getMyProfile.mockReset().mockResolvedValue({ user_id: 1, username: 'morgan', member_since: '2026-01-01T00:00:00Z', share_watch_history: false })
+    api.updateMyProfile.mockReset()
+      .mockRejectedValueOnce(new APIError(500, 'pq: connection refused', null))
+      .mockRejectedValueOnce(new NetworkError('Failed to fetch'))
+    const onToast = vi.fn()
+    render(<MemberProfileSection activeProfile={profile()} profileKnown onToast={onToast} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith('Could not save your member profile just now.', 'error'))
+    fireEvent.click(screen.getByRole('switch'))
+    await waitFor(() => expect(onToast).toHaveBeenCalledWith('Could not reach the server. Check the connection and try again.', 'error'))
+    expect(onToast.mock.calls.flat().join(' ')).not.toMatch(/pq:|Failed to fetch/)
   })
 })

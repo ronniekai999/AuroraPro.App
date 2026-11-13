@@ -21,6 +21,7 @@ import { isScheduledLobby, partyPresence } from '@/hooks/useActiveParties'
 import { PageHeader } from '@/components/PageHeader'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { failureWords } from '@/lib/failureWords'
+import type { JoinResult } from '@/hooks/useParty'
 
 export interface TogetherViewProps {
   currentUserId: number
@@ -40,7 +41,7 @@ export interface TogetherViewProps {
   /** Open the party the viewer is in (its side panel). */
   onOpenPartyPanel: () => void
   /** Join a party by code; resolves with the outcome, never rejects. */
-  onJoinParty: (code: string) => Promise<{ ok: boolean; error?: string }>
+  onJoinParty: (code: string) => Promise<JoinResult>
   onRsvp: (inviteId: number, rsvp: 'going' | 'maybe' | 'declined') => void
   /** Ask for the invitations again (the view calls it on mount). */
   onRefreshInvites: () => void
@@ -90,7 +91,6 @@ function Poster({ path }: { path?: string }) {
  *  party this browser was just in, or one of the viewer's rooms. A refusal
  *  is shown there, not somewhere the person is not looking. */
 type JoinOrigin = 'list' | 'code' | 'recent' | `room:${number}`
-type JoinResult = { ok: boolean; error?: string }
 type Join = (code: string, name: string, origin: JoinOrigin) => Promise<JoinResult>
 interface JoinRefusal { code: string; name: string; message: string; origin: JoinOrigin }
 
@@ -501,9 +501,9 @@ function RecentlyIn({ currentUserId, profileId, inPartyCode, joining, refused, o
   const rejoin = async () => {
     const r = await onJoin(last.code, name, 'recent')
     if (r.ok) { onRejoined(); return }
-    // A party that is gone is not offered again.
-    const msg = (r.error ?? '').toLowerCase()
-    if (msg.includes('invalid') || msg.includes('ended') || msg.includes('not found') || msg.includes('persistent room')) {
+    // A party that is gone is not offered again: no party holds its code
+    // now, the code names a room with no live party, or it is not a code.
+    if (r.reason === 'http_404' || r.reason === 'offline_room' || r.reason === 'invalid_code') {
       clearLastParty(currentUserId, profileId)
       setLast(null)
       onGone()
@@ -613,7 +613,10 @@ function Rooms({ joining, refusedRoom, partyKey, onJoin, onSay }: {
       setMade(room.id)
       onSay(`Room made: ${room.name}.`)
     } catch (err) {
-      setError(failureWords(err, 'make the room') ?? 'The room could not be made.')
+      // The form sends a name that is not empty, so the route's 400 is its
+      // length, which it counts in bytes: an accent or an emoji is more than
+      // one, and the field's own limit counts characters.
+      setError(failureWords(err, 'make the room', { status: { 400: 'That name is too long for a room. Shorten it: accents and emoji count for more than one letter.' } }) ?? 'The room could not be made.')
     } finally {
       setBusy(false)
     }

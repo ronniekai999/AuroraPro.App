@@ -1000,8 +1000,16 @@ export function useBugReportForm({ prefillName, onClose, onSubmitted, dismissed 
       // Aborts are user-initiated (Cancel); don't surface them as
       // errors. AbortError comes from fetch when signal.aborted.
       if (err && (err as Error).name === 'AbortError') return
-      // The route answers 404 only when bug reporting is off on the server.
-      const why = failureWords(err, 'send the report', { status: { 404: 'Bug reports are not turned on for this server.' } }) ?? 'The report could not be sent.'
+      // The route answers 404 only when bug reporting is off on the server;
+      // 507 when it has no room for an attachment; 503 when it is set up
+      // wrong, for every report or only for one with an attachment.
+      const why = failureWords(err, 'send the report', {
+        status: {
+          404: 'Bug reports are not turned on for this server.',
+          503: 'This server cannot send reports at the moment. If a file is attached, try sending without it.',
+          507: 'The server has no room for the attachment just now. Remove it and send the report again.',
+        },
+      }) ?? 'The report could not be sent.'
       unsentRef.current = why
       refuse(why)
     } finally {

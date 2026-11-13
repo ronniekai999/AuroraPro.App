@@ -579,6 +579,15 @@ async function attemptPlay(
 // button being the usual last click before sitting back) stranded focus
 // inside `data-player-chrome` and suppressed the auto-hide timer forever.
 
+/** The server refuses a new stream with a 429 for a cap, with no reason and
+ *  no Retry-After: the person's own ("close one and try again") or the
+ *  server's ("try again later"). Nobody made repeated tries, and for their
+ *  own cap waiting does nothing, so it is said for both causes. Used for
+ *  the session a playback starts and the stream a cast is minted. */
+const STREAM_CAP_OVERRIDE = {
+  status: { 429: 'Too many streams are running. Close one you have open on another device or tab, or try again later.' },
+}
+
 export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onPartyAdvance, onMinimizedChange, onRemoteActiveChange,
   onSurfaceChange, isAdmin, onToast }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
@@ -4567,7 +4576,9 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
               failPlayback('Playback failed — network error', 'network')
             }
           } else {
-            // hls.js's detail ("fragParsingError") is for a developer.
+            // hls.js's detail ("fragParsingError") is for a developer: it
+            // goes to the console, which a bug report carries, not on screen.
+            console.warn('[Aurora Player] fatal hls error:', data.type, data.details)
             failPlayback('Playback failed — this title could not be played.')
           }
         })
@@ -4577,7 +4588,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         deliveryModeRef.current = 'idle'
         // The server's words for a stream-info or session failure are for
         // whoever runs it: the page says what kind of failure it was.
-        const msg = failureWords(err, 'start playback') ?? 'Could not start playback.'
+        const msg = failureWords(err, 'start playback', STREAM_CAP_OVERRIDE) ?? 'Could not start playback.'
         // A stream-info or session-create failure is an OUTAGE — a session cap,
         // an ffprobe failure, a full disk — and it never reaches hls.js or the
         // element, so nothing else classifies it. Left unclassified the admin
@@ -7291,7 +7302,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // kind of failure.
         const said = raw === CAST_NO_MEDIA_ERROR || err instanceof CastSaidError
           ? `Cast failed: ${msg}`
-          : failureWords(err, 'start casting') ?? 'Could not start casting.'
+          : failureWords(err, 'start casting', STREAM_CAP_OVERRIDE) ?? 'Could not start casting.'
         onToast?.(said, 'error')
       }
     })

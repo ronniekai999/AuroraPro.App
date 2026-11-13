@@ -271,4 +271,15 @@ describe('shareCard', () => {
     expect(share).not.toHaveBeenCalled()
     expect(clicked).toEqual([])
   })
+
+  // Saving the file can itself fail (a sandboxed frame refuses the link):
+  // said in the app's words, not the browser's.
+  it('says a save that the browser refused in its own words', async () => {
+    fakeDoc = {
+      createElement: () => { throw new DOMException('Blocked a frame from creating a link', 'SecurityError') },
+      body: { appendChild: () => {} },
+    } as unknown as Document
+    const res = await run({})
+    expect(res).toEqual({ ok: false, error: 'The card could not be shared just now.' })
+  })
 })

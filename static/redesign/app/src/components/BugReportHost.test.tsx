@@ -148,6 +148,19 @@ describe('sending a report', () => {
     expect(onToast).toHaveBeenCalledWith('Bug reported as issue #512. Thank you.', 'success')
   })
 
+  // The server has no room for an attachment: the way out is to send without it.
+  it('says a report refused for want of attachment room, and how to send it', async () => {
+    const user = userEvent.setup()
+    submitBugReport.mockRejectedValueOnce(new APIError(507, 'attachment storage is temporarily full — please try again later or submit without an attachment', null))
+    setup()
+    await user.click(launcher())
+    const dialog = screen.getByRole('dialog')
+    await fill(user, dialog)
+    await user.click(within(dialog).getByRole('button', { name: 'Send report' }))
+    await waitFor(() => expect(dialog.querySelector('#bug-error')).toHaveTextContent('The server has no room for the attachment just now. Remove it and send the report again.'))
+    expect(dialog.textContent).not.toMatch(/temporarily full/)
+  })
+
   it('says a report that was refused, keeps what was written, and can be sent again', async () => {
     const user = userEvent.setup()
     submitBugReport.mockRejectedValueOnce(new APIError(502, 'GitHub did not accept the report', null))

@@ -297,10 +297,11 @@ describe('the error screen: reporting the problem', () => {
     // A second press while the first is out sends nothing more.
     await user.keyboard('{Enter}')
     expect(api.submitBugReport).toHaveBeenCalledTimes(1)
-    await act(async () => { refuse(new APIError(503, 'Reports cannot be filed right now.', { error: { code: 503, message: 'Reports cannot be filed right now.' } })) })
+    await act(async () => { refuse(new APIError(503, 'bug reporting is enabled but misconfigured — administrator needs to set BUG_REPORT_GITHUB_TOKEN and BUG_REPORT_GITHUB_REPO', null)) })
     // Said in the app's words, not the server's.
-    expect(within(aside).getByRole('alert')).toHaveTextContent('Could not send the report just now.')
-    expect(aside.textContent).not.toMatch(/Reports cannot be filed/)
+    // A server set up wrong: no retry works until its admin acts.
+    expect(within(aside).getByRole('alert')).toHaveTextContent('This server cannot send reports at the moment. If a file is attached, try sending without it.')
+    expect(aside.textContent).not.toMatch(/misconfigured|GITHUB/)
     expect(within(aside).getByRole('button', { name: 'Send report' })).toHaveFocus()
     // What was written is still there, and the next press sends it.
     expect(within(aside).getByLabelText(/^Title/)).toHaveValue('Collections will not open')
@@ -376,7 +377,7 @@ describe('the error screen: another tab changes who this browser is', () => {
   it('says that a report it could not send was not sent', async () => {
     const user = userEvent.setup()
     signedIn()
-    api.submitBugReport.mockReset().mockRejectedValue(new APIError(503, 'Reports cannot be filed right now.', null))
+    api.submitBugReport.mockReset().mockRejectedValue(new APIError(502, 'bug report submission failed — please try again later or contact your administrator', null))
     crash()
     const aside = await openPanel(user)
     await fill(user)

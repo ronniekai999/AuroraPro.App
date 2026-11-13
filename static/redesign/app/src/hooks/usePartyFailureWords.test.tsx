@@ -43,7 +43,7 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals() })
 
 it('says a code no party holds now as that, not in the server\'s words', async () => {
-  vi.mocked(apiFetch).mockRejectedValue(new APIError(404, 'party not found or has ended', null))
+  vi.mocked(apiFetch).mockRejectedValue(new APIError(404, 'code not found', null))
   const { result, unmount } = renderHook(() => useParty(1, 3))
   let said: { ok: boolean; error?: string } | undefined
   await act(async () => { said = await result.current.join('ABC123') })
@@ -96,5 +96,14 @@ it('marks a lookup that got no answer', async () => {
   let said: { ok: boolean; error?: string; reason?: string } | undefined
   await act(async () => { said = await result.current.join('ABC123') })
   expect(said).toEqual({ ok: false, error: 'Could not reach the server. Check the connection and try again.', reason: 'network' })
+  unmount()
+})
+
+it('marks a code that is not six letters or digits', async () => {
+  const { result, unmount } = renderHook(() => useParty(1, 3))
+  let said: { ok: boolean; error?: string; reason?: string } | undefined
+  await act(async () => { said = await result.current.join('AB') })
+  expect(said).toEqual({ ok: false, error: 'Party code must be 6 letters or digits.', reason: 'invalid_code' })
+  expect(apiFetch).not.toHaveBeenCalled()
   unmount()
 })

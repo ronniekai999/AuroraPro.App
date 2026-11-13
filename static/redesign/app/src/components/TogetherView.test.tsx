@@ -38,7 +38,7 @@ const partyRowOf = (code: string) => document.querySelector(`[data-party="${code
 
 describe('joining a party from the list', () => {
   it('says why when the join is refused, above the list, naming the party', async () => {
-    const onJoinParty = vi.fn(async () => ({ ok: false, error: 'This party has ended.' }))
+    const onJoinParty = vi.fn(async () => ({ ok: false, error: 'No party is using that code right now.', reason: 'http_404' }))
     render(<TogetherView {...props({ activeParties: [party(), party({ code: 'OTHER1', party_name: 'Other' })], onJoinParty })} />)
     const row = partyRowOf('MOON42')
     // Each row's button says which party it is for.
@@ -46,7 +46,7 @@ describe('joining a party from the list', () => {
     button.focus()
     fireEvent.click(button)
     const alert = await screen.findByRole('alert')
-    expect(alert.textContent).toBe('Couldn’t join Friday crew: This party has ended.')
+    expect(alert.textContent).toBe('Couldn’t join Friday crew: No party is using that code right now.')
     expect(alert.getAttribute('data-join-error')).toBe('MOON42')
     expect(onJoinParty).toHaveBeenCalledWith('MOON42')
     // Not in the party's row: the next poll takes an ended party's row away.
@@ -83,13 +83,13 @@ describe('joining a party from the list', () => {
   })
 
   it('keeps the message when the party leaves the list', async () => {
-    const onJoinParty = vi.fn(async () => ({ ok: false, error: 'This party has ended.' }))
+    const onJoinParty = vi.fn(async () => ({ ok: false, error: 'No party is using that code right now.', reason: 'http_404' }))
     const { rerender } = render(<TogetherView {...props({ activeParties: [party()], onJoinParty })} />)
     fireEvent.click(screen.getByRole('button', { name: 'Join Friday crew' }))
     await screen.findByRole('alert')
     // The poll that follows no longer lists it.
     rerender(<TogetherView {...props({ activeParties: [], onJoinParty })} />)
-    expect(screen.getByRole('alert').textContent).toBe('Couldn’t join Friday crew: This party has ended.')
+    expect(screen.getByRole('alert').textContent).toBe('Couldn’t join Friday crew: No party is using that code right now.')
     expect(document.querySelector('[data-party-status]')!.textContent).toBe('Nobody is watching together right now.')
   })
 
@@ -214,27 +214,32 @@ describe('the ways into a party', () => {
     expect(screen.queryByRole('region', { name: 'You were just in' })).toBeNull()
   })
 
-  it('stops offering a party that has ended', async () => {
+  // What join returns for a code no party holds now, and for a room with no
+  // live party: the page reads the reason, never the words.
+  it.each([
+    ['ended', { ok: false, error: 'No party is using that code right now.', reason: 'http_404' }],
+    ['a room with no live party', { ok: false, error: 'That code is a persistent room; no live session right now.', reason: 'offline_room' }],
+  ])('stops offering a party that has %s', async (_case, refused) => {
     cacheLastParty({ code: 'LAST01', partyName: 'Friday crew', userId: 1, wasHost: false })
-    render(<TogetherView {...props({ onJoinParty: async () => ({ ok: false, error: 'This party has ended.' }) })} />)
+    render(<TogetherView {...props({ onJoinParty: async () => refused })} />)
     fireEvent.click(within(screen.getByRole('region', { name: 'You were just in' })).getByRole('button', { name: 'Rejoin Friday crew' }))
     // Its section goes with the party, so the refusal is said where a
     // row's would be, once.
     await waitFor(() => expect(screen.queryByRole('region', { name: 'You were just in' })).toBeNull())
-    expect(screen.getByRole('alert').textContent).toBe('Couldn’t join Friday crew: This party has ended.')
+    expect(screen.getByRole('alert').textContent).toBe(`Couldn’t join Friday crew: ${refused.error}`)
     expect(screen.getAllByRole('alert')).toHaveLength(1)
     expect(readLastParty(1)).toBeNull()
   })
 
   it('says a refusal that leaves the party on offer beside its Rejoin button', async () => {
     cacheLastParty({ code: 'LAST01', partyName: 'Friday crew', userId: 1, wasHost: false })
-    render(<TogetherView {...props({ activeParties: [party()], onJoinParty: async () => ({ ok: false, error: 'The room is offline.' }) })} />)
+    render(<TogetherView {...props({ activeParties: [party()], onJoinParty: async () => ({ ok: false, error: 'Could not reach the server. Check the connection and try again.', reason: 'network' }) })} />)
     const region = screen.getByRole('region', { name: 'You were just in' })
     const rejoin = within(region).getByRole('button', { name: 'Rejoin Friday crew' })
     rejoin.focus()
     fireEvent.click(rejoin)
     const alert = await within(region).findByRole('alert')
-    expect(alert.textContent).toBe('Couldn’t rejoin: The room is offline.')
+    expect(alert.textContent).toBe('Couldn’t rejoin: Could not reach the server. Check the connection and try again.')
     expect(screen.getAllByRole('alert')).toHaveLength(1)
     expect(document.querySelector('[data-join-error]')).toBeNull()
     expect(rejoin).toHaveFocus()
@@ -465,7 +470,7 @@ describe('the ways into a party', () => {
 
   it('says so when the rooms cannot be loaded or a room cannot be made, and the rest of the page still works', async () => {
     api.listRooms.mockRejectedValue(new Error('boom'))
-    api.createRoom.mockRejectedValue(new APIError(400, 'room limit reached', null))
+    api.createRoom.mockRejectedValue(new APIError(400, 'room name too long (max 200 chars)', null))
     render(<TogetherView {...props({ activeParties: [party()] })} />)
     const rooms = within(screen.getByRole('region', { name: 'Your rooms' }))
     expect(await rooms.findByText('Your rooms could not be loaded.')).toBeInTheDocument()
@@ -476,14 +481,15 @@ describe('the ways into a party', () => {
     field.focus()
     fireEvent.submit(field.closest('form')!)
     // The refusal in the app's words, not the server's.
-    expect(await rooms.findByText('Could not make the room.')).toHaveAttribute('role', 'alert')
-    expect(rooms.queryByText('room limit reached')).toBeNull()
+    // The server counts the name in bytes: the page says what to do.
+    expect(await rooms.findByText('That name is too long for a room. Shorten it: accents and emoji count for more than one letter.')).toHaveAttribute('role', 'alert')
+    expect(rooms.queryByText(/max 200/)).toBeNull()
     // The name is kept, the field still has the focus (it was never
     // disabled), and the refusal is tied to it.
     expect(field).toHaveValue('One more')
     expect(field).toHaveFocus()
     expect(field).toHaveAttribute('aria-invalid', 'true')
-    expect(field).toHaveAccessibleDescription('Could not make the room.')
+    expect(field).toHaveAccessibleDescription('That name is too long for a room. Shorten it: accents and emoji count for more than one letter.')
   })
 })
 

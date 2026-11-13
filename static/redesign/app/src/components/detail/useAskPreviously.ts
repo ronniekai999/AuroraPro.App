@@ -220,7 +220,11 @@ export function useAskPreviously({
       // the model was running. Reload first so no stale unsafe turn remains.
       if (caught instanceof APIError && caught.status === 409) await loadConversation()
       if (isCurrent(capturedIdentity, controller)) {
-        setSendError(failureWords(caught, 'answer that') ?? 'Could not answer that.')
+        // The server's 409s here are races (the question already being
+        // answered, the conversation or the viewing progress moving
+        // meanwhile), and the conversation has just been reloaded above, so
+        // asking again works.
+        setSendError(failureWords(caught, 'answer that', { status: { 409: 'That could not be answered just then. Ask again.' } }) ?? 'Could not answer that.')
       }
     } finally {
       if (isCurrent(capturedIdentity, controller)) {
