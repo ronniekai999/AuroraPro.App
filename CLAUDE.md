@@ -347,8 +347,9 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   delete with a recap question, which inserts a child of the profile and
   then one of the account. Without the last-unrestricted rule
   nothing on the account could manage profiles again, and onboarding's age
-  step reached that on a single-profile account in one move; that step now
-  gives the account's only such profile the tone lean and no ceiling. A
+  reached that on a single-profile account in one move; an age entered
+  there now gives the account's only such profile the tone lean and no
+  ceiling. A
   profile that already has a ceiling passes, so a restricted session's own
   edits still round-trip it.
 - The acting profile must not degrade to the account default for a session
@@ -631,7 +632,7 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
   - A profile another device edits shows its new name, ceiling and lock in
     an open web tab at the next switch or tab-visibility re-read; until then
     that tab's restricted-session UI (Settings' controls, onboarding's age
-    step, the admin UI) follows the old values. The server enforces the
+    field, the admin UI) follows the old values. The server enforces the
     current ones.
   - A lock protects only the profile it is on. A restricted profile can
     switch to any unlocked profile, including one with a looser limit or
@@ -929,9 +930,10 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     re-default, a ceiling edit's own lock, the bound session insert and
     rotation would pass. Unpinned besides: that the no-default re-default
     spares bound sessions, and the edit handler's 404.
-    The onboarding age step's lock for a restricted profile (`ceilingLocked`)
-    is tested at its patch helper only; the server refuses the change
-    regardless.
+    The onboarding age field's lock for a restricted profile
+    (`ceilingLocked`) is tested at its patch helper and at the page (the
+    field is disabled and nothing about content is written,
+    `onboardingFlow.test.tsx`); the server refuses the change regardless.
   - Account-level actions still open to a restricted session, for example:
     changing the account password (it needs the current one), approving a
     device pairing (the device binds to the restricted profile, or, when

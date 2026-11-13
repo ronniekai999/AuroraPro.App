@@ -25,8 +25,8 @@ type Phase = 'checking' | 'show' | 'hidden'
 /**
  * TasteOnboardingGate fetches the per-profile onboarding status and, when the
  * profile is eligible and hasn't completed onboarding, renders the full-screen
- * onboarding flow (avatar → name → age → appearance → "Pick What You Love" →
- * welcome → building). Renders nothing otherwise — so it's safe to mount once,
+ * onboarding flow ("Make it yours" → "Pick what you love" → the referral
+ * question when one is owed → building). Renders nothing otherwise — so it's safe to mount once,
  * unconditionally, in the authenticated app tree. Existing users (whose profiles
  * default to not-completed after the taste-seeds migration) get prompted once at
  * their next login.

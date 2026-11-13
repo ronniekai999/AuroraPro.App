@@ -626,13 +626,15 @@ const ONB = 'src/components/OnboardingFlow.tsx'
 const RAIL_TSX = 'src/components/MediaRail.tsx'
 
 // The onboarding overlay is `fixed inset-0` with its OWN opaque base, so its
-// text does not sit on the app ink at all. Derived from the overlay's utility
-// for the same reason INK is derived from the root's: measuring onboarding text
-// against the wrong base is off by the whole colour. Dies if the utility moves.
+// text sits on that and not on whatever the app shows behind it. The base is
+// the page's own colour, by the same utility the app root carries; it is
+// read from the overlay all the same, for the reason INK is read from the
+// root: measuring onboarding text against the wrong base is off by the whole
+// colour. Dies if the utility moves off the overlay.
 const ONB_INK = (() => {
-  const m = read(ONB).match(/fixed inset-0 z-\[80\][^"]*bg-\[(#[0-9a-fA-F]{3,8})\]/)
-  if (!m) throw new Error('audit: onboarding overlay no longer carries its own bg-[#…] base — the audit is out of date, not passing')
-  return hex(m[1])
+  if (!/fixed inset-0 z-\[80\][^"]*[\s"]bg-surface-page[\s"]/.test(read(ONB)))
+    throw new Error('audit: onboarding overlay no longer carries bg-surface-page — the audit is out of date, not passing')
+  return rootToken('--surface-page').rgb
 })()
 
 // The search page. (A separate palette used to be modelled here: a scrim, an
@@ -716,9 +718,6 @@ const EXEMPT = [
     why: 'a server stat tile\'s icon in its idle tone; the label and value beside it are the text' },
   { file: 'src/App.tsx', anchor: 'text-white/35 text-xs">ⓘ</span>', kind: 'non-text',
     why: 'the glyph that marks a stat tile as having a hover hint' },
-  // ── onboarding ──
-  { file: 'src/components/OnboardingFlow.tsx', anchor: 'transition-colors placeholder:text-white/35 focus:border-[#a855f7]"', kind: 'large',
-    why: 'the "Type your name" instruction, set at clamp(2rem, 6vw, 3rem) bold, which the size test cannot read (raised from /15)' },
   // ── search ──
   // (The requests page had five lines here: a glyph where a poster was
   // missing, twice; an illustration; a dot; an icon-only delete. The page
@@ -888,29 +887,33 @@ const SURFACES = [
   // ── The referral step. A one-shot question with a Skip, so every control
   //    here has to be readable the FIRST time or the answer is noise. ──
   {
-    what: 'referral step body copy', where: `${ONB} (referral step)`,
-    color: W, alpha: () => twAlpha(ONB, 'It helps us know where to show up', 'text-white'),
-    px: 15.2, on: () => [ONB_INK],
+    what: 'referral step body copy (the question)', where: `${ONB} (referral step)`,
+    color: () => twText(ONB, 'data-referral-ask').rgb,
+    alpha: () => twText(ONB, 'data-referral-ask').a,
+    px: 17, on: () => [ONB_INK],
   },
   {
     // The plan's requirement in one assertion: Skip must not be a
     // low-contrast afterthought sitting next to a full-strength Continue.
     what: 'referral step "Skip this question"', where: `${ONB} (referral step)`,
-    color: W, alpha: () => twAlpha(ONB, 'Skip this question', 'text-white'),
+    color: () => twText(ONB, 'Skip this question').rgb,
+    alpha: () => twText(ONB, 'Skip this question').a,
     px: 14, on: () => [ONB_INK],
   },
   {
     what: 'referral "Other" field label', where: `${ONB} (referral step)`,
-    color: W, alpha: () => twAlpha(ONB, 'Where, specifically?', 'text-white'),
-    px: 12.8, on: () => [ONB_INK],
+    color: () => twText(ONB, 'data-referral-detail-label').rgb,
+    alpha: () => twText(ONB, 'data-referral-detail-label').a,
+    px: 13, on: () => [ONB_INK],
   },
   {
-    // On the field's own translucent fill, not bare ink — one composite deeper
-    // than it looks, which is the case eyeballing gets wrong.
+    // On the field's own fill, not the page: the app's fields are filled
+    // one step up, and the placeholder is the app's one placeholder colour.
     what: 'referral "Other" field placeholder', where: `${ONB} (referral step)`,
-    color: W, alpha: () => twAlpha(ONB, 'A podcast, a forum', 'placeholder:text-white'),
-    px: 14,
-    on: () => [over(W, twAlpha(ONB, 'A podcast, a forum', 'bg-white'), ONB_INK)],
+    color: () => cssColor('input::placeholder, textarea::placeholder', 'color').rgb,
+    alpha: () => cssColor('input::placeholder, textarea::placeholder', 'color').a,
+    px: 17,
+    on: () => [rootToken('--surface-raised').rgb],
   },
   // ── The search page's own field, where a phone types a title or a
   //    description (the top bar has no field there). The text this script

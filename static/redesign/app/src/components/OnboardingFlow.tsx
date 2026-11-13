@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   getOnboardingGrid,
   saveOnboardingSeeds,
@@ -14,6 +14,7 @@ import {
   type ReferralPromptState,
 } from '@/lib/api'
 import { isRestrictedProfile } from '@/lib/profileSession'
+import { limitPhrase } from '@/lib/profileLimits'
 import { buildSteps, nextStep, prevStep, type Step } from '@/lib/onboardingSteps'
 import {
   shuffleReferralOptions,
@@ -23,6 +24,9 @@ import {
 } from '@/lib/referral'
 import { nextRadioIndex } from '@/lib/radiogroup'
 import { NEBULAS, NebulaAvatar, nebulaValue, parseNebula } from './NebulaAvatar'
+import { AuroraMark } from './TopNav'
+import { AuroraWordmark } from './AuroraWordmark'
+import { SkeletonBlock } from './Skeletons'
 
 interface OnboardingFlowProps {
   /** Active profile id, or null for the session's acting profile. */
@@ -48,6 +52,9 @@ interface OnboardingFlowProps {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
+/** The build's own watchdog ran out: nothing answered in time. */
+class BuildTimeout extends Error {}
+
 // ratingForAge maps a chosen age to the profile's content settings, matching the
 // canonical rating ladder (internal/db/ratings.go): max_age_rating is a HARD
 // ceiling expanded through that ladder, maturity_pref is the SOFT recall lean
@@ -56,28 +63,22 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 // tag describes the unrestricted CEILING, while what surfaces first follows
 // what they actually watch (an adult with an all-family history leans family
 // until their history says otherwise, or they pick an explicit tone in
-// Settings). Boundaries mirror the onboarding mock's tiers; "TV-14" (not
-// "PG-13") is the teen cap so teen TV is included while R / TV-MA stay blocked.
-function ratingForAge(age: number): {
-  maxRating: string
-  maturityPref: number
-  tier: string
-  tag: string
-  tone: string
-} {
-  if (age < 13) return { maxRating: 'PG', maturityPref: 0, tier: 'Kids', tag: 'G · PG', tone: '#5eead4' }
-  if (age < 17) return { maxRating: 'TV-14', maturityPref: 1, tier: 'Teen', tag: 'PG-13 · TV-14', tone: '#fcd34d' }
-  return { maxRating: '', maturityPref: -1, tier: 'Adult', tag: 'Up to R · TV-MA', tone: '#d8b4fe' }
+// Settings). "TV-14" (not "PG-13") is the teen cap so teen TV is included
+// while R / TV-MA stay blocked.
+function ratingForAge(age: number): { maxRating: string; maturityPref: number; tier: 'Kids' | 'Teen' | 'Adult' } {
+  if (age < 13) return { maxRating: 'PG', maturityPref: 0, tier: 'Kids' }
+  if (age < 17) return { maxRating: 'TV-14', maturityPref: 1, tier: 'Teen' }
+  return { maxRating: '', maturityPref: -1, tier: 'Adult' }
 }
 
 // onboardingProfilePatch is the profile write that ends onboarding. Content
-// settings (the age-derived ceiling and tone lean) ride along only when the
-// age slider was moved, and never for a profile that already has a ceiling:
-// the server refuses a restricted profile's ceiling change, and the slider is
+// settings (the age-derived ceiling and tone lean) ride along only when an
+// age was entered, and never for a profile that already has a ceiling: the
+// server refuses a restricted profile's ceiling change, and the age field is
 // disabled for one. The account's only profile without a ceiling gets the
 // tone lean but no ceiling: the server refuses that too, since nothing on an
 // account whose every profile is restricted could lift a limit again, and a
-// single-profile account used to get there in one move of this slider.
+// single-profile account used to get there in one entry of an age.
 export function onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilingLocked, soleUnrestricted = false }: {
   name: string
   avatarId: string | null
@@ -99,17 +100,17 @@ export function onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilin
 }
 
 const LOADING_MESSAGES = [
-  'Reading your taste signals…',
-  'Scoring your library…',
-  'Finding hidden gems for you…',
-  'Composing your hero…',
-  'Polishing your discover rails…',
+  'Reading what you picked…',
+  'Going through your library…',
+  'Finding titles you might have missed…',
+  'Choosing tonight’s first pick…',
+  'Putting your shelves in order…',
 ]
 
 // ageForRating reverse-maps a profile's stored content ceiling to a
-// representative age, so the slider starts in the profile's CURRENT tier.
-// Leaving it untouched then preserves their existing setting (we only write
-// content settings when the user actually moves it).
+// representative age: what `age` holds until one is entered. It is not
+// shown, and nothing is written from it: content settings are written only
+// from an age the person typed.
 function ageForRating(maxRating?: string | null): number {
   const r = (maxRating ?? '').trim()
   if (!r) return 24
@@ -134,10 +135,13 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   const [avatarId, setAvatarId] = useState<string | null>(() => parseNebula(profile?.avatar_url)?.id ?? null)
   const [name, setName] = useState(() => (profile?.name ?? '').slice(0, 24))
   const [age, setAge] = useState(() => ageForRating(profile?.max_age_rating))
+  // An age has been entered. The field starts empty and may be emptied
+  // again, which is "no age": nothing about content is then written.
   const [ageTouched, setAgeTouched] = useState(false)
+  const [ageText, setAgeText] = useState('')
   // A profile that already has a content limit is the one this session acts
   // as, so it is restricted, and the server refuses any change to its limit.
-  // The age step shows the limit instead of offering a slider that would fail.
+  // The age field says so instead of taking an age that would be refused.
   const ceilingLocked = isRestrictedProfile(profile)
 
   // The profile can arrive AFTER mount (App's listProfiles can lose the race to
@@ -176,21 +180,23 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   // the page down. See settleReferral.
   const referralInFlightRef = useRef<Promise<void> | null>(null)
 
-  // Place focus inside the referral step when it opens.
+  // Place focus inside each step when it opens.
   //
-  // Without this the step is reachable only by Tabbing from the top of the
+  // Without this a step is reachable only by Tabbing from the top of the
   // document. The footer's Continue button is OUTSIDE the key={step} wrapper,
   // so React keeps the same DOM node across the transition and merely flips it
-  // to disabled (the referral step can't advance until something is chosen) —
-  // and per the HTML focus fixup rule, disabling the element a keyboard user is
-  // standing on drops focus to <body>. They pressed Enter on "Build my Aurora"
-  // and landed nowhere, with the question they now have to answer several tab
-  // stops away behind the brand and the header skip.
+  // to disabled (a step can't advance until its answer is given) — and per the
+  // HTML focus fixup rule, disabling the element a keyboard user is standing
+  // on drops focus to <body>. They pressed Enter on Continue and landed
+  // nowhere, with what they now have to answer several tab stops away behind
+  // the brand and the header skip.
   //
-  // A roving tabIndex=0 makes the group a tab TARGET; it does not put focus
-  // there. This does.
+  // The referral step's focus goes to its first answer: a roving tabIndex=0
+  // makes the group a tab TARGET; it does not put focus there. Every other
+  // step's goes to its heading, which says where the person now is.
+  const headingRef = useRef<HTMLHeadingElement | null>(null)
   useEffect(() => {
-    if (step !== 'referral') return
+    if (step !== 'referral') { headingRef.current?.focus(); return }
     const first = referralOptions[0]?.key
     if (first) referralRefs.current[first]?.focus()
   }, [step, referralOptions])
@@ -199,7 +205,6 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   const [error, setError] = useState<string | null>(null)
   const [loadNonce, setLoadNonce] = useState(0)
   const [phaseMsg, setPhaseMsg] = useState(0)
-  const [mosaicShimmer, setMosaicShimmer] = useState(false)
   const ranLoadRef = useRef(-1)
 
   // seenRef dedupes ids across grid + reactive; popLoadedRef is the page cursor.
@@ -287,8 +292,8 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
 
   const selectedSet = useMemo(() => new Set(selected), [selected])
 
-  // Posters for the loading mosaic: the user's actual picks first, padded with
-  // other poster-bearing grid items so it always tiles a full wall.
+  // Posters for the loading screen: the user's actual picks first, padded with
+  // other poster-bearing grid items so the row is always full.
   const mosaicPosters = useMemo(() => {
     const all = [...grid, ...reactive]
     const byId = new Map(all.map((m) => [m.id, m]))
@@ -361,10 +366,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   const inputIndex = machine.inputs.indexOf(step)
   const canAdvance = (): boolean => {
     switch (step) {
-      case 'avatar':
-        return !!avatarId
-      case 'name':
-        return name.trim().length >= 1
+      case 'you':
+        // An avatar and a name; the age is optional.
+        return !!avatarId && name.trim().length >= 1
       case 'titles':
         return selected.length >= minPicks
       case 'referral':
@@ -424,11 +428,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     let cancelled = false
     const t0 = Date.now()
     setPhaseMsg(0)
-    setMosaicShimmer(false)
 
-    // cosmetic: advance the status messages + reveal the mosaic shimmer
+    // cosmetic: advance the status messages
     const msgIv = setInterval(() => setPhaseMsg((m) => Math.min(m + 1, LOADING_MESSAGES.length - 1)), 1000)
-    const shimmerTo = setTimeout(() => setMosaicShimmer(true), 250 + mosaicPosters.length * 140 + 300)
 
     ;(async () => {
       try {
@@ -437,12 +439,12 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         const pid = profileId ?? status.profile_id
         // Identity always persists (nickname + chosen nebula). Content settings
         // (age-derived ceiling + tone lean) persist ONLY if the user actually
-        // moved the age slider — so a returning profile that breezes past the
-        // pre-filled age keeps its existing rating/tone (e.g. a kids profile is
-        // never silently un-restricted).
+        // entered an age — so a returning profile that leaves the age empty
+        // keeps its existing rating/tone (e.g. a kids profile is never
+        // silently un-restricted).
         const patch = onboardingProfilePatch({ name, avatarId, age, ageTouched, ceilingLocked, soleUnrestricted })
         // The critical writes + a best-effort hero warm:
-        //  1) persist identity (+ content settings when the age step was used),
+        //  1) persist identity (+ content settings when an age was entered),
         //  2) save taste seeds — flips taste_onboarding_completed, mirrors picks to
         //     Favorites, invalidates the hero cache so the next build uses the new
         //     taste vector,
@@ -464,7 +466,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         // the error UI (Try again / Skip) instead of spinning forever.
         let timedOut = false
         await Promise.race([work, sleep(20000).then(() => void (timedOut = true))])
-        if (timedOut) throw new Error('This is taking longer than expected — check your connection.')
+        if (timedOut) throw new BuildTimeout()
         // Hold a minimum beat so the celebratory loader never just flashes.
         const elapsed = Date.now() - t0
         if (elapsed < 4200) await sleep(4200 - elapsed)
@@ -472,8 +474,11 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
       } catch (e) {
         if (!cancelled) {
           clearInterval(msgIv)
-          clearTimeout(shimmerTo)
-          setError(e instanceof Error ? e.message : 'Something went wrong building your Aurora.')
+          // In the app's words: what the server or the browser said of a
+          // failed write is written for logs.
+          setError(e instanceof BuildTimeout
+            ? 'This is taking longer than expected. Check your connection, then try again or skip for now.'
+            : 'Your choices could not be saved just now. Try again, or skip for now.')
         }
       }
     })()
@@ -481,7 +486,6 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     return () => {
       cancelled = true
       clearInterval(msgIv)
-      clearTimeout(shimmerTo)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, loadNonce])
@@ -489,7 +493,38 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   // The nav bar belongs to the input steps — the ones with a Back/Continue
   // contract. Derived from the machine so a new input step gets it for free.
   const showNav = machine.inputs.includes(step)
-  const nebulaForWelcome = avatarId ?? 'aurora'
+  // The step after which the flow builds: its button says so.
+  const finishes = nextStep(machine, step) === 'loading'
+  const shownName = name.trim()
+  // How wide each step is drawn; its footer follows it.
+  const stepWidth = step === 'titles' ? 'max-w-[1040px]' : step === 'you' ? 'max-w-[640px]' : 'max-w-[560px]'
+
+  // What the age that was entered will do, in words, and why not when it
+  // will not. The limit is worded by the helper Settings uses, so both say
+  // the same of the same limit.
+  const ageNote = (): string => {
+    if (ceilingLocked) return `This profile has a content limit (${profile?.max_age_rating}), so its age cannot be changed here.`
+    if (!ageTouched) {
+      return soleUnrestricted
+        ? 'This is the account’s only profile without a content limit, so an age tunes what is suggested and sets no limit. To limit what a child sees, give them their own profile.'
+        : `An age under 13 limits this profile to titles ${limitPhrase('PG')}, and one under 17 to titles ${limitPhrase('TV-14')}. Leave it empty to change nothing.`
+    }
+    const r = ratingForAge(age)
+    if (r.maxRating === '') return 'Adult: no content limit. Suggestions follow what you watch.'
+    if (soleUnrestricted) return `${r.tier}: suggestions lean that way, and no content limit is set, because this is the account’s only profile without one. To limit what a child sees, give them their own profile.`
+    return `${r.tier}: this profile will be limited to titles ${limitPhrase(r.maxRating)}.`
+  }
+
+  // What the footer says beside its buttons: what is still missing, or what
+  // comes next.
+  const footNote = (): string => {
+    if (step === 'you') return !avatarId ? 'Pick an avatar to continue.' : !shownName ? 'Enter a name to continue.' : ''
+    if (step === 'titles') {
+      if (selected.length < minPicks) return `Pick ${minPicks - selected.length} more to continue.`
+      return finishes ? 'Aurora builds your first Tonight from these. It takes a few seconds.' : 'Rating or saving a title later counts too.'
+    }
+    return ''
+  }
 
   return (
     // role="dialog" + aria-modal, matching ProfilesGate. This overlay has always
@@ -499,76 +534,44 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     // told a modal question arrived rather than leaving the user reading the
     // still-exposed app underneath.
     <div
-      className="fixed inset-0 z-[80] flex flex-col overflow-hidden bg-[#07060c] aurora-bg animate-fade-in"
+      className="fixed inset-0 z-[80] flex flex-col overflow-hidden bg-surface-page text-ink animate-fade-in"
       role="dialog"
       aria-modal="true"
       aria-label={taste ? 'Set up your Aurora' : 'One quick question'}
     >
-      <div className="onb-bg">
-        <div className="onb-blob onb-blob1" />
-        <div className="onb-blob onb-blob2" />
-        <div className="onb-blob onb-blob3" />
-      </div>
-
-      {/* Top bar: brand · progress · step count · skip */}
-      <header className="relative z-10 flex shrink-0 items-center gap-4 px-6 pt-6 sm:px-12">
-        <div className="flex items-center gap-2.5">
-          <svg viewBox="0 0 36 36" className="h-7 w-7 drop-shadow-[0_0_12px_rgba(168,85,247,0.55)]">
-            <circle cx="18" cy="18" r="16" fill="#A855F7" />
-            <path d="M14 11L26 18L14 25Z" fill="#fff" />
-          </svg>
-          <span className="font-display text-[1.05rem] font-bold tracking-tight text-white">
-            {/* Literal hex, not the --stage-purple-lt token: Tailwind 3 drops
-                an opacity modifier on a var() colour and emits NOTHING for
-                the class (review finding on the token sweep). */}
-            Aurora<span className="font-medium text-[#d8b4fe]/85"> Pro</span>
-          </span>
-        </div>
-        <div className="hidden flex-1 items-center justify-center gap-1.5 sm:flex">
-          {machine.inputs.map((s, i) => (
-            <span
-              key={s}
-              className={
-                'h-1 rounded-full transition-[width] duration-500 ' +
-                (i < inputIndex
-                  ? 'w-8 bg-gradient-to-r from-[#a981ff] to-[#6ad7ff]'
-                  : i === inputIndex
-                    ? 'w-12 bg-gradient-to-r from-[#a981ff] to-[#6ad7ff]'
-                    : 'w-8 bg-white/[0.12]')
-              }
-            />
-          ))}
-        </div>
-        <div className="ml-auto flex items-center gap-4">
-          {inputIndex >= 0 && (
-            <span className="hidden text-xs tracking-wide text-white/50 sm:inline">
-              Step {inputIndex + 1} of {machine.inputs.length}
-            </span>
-          )}
-          {step !== 'loading' && (
-            <button
-              type="button"
-              onClick={() => void skip()}
-              className="text-xs font-semibold text-white/50 transition-colors hover:text-white/80"
-            >
-              Skip for now
-            </button>
-          )}
-        </div>
+      {/* Top bar: brand, progress, skip. */}
+      <header className="flex h-14 flex-none items-center gap-2.5 px-4 sm:h-16 sm:px-12">
+        <AuroraMark />
+        {/* Carries the accessible name "Aurora Pro". Not on the narrowest
+            phones, where the progress and Skip need the room. */}
+        <AuroraWordmark ink="var(--ink)" className="hidden h-[15px] w-auto min-[360px]:block" />
+        <span className="flex-1" />
+        {inputIndex >= 0 && machine.inputs.length > 1 && (
+          <div role="img" aria-label={`Step ${inputIndex + 1} of ${machine.inputs.length}`} className="flex gap-1.5">
+            {machine.inputs.map((s, i) => (
+              <span key={s} className={`h-1 w-6 rounded-[2px] sm:w-12 ${i <= inputIndex ? 'bg-action' : 'bg-line-strong'}`} />
+            ))}
+          </div>
+        )}
+        {step !== 'loading' && (
+          <button
+            type="button"
+            onClick={() => void skip()}
+            className="-mr-2 ml-2 inline-flex min-h-11 items-center rounded-control px-2 text-sm text-ink-2 hover:text-ink hover:underline sm:ml-4"
+          >
+            Skip for now
+          </button>
+        )}
       </header>
 
       {/* Stage — auto margins center short steps and let tall steps (titles)
           scroll from the top instead of clipping their header. */}
-      <div className="relative z-10 flex flex-1 flex-col overflow-y-auto px-6 sm:px-12">
+      <div className="flex flex-1 flex-col overflow-y-auto px-4 sm:px-12">
         <div
           key={step}
-          className={
-            'onb-stagger m-auto w-full py-6 ' + (step === 'titles' ? 'max-w-5xl' : 'max-w-xl')
-          }
+          className={`m-auto w-full py-6 ${stepWidth}`}
         >
-          {step === 'avatar' && renderAvatar()}
-          {step === 'name' && renderName()}
-          {step === 'age' && renderAge()}
+          {step === 'you' && renderYou()}
           {step === 'titles' && renderTitles()}
           {step === 'referral' && renderReferral()}
           {step === 'welcome' && renderWelcome()}
@@ -576,258 +579,197 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         </div>
       </div>
 
-      {/* Bottom nav */}
+      {/* Bottom nav: what is missing or what comes next, Back, and the way on.
+          Outside the scrolling stage, so it stays in reach under a long grid. */}
       {showNav && (
-        <footer className="relative z-10 flex shrink-0 items-center justify-between gap-4 px-6 pb-7 pt-2 sm:px-12">
-          <button
-            type="button"
-            onClick={back}
-            disabled={stepIndex === 0}
-            className="rounded-full px-5 py-3 text-sm font-semibold text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white disabled:pointer-events-none disabled:opacity-0"
-          >
-            ← Back
-          </button>
-          <span className="hidden text-xs text-white/50 sm:inline">{navHint()}</span>
+        <footer className="flex-none px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-3 sm:px-12 sm:pb-10">
+          {/* As wide as the step above it, so its buttons end where the
+              step's own right edge is. */}
+          <div className={`mx-auto flex w-full flex-wrap items-center justify-end gap-x-3 gap-y-2 ${stepWidth}`}>
+          <div className="min-w-0 flex-1 basis-full text-[13px] leading-snug text-ink-2 sm:basis-0">
+            {step === 'referral' ? (
+              <button
+                type="button"
+                onClick={() => {
+                  sendReferral({ skip: true })
+                  const n = nextStep(machine, 'referral')
+                  if (n) { goTo(n); return }
+                  void settleReferral().then(onDone)
+                }}
+                className="-ml-2 inline-flex min-h-11 items-center rounded-control px-2 text-sm text-ink-2 hover:text-ink hover:underline"
+              >
+                Skip this question
+              </button>
+            ) : (
+              // Says what Continue is waiting for, as the choices are made.
+              <p role="status">{footNote()}</p>
+            )}
+          </div>
+          {stepIndex > 0 && (
+            <button type="button" onClick={back} className="stage-btn stage-btn-ghost stage-btn-tall">
+              Back
+            </button>
+          )}
           <button
             type="button"
             onClick={next}
             disabled={!canAdvance()}
-            className="rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-7 py-3 text-sm font-bold text-white shadow-[0_0_22px_rgba(168,85,247,0.45)] transition-ui motion-safe:hover:-translate-y-0.5 hover:shadow-[0_0_34px_rgba(168,85,247,0.65)] disabled:pointer-events-none disabled:opacity-40 disabled:shadow-none"
+            className="stage-btn stage-btn-primary stage-btn-pill stage-btn-tall min-w-[132px]"
           >
-            {step === 'titles' ? 'Build my Aurora →' : 'Continue →'}
+            {finishes ? 'Finish' : 'Continue'}
           </button>
+          </div>
         </footer>
       )}
     </div>
   )
 
-  function navHint(): string {
-    if (step === 'avatar') return 'Tap a nebula — change it anytime'
-    if (step === 'referral') return 'Arrow keys move between options'
-    if (step === 'titles') return `Pick at least ${minPicks} — more is better`
-    return ''
+  // A step's heading, which takes the focus when the step opens (see
+  // headingRef).
+  function heading(text: string) {
+    return (
+      <h1 ref={headingRef} tabIndex={-1} className="rounded-chip font-display text-[clamp(2.25rem,9vw,3.5rem)] font-extrabold leading-none tracking-[-0.02em] text-ink">
+        {text}
+      </h1>
+    )
   }
 
-  function renderAvatar() {
+  // Who this profile is: an avatar, a name, and an age for whoever wants to
+  // give one.
+  function renderYou() {
     return (
-      <>
-        <Eyebrow>Pick your aura</Eyebrow>
-        <h1 className="font-display text-[clamp(1.9rem,4vw,2.8rem)] font-bold leading-[1.05] tracking-tight text-white">
-          Choose the nebula that’s you.
-        </h1>
-        <p className="mt-3 max-w-md text-[0.95rem] leading-relaxed text-white/55">
-          Each one is a living Aurora Pro signature. It follows your profile everywhere — and you can
-          switch it anytime.
-        </p>
-        <div className="mt-8 grid grid-cols-5 gap-3 sm:gap-5">
-          {NEBULAS.map((n) => {
-            const sel = avatarId === n.id
-            return (
-              <div key={n.id} className="text-center">
+      <div className="flex flex-col gap-8 sm:gap-9">
+        <div>
+          {heading('Make it yours')}
+          <p className="mt-2 text-[17px] leading-snug text-ink-2">A face and a name for this profile. You can change both later.</p>
+        </div>
+
+        <fieldset className="m-0 border-0 p-0">
+          <legend className="mb-3 p-0 text-[13px] font-semibold text-ink-2">Pick your avatar</legend>
+          {/* Two rows of five at every width: the discs shrink with a
+              narrow phone instead of running to four rows. */}
+          <div className="grid max-w-[384px] grid-cols-5 gap-3 sm:gap-4">
+            {NEBULAS.map((n) => {
+              const sel = avatarId === n.id
+              return (
                 <button
+                  key={n.id}
                   type="button"
                   onClick={() => setAvatarId(n.id)}
                   aria-pressed={sel}
                   aria-label={n.name}
-                  className={
-                    'relative block aspect-square w-full rounded-full p-0 transition-transform duration-300 ' +
-                    (sel ? 'motion-safe:scale-110' : 'motion-safe:hover:-translate-y-0.5 motion-safe:hover:scale-[1.04]')
-                  }
-                  style={
-                    sel
-                      ? { boxShadow: '0 0 0 3px rgba(255,255,255,0.16), 0 10px 44px rgba(168,85,247,0.4)' }
-                      : undefined
-                  }
+                  // The chosen one is ringed in white, a gap of the page's
+                  // colour from it: the same mark a chosen poster has.
+                  className={`relative block aspect-square w-full rounded-full p-0 ${sel ? 'shadow-[0_0_0_3px_var(--surface-page),0_0_0_5px_#ffffff]' : ''}`}
                 >
                   <NebulaAvatar nebula={n} active={sel} className="block h-full w-full" />
-                  {sel && (
-                    <span className="absolute bottom-[6%] right-[6%] z-[3] grid h-5 w-5 place-items-center rounded-full bg-white text-[#0a0810] shadow">
-                      <CheckIcon className="h-3 w-3" />
-                    </span>
-                  )}
                 </button>
-                <div
-                  className={
-                    'mt-2 text-[0.72rem] tracking-wide transition-colors ' +
-                    (sel ? 'text-white' : 'text-white/50')
-                  }
-                >
-                  {n.name}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      </>
-    )
-  }
+              )
+            })}
+          </div>
+        </fieldset>
 
-  function renderName() {
-    return (
-      <div className="text-center">
-        <Eyebrow>The basics</Eyebrow>
-        <h1 className="font-display text-[clamp(1.9rem,4.4vw,3rem)] font-bold leading-[1.04] tracking-tight text-white">
-          What should we call you?
-        </h1>
-        <p className="mx-auto mt-3 max-w-sm text-[0.95rem] leading-relaxed text-white/55">
-          Your first name or a nickname — whatever feels like you.
-        </p>
-        <input
-          autoFocus
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && canAdvance()) next()
-          }}
-          maxLength={24}
-          placeholder="Type your name"
-          className="font-display mt-8 w-full border-b-2 border-white/[0.14] bg-transparent pb-3 text-center text-[clamp(2rem,6vw,3rem)] font-bold text-white outline-none transition-colors placeholder:text-white/35 focus:border-[#a855f7]"
-        />
-        <div className="mt-6 min-h-[1.4em] text-[1.05rem] text-white/60">
-          {name.trim() ? (
-            <>
-              Nice to meet you, <b className="font-semibold text-white">{name.trim()}</b> 👋
-            </>
-          ) : (
-            ''
-          )}
-        </div>
-      </div>
-    )
-  }
-
-  function renderAge() {
-    const r = ratingForAge(age)
-    // What a limit-free sole profile gets is the lean alone, so say so.
-    const noLimit = soleUnrestricted && !ceilingLocked && r.maxRating !== ''
-    const pct = ((age - 4) / (80 - 4)) * 100
-    return (
-      <div className="text-center">
-        <Eyebrow>A little about you</Eyebrow>
-        <h1 className="font-display text-[clamp(1.9rem,4.4vw,3rem)] font-bold tracking-tight text-white">
-          How old are you?
-        </h1>
-        <p className="mx-auto mt-3 max-w-sm text-[0.95rem] leading-relaxed text-white/55">
-          {ceilingLocked
-            ? `This profile has a content limit (${profile?.max_age_rating}), so its age can’t be changed here.`
-            : noLimit
-              ? 'This is the account’s only profile without a content limit, so your age tunes what’s recommended but sets no limit. To limit what a child sees, give them their own profile.'
-              : 'This tailors your recommendations and keeps things age-appropriate.'}
-        </p>
-        <div
-          className="font-display mt-6 bg-gradient-to-b from-white to-[#d8b4fe] bg-clip-text text-[clamp(3.2rem,10vw,5rem)] font-bold leading-none text-transparent"
-          style={{ WebkitTextFillColor: 'transparent' }}
-        >
-          {age}
-        </div>
-        <div
-          className="mt-5 inline-flex items-center gap-2.5 rounded-full border px-4 py-2"
-          style={{ background: `${r.tone}22`, borderColor: `${r.tone}55` }}
-        >
-          <span className="text-[0.86rem] font-semibold" style={{ color: r.tone }}>
-            {r.tier}
-          </span>
-          <span className="h-1 w-1 rounded-full bg-white/30" />
-          <span className="text-[0.74rem] text-white/55">{noLimit ? 'No content limit' : r.tag}</span>
-        </div>
-        <input
-          type="range"
-          min={4}
-          max={80}
-          value={age}
-          disabled={ceilingLocked}
-          aria-label="Age"
-          onChange={(e) => {
-            setAge(parseInt(e.target.value, 10))
-            setAgeTouched(true)
-          }}
-          className="onb-range mt-8 w-full"
-          style={{ '--p': `${pct}%` } as CSSProperties}
-        />
-        <div className="mt-3 flex justify-between text-[0.7rem] text-white/50">
-          <span>4</span>
-          <span>18</span>
-          <span>40</span>
-          <span>60</span>
-          <span>80</span>
+        <div className="flex flex-wrap gap-5">
+          <div className="flex min-w-[240px] flex-[2] flex-col gap-1.5">
+            <label htmlFor="ob-name" className="text-[13px] font-semibold text-ink-2">Name</label>
+            <input
+              id="ob-name"
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canAdvance()) next()
+              }}
+              maxLength={24}
+              autoComplete="off"
+              className="onboarding-field w-full"
+            />
+          </div>
+          <div className="flex min-w-[120px] flex-1 flex-col gap-1.5">
+            <label htmlFor="ob-age" className="text-[13px] font-semibold text-ink-2">
+              Age <span className="font-normal text-ink-3">optional</span>
+            </label>
+            <input
+              id="ob-age"
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={2}
+              value={ageText}
+              disabled={ceilingLocked}
+              aria-describedby="ob-age-note"
+              autoComplete="off"
+              onChange={(e) => {
+                const digits = e.target.value.replace(/\D/g, '').slice(0, 2)
+                setAgeText(digits)
+                if (digits === '') { setAgeTouched(false); return }
+                setAge(parseInt(digits, 10))
+                setAgeTouched(true)
+              }}
+              className="onboarding-field w-full"
+            />
+          </div>
+          <p id="ob-age-note" className="basis-full text-[13px] leading-snug text-ink-2">{ageNote()}</p>
         </div>
       </div>
     )
   }
 
   function renderTitles() {
-    const remaining = Math.max(0, minPicks - selected.length)
     return (
-      <>
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <Eyebrow>Pick what you love</Eyebrow>
-            <h1 className="font-display text-[clamp(1.7rem,3.6vw,2.4rem)] font-bold tracking-tight text-white">
-              Tap a few you’re into.
-            </h1>
+      <div className="flex flex-col gap-7">
+        <div className="flex flex-wrap items-end gap-4">
+          <div className="min-w-[280px] flex-1">
+            {heading('Pick what you love')}
+            <p className="mt-2 text-[17px] leading-snug text-ink-2">
+              {minPicks} or more, from this library. Aurora uses them for your first picks.
+            </p>
           </div>
-          <div className="text-[0.82rem] text-white/55">
-            {selected.length >= minPicks ? (
-              <>
-                <b className="font-semibold text-[color:var(--stage-purple-lt)]">{selected.length}</b> picked · the more you
-                choose, the sharper your Aurora ✨
-              </>
-            ) : (
-              <>
-                <b className="font-semibold text-[color:var(--stage-purple-lt)]">{selected.length}</b> selected · pick {remaining}{' '}
-                more (min {minPicks})
-              </>
-            )}
-          </div>
+          <p role="status" className="text-[15px] font-semibold text-ink">{selected.length} picked</p>
         </div>
 
         {gridLoading ? (
-          <div className="mt-6 grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+          <div className="onboarding-grid" aria-hidden="true">
             {Array.from({ length: 18 }).map((_, i) => (
-              <div key={i} className="aspect-[2/3] animate-pulse rounded-xl bg-white/[0.04]" />
+              <SkeletonBlock key={i} className="aspect-[2/3] rounded-art" />
             ))}
           </div>
         ) : grid.length === 0 ? (
-          <div className="py-20 text-center text-white/50">
-            <p>Your library is still being prepared for recommendations.</p>
-            <button type="button" onClick={() => void skip()} className="mt-4 text-[#a981ff] hover:underline">
+          <div className="py-16">
+            <p className="text-[15px] text-ink-2">Your library is still being prepared for recommendations.</p>
+            <button type="button" onClick={() => void skip()} className="stage-btn stage-btn-ghost mt-4">
               Continue to Aurora
             </button>
           </div>
         ) : (
           <>
-            <div className="mt-6 grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+            <div role="group" aria-label="Titles" className="onboarding-grid">
               {grid.map((m) => (
-                <PosterTile key={m.id} m={m} selected={selectedSet.has(m.id)} onToggle={toggle} />
+                <PosterTile key={m.id} m={m} selected={selectedSet.has(m.id)} dim={selected.length > 0} onToggle={toggle} />
               ))}
             </div>
             {hasMore && (
-              <div className="mt-6 flex justify-center">
-                <button
-                  type="button"
-                  onClick={() => void showMore()}
-                  disabled={loadingMore}
-                  className="rounded-full border border-white/[0.12] bg-white/[0.04] px-6 py-2.5 text-sm font-semibold text-white/80 transition-colors hover:bg-white/[0.08] disabled:opacity-50"
-                >
+              <div className="flex justify-center">
+                {/* Off, not disabled, while more are fetched: it keeps the
+                    focus the press gave it. showMore refuses a second press. */}
+                <button type="button" onClick={() => void showMore()} aria-disabled={loadingMore} className="stage-btn stage-btn-ghost">
                   {loadingMore ? 'Loading…' : 'Show more'}
                 </button>
               </div>
             )}
             {reactive.length > 0 && (
-              <section className="mt-10">
-                <h3 className="mb-3 text-sm font-bold uppercase tracking-wide text-white/70">
-                  More like your picks
-                </h3>
-                <div className="grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+              <section aria-labelledby="ob-more">
+                <h2 id="ob-more" className="mb-3 font-display text-[22px] font-bold leading-tight tracking-[-0.01em] text-ink">More like your picks</h2>
+                <div role="group" aria-label="More like your picks" className="onboarding-grid">
                   {reactive.map((m) => (
-                    <PosterTile key={m.id} m={m} selected={selectedSet.has(m.id)} onToggle={toggle} />
+                    <PosterTile key={m.id} m={m} selected={selectedSet.has(m.id)} dim={selected.length > 0} onToggle={toggle} />
                   ))}
                 </div>
               </section>
             )}
           </>
         )}
-      </>
+      </div>
     )
   }
 
@@ -839,6 +781,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   function renderReferral() {
     const keys = referralOptions.map((o) => o.key)
     const otherChosen = referralChoice === REFERRAL_OTHER_KEY
+    const question = referral?.question || 'How did you hear about Aurora?'
     // The single tab stop, computed the SAME way the arrow handler computes
     // "current" so the two cannot disagree. Deriving it from an index rather
     // than from `active` also keeps the group in the tab ring when nothing is
@@ -847,71 +790,69 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     // that isn't in the list.
     const tabStop = Math.max(0, keys.indexOf(referralChoice ?? ''))
     return (
-      <>
-        <Eyebrow>One quick thing</Eyebrow>
-        {/* Admin-authored text, rendered as text. Never dangerouslySetInnerHTML. */}
-        <h1 className="font-display text-[clamp(1.9rem,4vw,2.8rem)] font-bold leading-[1.05] tracking-tight text-white">
-          {referral?.question || 'How did you hear about Aurora?'}
-        </h1>
-        <p className="mt-3 max-w-md text-[0.95rem] leading-relaxed text-white/55">
-          It helps us know where to show up. Entirely optional — skip if you'd rather not say.
-        </p>
-
-        <div
-          role="radiogroup"
-          aria-label={referral?.question || 'How did you hear about Aurora?'}
-          className="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-2"
-          // Inline handler rather than a factory taking a focus callback:
-          // react-hooks flags PASSING a ref-reading function during render,
-          // while reading a ref inside an event handler is exactly what the
-          // rule permits. The arithmetic still lives in tested nextRadioIndex.
-          onKeyDown={(e) => {
-            const n = nextRadioIndex(e.key, Math.max(0, keys.indexOf(referralChoice ?? '')), keys.length)
-            if (n === null) return
-            e.preventDefault()
-            // State BEFORE focus. Reversing these was a real keyboard trap
-            // once: `current` is derived from the selection, so focusing
-            // without selecting left it pinned and later options unreachable.
-            setReferralChoice(keys[n])
-            referralRefs.current[keys[n]]?.focus()
-          }}
-        >
-          {referralOptions.map((opt, i) => {
-            const active = referralChoice === opt.key
-            return (
-              <button
-                key={opt.key}
-                ref={(el) => {
-                  referralRefs.current[opt.key] = el
-                }}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                tabIndex={i === tabStop ? 0 : -1}
-                onClick={() => setReferralChoice(opt.key)}
-                className="stage-opt text-left"
-              >
-                <p className={`text-sm font-medium ${active ? 'text-white' : 'text-white/80'}`}>
-                  {opt.label}
-                </p>
-              </button>
-            )
-          })}
+      <div className="flex flex-col gap-8">
+        <div>
+          {heading('One quick thing')}
+          {/* Admin-authored text, rendered as text. Never dangerouslySetInnerHTML. */}
+          <p className="mt-2 text-[17px] leading-snug text-ink-2" data-referral-ask="">
+            {question} Whoever runs this server asked. It is optional.
+          </p>
         </div>
 
-        <div className="mt-5">
+        <div>
+          <div
+            role="radiogroup"
+            aria-label={question}
+            className="grid grid-cols-1 gap-2"
+            // Inline handler rather than a factory taking a focus callback:
+            // react-hooks flags PASSING a ref-reading function during render,
+            // while reading a ref inside an event handler is exactly what the
+            // rule permits. The arithmetic still lives in tested nextRadioIndex.
+            onKeyDown={(e) => {
+              const n = nextRadioIndex(e.key, Math.max(0, keys.indexOf(referralChoice ?? '')), keys.length)
+              if (n === null) return
+              e.preventDefault()
+              // State BEFORE focus. Reversing these was a real keyboard trap
+              // once: `current` is derived from the selection, so focusing
+              // without selecting left it pinned and later options unreachable.
+              setReferralChoice(keys[n])
+              referralRefs.current[keys[n]]?.focus()
+            }}
+          >
+            {referralOptions.map((opt, i) => {
+              const active = referralChoice === opt.key
+              return (
+                <button
+                  key={opt.key}
+                  ref={(el) => {
+                    referralRefs.current[opt.key] = el
+                  }}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  tabIndex={i === tabStop ? 0 : -1}
+                  onClick={() => setReferralChoice(opt.key)}
+                  className="stage-opt flex min-h-14 items-center gap-3.5 text-left text-base text-ink"
+                >
+                  {/* The radio's own mark: a ring, filled when chosen. */}
+                  <span aria-hidden="true" className={`grid h-5 w-5 flex-none place-items-center rounded-full border-2 ${active ? 'border-ink' : 'border-ink-3'}`}>
+                    <span className={`h-2.5 w-2.5 rounded-full ${active ? 'bg-ink' : ''}`} />
+                  </span>
+                  {opt.label}
+                </button>
+              )
+            })}
+          </div>
+
           {/* The reveal is announced: the field appears in response to a
               selection, which a screen-reader user would otherwise never learn
               about. A real <label>, not a placeholder — placeholders vanish on
               input and aren't reliably announced. */}
-          <div aria-live="polite" className="min-h-[5.25rem]">
+          <div aria-live="polite">
             {otherChosen && (
-              <div>
-                <label
-                  htmlFor="referral-detail"
-                  className="block text-[0.8rem] font-medium text-white/75"
-                >
-                  Where, specifically? <span className="text-white/50">(optional)</span>
+              <div className="mt-4">
+                <label htmlFor="referral-detail" className="block text-[13px] font-semibold text-ink-2" data-referral-detail-label="">
+                  Where, specifically? <span className="font-normal">(optional)</span>
                 </label>
                 <input
                   id="referral-detail"
@@ -920,42 +861,33 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
                   maxLength={REFERRAL_DETAIL_MAX}
                   onChange={(e) => setReferralDetail(e.target.value)}
                   placeholder="A podcast, a forum, a friend's setup…"
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white placeholder:text-white/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7]/70"
+                  className="onboarding-field mt-1.5 w-full"
                 />
               </div>
             )}
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              sendReferral({ skip: true })
-              const n = nextStep(machine, 'referral')
-              if (n) { goTo(n); return }
-              void settleReferral().then(onDone)
-            }}
-            className="mt-4 rounded-full px-5 py-2.5 text-sm font-semibold text-white/75 ring-1 ring-white/[0.16] transition-colors hover:bg-white/[0.06] hover:text-white"
-          >
-            Skip this question
-          </button>
         </div>
-      </>
+
+        {finishes && (
+          <p className="flex items-start gap-2 text-[13px] leading-snug text-ink-2">
+            {/* The mark of Aurora's own work. */}
+            <span aria-hidden="true" className="mt-1 h-2 w-2 flex-none rounded-full" style={{ background: 'var(--aurora)' }} />
+            <span>
+              {shownName ? `Welcome, ${shownName}. ` : ''}After this Aurora builds your first Tonight from the {selected.length} titles you picked. It takes a few seconds.
+            </span>
+          </p>
+        )}
+      </div>
     )
   }
 
+  // The send-off when a question was all there was to do: nothing was picked
+  // and nothing is being built, so it says neither.
   function renderWelcome() {
     return (
-      <div className="text-center">
-        <div className="onb-floaty mx-auto mb-8 h-[140px] w-[140px]">
-          <NebulaAvatar nebula={nebulaForWelcome} size={140} />
-        </div>
-        <h1 className="font-display text-[clamp(2.1rem,6vw,3.4rem)] font-extrabold tracking-tight text-white">
-          Welcome to Aurora,
-          <br />
-          <span className="onb-shimmer-text">{name.trim() || 'friend'}.</span>
-        </h1>
-        <p className="mt-4 text-[1.05rem] text-white/60">
-          Your universe is being arranged around your taste.
-        </p>
+      <div>
+        {heading(shownName ? `That is all, ${shownName}` : 'That is all')}
+        <p className="mt-2 text-[17px] leading-snug text-ink-2">Back to what you came for.</p>
         <button
           type="button"
           // In the referral-only pass there is no loading step — nothing to
@@ -967,9 +899,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
             // skip — wait for the answer to land before the page goes away.
             void settleReferral().then(onDone)
           }}
-          className="mt-9 rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-8 py-3.5 text-sm font-bold text-white shadow-[0_0_22px_rgba(168,85,247,0.5)] transition-ui motion-safe:hover:-translate-y-0.5 hover:shadow-[0_0_34px_rgba(168,85,247,0.7)]"
+          className="stage-btn stage-btn-primary stage-btn-pill stage-btn-tall mt-8 min-w-[132px]"
         >
-          Take me in →
+          Take me in
         </button>
       </div>
     )
@@ -977,73 +909,35 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
 
   function renderLoading() {
     return (
-      <div className="relative text-center">
-        <Constellation accent={NEBULAS.find((n) => n.id === nebulaForWelcome)?.c1 ?? '#a855f7'} />
-        <div className="relative z-[2] mx-auto max-w-xl">
-          <div className="relative mx-auto h-24 w-24">
-            <div className="onb-ring" />
-            <div className="onb-ring2" />
-            <svg viewBox="0 0 36 36" className="onb-pulse-mark h-24 w-24">
-              <circle cx="18" cy="18" r="16" fill="none" stroke="#A855F7" strokeWidth="2" opacity="0.5" />
-              <path d="M14 11L26 18L14 25Z" fill="#A855F7" />
-            </svg>
-          </div>
-          <div className="font-display mt-7 text-[clamp(1.5rem,4vw,2.1rem)] font-bold text-white">
-            Building your Aurora
-          </div>
-          <div className="mt-2 text-[0.95rem] text-white/50">{LOADING_MESSAGES[phaseMsg]}</div>
+      <div>
+        {heading('Building your Tonight')}
+        {/* What it is doing now, said as it changes. */}
+        <p role="status" className="mt-2 text-[17px] leading-snug text-ink-2">{error ? '' : LOADING_MESSAGES[phaseMsg]}</p>
 
-          <div
-            className={'mx-auto mt-8 flex max-w-[640px] flex-wrap justify-center gap-2 ' + (mosaicShimmer ? 'onb-mosaic-shimmer' : '')}
-          >
-            {mosaicPosters.map((m, i) => (
-              <span
-                key={m.id}
-                className="onb-mtile onb-in block h-[92px] w-[62px]"
-                style={
-                  {
-                    '--rot': `${(i % 2 ? 1 : -1) * (2 + (i % 3))}deg`,
-                    animationDelay: `${250 + i * 140}ms`,
-                    backgroundImage: m.poster ? `url(${m.poster})` : undefined,
-                    backgroundSize: 'cover',
-                    backgroundPosition: 'center',
-                  } as CSSProperties
-                }
-              >
-                <span className="onb-shine" />
-              </span>
+        {mosaicPosters.length > 0 && (
+          <div className="mt-8 flex flex-wrap gap-2" aria-hidden="true">
+            {mosaicPosters.map((m) => (
+              <img key={m.id} src={m.poster} alt="" className="h-[92px] w-[62px] rounded-art object-cover" />
             ))}
           </div>
+        )}
 
-          {error ? (
-            <div className="mx-auto mt-8 max-w-sm">
-              <p className="text-sm text-red-300">{error}</p>
-              <div className="mt-3 flex justify-center gap-3">
-                <button
-                  type="button"
-                  onClick={retryLoad}
-                  className="rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-5 py-2.5 text-sm font-bold text-white"
-                >
-                  Try again
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void skip()}
-                  className="rounded-full border border-white/[0.12] px-5 py-2.5 text-sm font-semibold text-white/70 hover:bg-white/[0.06]"
-                >
-                  Skip
-                </button>
-              </div>
+        {error ? (
+          <div className="mt-8">
+            <p role="alert" className="text-[15px] leading-snug text-danger-ink">{error}</p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button type="button" onClick={retryLoad} className="stage-btn stage-btn-primary">Try again</button>
+              <button type="button" onClick={() => void skip()} className="stage-btn stage-btn-ghost">Skip</button>
             </div>
-          ) : (
-            <div className="mx-auto mt-7 h-[5px] max-w-[330px] overflow-hidden rounded-full bg-white/10">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-[#a855f7] to-[#d8b4fe] shadow-[0_0_14px_rgba(168,85,247,0.7)] transition-[width] duration-500"
-                style={{ width: `${((phaseMsg + 1) / LOADING_MESSAGES.length) * 100}%` }}
-              />
-            </div>
-          )}
-        </div>
+          </div>
+        ) : (
+          <div className="mt-8 h-1 max-w-[330px] overflow-hidden rounded-[2px]" style={{ background: 'var(--track)' }}>
+            <div
+              className="h-full rounded-[2px] bg-action transition-[width] duration-500 motion-reduce:transition-none"
+              style={{ width: `${((phaseMsg + 1) / LOADING_MESSAGES.length) * 100}%` }}
+            />
+          </div>
+        )}
       </div>
     )
   }
@@ -1051,25 +945,18 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
 
 // ---- small pieces ----
 
-function Eyebrow({ children }: { children: ReactNode }) {
-  return (
-    // Literal hex with its alpha: `text-[color:var(--stage-purple-lt)]/80`
-    // compiles to no CSS in Tailwind 3 (opacity modifiers need a parseable
-    // colour), which silently turned every eyebrow white.
-    <div className="mb-3 flex items-center gap-2 text-[0.72rem] uppercase tracking-[0.22em] text-[#d8b4fe]/80">
-      <span className="h-1.5 w-1.5 rounded-full bg-[#a855f7] shadow-[0_0_8px_#a855f7]" />
-      {children}
-    </div>
-  )
-}
-
+// A title to pick: its poster and nothing drawn over it but the mark of
+// having been picked. The title is the button's name. Once something is
+// picked, what is not is dimmed, so the picks stand out of the wall.
 function PosterTile({
   m,
   selected,
+  dim,
   onToggle,
 }: {
   m: UIMedia
   selected: boolean
+  dim: boolean
   onToggle: (id: number) => void
 }) {
   return (
@@ -1077,116 +964,38 @@ function PosterTile({
       type="button"
       onClick={() => onToggle(m.id)}
       aria-pressed={selected}
+      aria-label={m.year > 0 ? `${m.title} (${m.year})` : m.title}
       className={
-        'group relative aspect-[2/3] overflow-hidden rounded-xl border text-left transition-ui ' +
-        (selected
-          ? 'border-transparent outline outline-2 outline-[#a981ff] shadow-[0_0_0_1px_#a981ff,0_14px_38px_-12px_rgba(169,129,255,0.55)]'
-          : 'border-white/[0.08] motion-safe:hover:-translate-y-1 hover:shadow-2xl')
+        'relative block overflow-visible rounded-art bg-surface-raised p-0 text-left ' +
+        (selected ? 'shadow-[0_0_0_3px_var(--surface-page),0_0_0_5px_#ffffff]' : '')
       }
     >
       {m.poster ? (
-        <img src={m.poster} alt={m.title} loading="lazy" className="absolute inset-0 h-full w-full object-cover" />
+        <img
+          src={m.poster}
+          alt=""
+          loading="lazy"
+          className={`block aspect-[2/3] w-full rounded-art object-cover ${dim && !selected ? 'opacity-[0.72]' : ''}`}
+        />
       ) : (
-        <div className="absolute inset-0 bg-gradient-to-br from-[#1d1330] to-[#050409]" />
+        // No artwork: the title stands in for it.
+        <span className="flex aspect-[2/3] w-full items-end rounded-art bg-surface-raised-2 p-2.5 text-[13px] font-semibold leading-tight text-ink">
+          <span className="line-clamp-3">{m.title}</span>
+        </span>
       )}
-      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
-      <span
-        className={
-          'absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full border-2 transition-ui ' +
-          (selected ? 'border-transparent bg-gradient-to-br from-[#a981ff] to-[#c8a6ff]' : 'border-white/60 bg-black/30 backdrop-blur-sm')
-        }
-      >
-        {selected && <CheckIcon className="h-3.5 w-3.5" stroke="#160f24" />}
-      </span>
-      <div className="absolute bottom-2 left-2.5 right-2.5 z-[1]">
-        <div className="line-clamp-2 text-[13px] font-bold leading-tight text-white drop-shadow">{m.title}</div>
-        {m.year > 0 && <div className="mt-0.5 text-[11px] text-white/65">{m.year}</div>}
-      </div>
+      {selected && (
+        <span aria-hidden="true" className="absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-full bg-action text-action-on">
+          <CheckIcon className="h-4 w-4" />
+        </span>
+      )}
     </button>
   )
 }
 
-function CheckIcon({ className = 'h-3.5 w-3.5', stroke = '#0a0810' }: { className?: string; stroke?: string }) {
+function CheckIcon({ className = 'h-3.5 w-3.5' }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
-      <path d="M5 12.5l4.2 4.2L19 7" stroke={stroke} strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 12.5l4.2 4.2L19 7" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
-}
-
-// Constellation — particle field that drifts toward the centre and links nearby
-// nodes, forming a loose constellation behind the building loader. Pure canvas.
-function Constellation({ accent }: { accent: string }) {
-  const ref = useRef<HTMLCanvasElement | null>(null)
-  useEffect(() => {
-    const cv = ref.current
-    if (!cv) return
-    const ctx = cv.getContext('2d')
-    if (!ctx) return
-    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ?? false
-    const dpr = Math.min(window.devicePixelRatio || 1, 2)
-    let raf = 0
-    const resize = () => {
-      cv.width = cv.clientWidth * dpr
-      cv.height = cv.clientHeight * dpr
-    }
-    resize()
-    const N = 60
-    const pts = Array.from({ length: N }, () => ({
-      x: Math.random() * cv.width,
-      y: Math.random() * cv.height,
-      vx: (Math.random() - 0.5) * 0.25 * dpr,
-      vy: (Math.random() - 0.5) * 0.25 * dpr,
-      r: (Math.random() * 1.6 + 0.6) * dpr,
-    }))
-    let t = 0
-    const frame = () => {
-      t += 0.006
-      const cx = cv.width / 2
-      const cy = cv.height * 0.32
-      ctx.clearRect(0, 0, cv.width, cv.height)
-      for (const p of pts) {
-        p.x += p.vx
-        p.y += p.vy
-        p.x += (cx - p.x) * 0.0006 * Math.min(t, 1)
-        p.y += (cy - p.y) * 0.0006 * Math.min(t, 1)
-        if (p.x < 0 || p.x > cv.width) p.vx *= -1
-        if (p.y < 0 || p.y > cv.height) p.vy *= -1
-      }
-      const max = 120 * dpr
-      for (let i = 0; i < N; i++) {
-        for (let j = i + 1; j < N; j++) {
-          const a = pts[i]
-          const b = pts[j]
-          const d = Math.hypot(a.x - b.x, a.y - b.y)
-          if (d < max) {
-            ctx.strokeStyle = `rgba(168,85,247,${(1 - d / max) * 0.28})`
-            ctx.lineWidth = 0.6 * dpr
-            ctx.beginPath()
-            ctx.moveTo(a.x, a.y)
-            ctx.lineTo(b.x, b.y)
-            ctx.stroke()
-          }
-        }
-      }
-      for (const p of pts) {
-        ctx.beginPath()
-        ctx.arc(p.x, p.y, p.r, 0, 7)
-        ctx.fillStyle = 'rgba(216,180,254,0.85)'
-        ctx.shadowColor = accent
-        ctx.shadowBlur = 8 * dpr
-        ctx.fill()
-      }
-      ctx.shadowBlur = 0
-      // Honor reduced-motion: draw one static constellation frame, don't loop.
-      if (!reduceMotion) raf = requestAnimationFrame(frame)
-    }
-    frame()
-    window.addEventListener('resize', resize)
-    return () => {
-      cancelAnimationFrame(raf)
-      window.removeEventListener('resize', resize)
-    }
-  }, [accent])
-  return <canvas ref={ref} className="pointer-events-none absolute inset-0 h-full w-full" />
 }

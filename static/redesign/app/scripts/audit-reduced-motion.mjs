@@ -164,8 +164,9 @@ for (const name of [...declared].sort()) {
     }
   }
   const covered = owners.some(sel => {
-    // EVERY class in the declaring selector, not just the first: `onbShine` is
-    // declared on `.onb-mosaic-shimmer .onb-shine` and nulled on `.onb-shine`.
+    // EVERY class in the declaring selector, not just the first: an animation
+    // can be declared on `.parent-state .child` and nulled on `.child` (the
+    // onboarding's poster shine was, while it existed).
     const classes = [...sel.matchAll(/\.[\w-]+/g)].map(m => m[0])
     if (classes.some(c => nullingSelectors.has(c))) return true
     // …and any class that shares an element with one of them in the markup.
@@ -484,9 +485,7 @@ const INLINE_COVERED = new Map([
   console.log('\n## Check 4 — infinite animations animate only transform and opacity')
   // Pre-existing, from before the rule; listed by name so anything NEW fails,
   // and checked for staleness so the list cannot outlive its reason.
-  const KNOWN = new Map([
-    ['onbShimmer', "the onboarding headline's background-clip:text gradient (#482); a fill that IS the text cannot move by transform. Reported for follow-up."],
-  ])
+  const KNOWN = new Map([])
   const COMPOSITOR = new Set(['transform', 'opacity'])
   const keyframeProps = new Map()
   for (const m of css.matchAll(/@keyframes\s+([\w-]+)\s*\{/g)) {
