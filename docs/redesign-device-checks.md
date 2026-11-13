@@ -5,8 +5,9 @@ container with headless Chromium on Linux and stubbed server answers. No
 iPhone, Android phone, tablet, TV, Chromecast or AirPlay receiver, screen
 reader, Safari or Firefox was available there, and neither was a real
 library, recommender, watch party or cast session. None of the items below
-was exercised; each is something the code was written to get right and
-nobody has yet seen working on the real thing.
+was exercised on a real device or against a real server; each is something
+the code was written to get right and nobody has yet seen working on the
+real thing.
 
 Work through the list on real devices, fix or file what is wrong, and delete
 this file when it is done.
@@ -20,7 +21,7 @@ this file when it is done.
 - **The phone companion on a phone:** voice (the microphone prompt and a real call), the keyboard over the message field, whether VoiceOver and TalkBack honour `aria-live` being switched on a chat log, and an Android keyboard when the code field puts its value back in the middle of a composition.
 - **The search page in a real browser's history** (tests use a memory router): Back after a reload on `/search`, across a sign-in, and after a round trip to another site; the arrow keys on a laid-out grid with cards of mixed heights.
 - **A TV:** the pairing page was exercised against stubbed answers only. What the TV shows after approval is taken from the Android TV app's code, not seen on a device; whether any reverse proxy in use produces the page's 403 is unknown.
-- **YouTube:** the trailer embed is blocked here, so autoplay and the Tab hand-off between the embed and the page were not exercised.
+- **YouTube:** the trailer embed is blocked in the build container, so autoplay and the Tab hand-off between the embed and the page were not exercised.
 - **A real watch party** with two or more people and voice joined (party states were rendered against stubbed sockets only). Whether the server's invitation list is filtered by the acting profile's limit was not checked against a live server (the test stub assumes it).
 - **Admin with real data:** every admin section was rendered against stubbed answers. Playback health's figures have not been seen with real playback data, and the match dialog's close-while-sending path was exercised with a request left unanswered, not with a stalled server.
 - **A real library:** Library was rendered against stubbed lists. The order the server's database gives titles (it follows the machine's locale) was not observed; the A to Z strip is built not to depend on it.
@@ -28,4 +29,4 @@ this file when it is done.
 - **Screen readers** (NVDA, JAWS, VoiceOver, TalkBack): none was run on any screen. Most worth hearing: the PIN prompt's zero-opacity field, the player's sheets and notice region, the leave confirmation beside the player (two modal surfaces at once), the page made inert under the trailer, Tonight's filmstrip as it rotates, Together's announcements and where focus is after a reply, a join or a new room, the search page's status line, and Library's A to Z strip.
 - **Phone layout on a device:** safe areas, the tab bar's overlap with toasts and panels, the identity panel's height on short or mobile screens, and real fonts in the player's transport row.
 - Contrast figures for the player scrim and the chat ticker are computed, not measured over real bright frames; the title page's and Tonight's phone hero are measured in Chromium over synthetic white and grey pictures, not over real artwork.
-- **The poster's travel and newer CSS in other engines:** the travel uses the View Transitions API, and the cast card and the toast corner use `:has()` and container queries. Check in Safari and Firefox that a press during the travel lands, that the travelling poster keeps its corners, that a browser without the API opens the title at once, and that the cast card, the toasts above it and the party's emoji picker sit where they do in Chromium.
+- **The poster's travel and newer CSS in other engines:** the travel uses the View Transitions API, the cast card uses `:has()` and a container query, and the toasts above it and the rule for the dock's reaction picker use `:has()`. Check in Safari and Firefox that a press during the travel lands, that the travelling poster keeps its corners, that a browser without the API opens the title at once, and that the cast card, the toasts above it and the party's emoji picker sit where they do in Chromium.
