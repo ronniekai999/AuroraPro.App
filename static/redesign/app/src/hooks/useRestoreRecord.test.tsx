@@ -49,7 +49,7 @@ describe('with a ticket kept', () => {
     expect(ticketReads()).toBe(reads)
   })
 
-  it('keeps asking while Aurora does not answer, and says it is waiting', async () => {
+  it('keeps asking while Aurora does not answer, with a growing wait, and says it is waiting', async () => {
     keep(null)
     answers = [new TypeError('Failed to fetch'), new TypeError('Failed to fetch'), json(200, rec({}))]
     const { result } = renderHook(() => useRestoreRecord({}))
@@ -57,6 +57,10 @@ describe('with a ticket kept', () => {
     expect(result.current.waiting?.file).toBe('b.dump')
     expect(result.current.unreachable).toBe(true)
     await tick()
+    expect(ticketReads()).toBe(2)
+    // The next wait is twice as long.
+    await tick()
+    expect(ticketReads()).toBe(2)
     await tick()
     expect(result.current.status?.state).toBe('running')
     expect(result.current.waiting).toBeNull()
@@ -162,6 +166,20 @@ describe('a ticket whose upload may still be going', () => {
     await tick()
     expect(result.current.status?.state).toBe('running')
     expect(result.current.waiting).toBeNull()
+  })
+
+  it('looks once more, then calls lost, a ticket whose request ended here without an answer', async () => {
+    localStorage.setItem('aurora.restore', JSON.stringify({ ticket: TICKET, file: 'b.dump', seen: null, at: Date.now(), ended: true }))
+    answers = [json(404, { error: { reason: 'restore_unknown' } })]
+    const { result } = renderHook(() => useRestoreRecord({}))
+    await settle()
+    expect(result.current.waiting?.file).toBe('b.dump')
+    await tick()
+    expect(result.current.lost?.file).toBe('b.dump')
+    expect(result.current.waiting).toBeNull()
+    const reads = ticketReads()
+    await tick()
+    expect(ticketReads()).toBe(reads)
   })
 
   it('calls one kept longer ago than any upload can take lost', async () => {

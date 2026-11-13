@@ -18,7 +18,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import {
-  forgetRestore, noteRestoreSeen, readRestoreByTicket, rememberedRestore,
+  forgetRestore, noteRestoreSeen, readRestoreByTicket, rememberedRestore, settleInterruptedUpload,
   type RememberedRestore, type RestoreStatus,
 } from '@/lib/restoreStatus'
 
@@ -30,7 +30,7 @@ export const RESTORE_DONE_POLL_MS = 30_000
  *  restore route is 65 minutes. A ticket kept more recently than this whose
  *  record is not there yet may be an upload still going in another tab. */
 export const RESTORE_UPLOAD_WINDOW_MS = 66 * 60_000
-const ADMIN_RETRY_MAX_MS = 60_000
+const RETRY_MAX_MS = 60_000
 
 export interface RestoreRecord {
   /** The server's record, once read; null for none, or one put away. */
@@ -79,6 +79,7 @@ export function useRestoreRecord({ adminRead, recheck = 0, keepAsking = false }:
   const [forgotten, setForgotten] = useState(0)
 
   useEffect(() => {
+    settleInterruptedUpload()
     const stored = rememberedRestore()
     const kept = stored && stored.ticket !== ignored ? stored : null
     if (!kept && !adminRead) {
@@ -90,7 +91,11 @@ export function useRestoreRecord({ adminRead, recheck = 0, keepAsking = false }:
     let timer: ReturnType<typeof setTimeout> | undefined
     let lastState: RestoreStatus['state'] | null = null
     let byTicket = !!kept
-    let adminFailures = 0
+    let failures = 0
+    // One more look for a ticket whose request ended without an answer:
+    // the answer can be lost a moment before the server records it.
+    let graceUsed = false
+    const backoff = () => Math.min(RETRY_MAX_MS, RESTORE_POLL_MS * 2 ** (failures - 1))
     const again = (ms = RESTORE_POLL_MS) => { timer = setTimeout(() => { void ask() }, ms) }
     const ask = async (): Promise<void> => {
       try {
@@ -103,9 +108,12 @@ export function useRestoreRecord({ adminRead, recheck = 0, keepAsking = false }:
             const seen = now?.ticket === kept.ticket ? now.seen : kept.seen
             setUnreachable(false)
             setStatus(null)
-            if (seen === null && kept.at !== null && Date.now() - kept.at < RESTORE_UPLOAD_WINDOW_MS) {
-              // Its upload may still be going, in another tab: no record
-              // yet is not no record.
+            const ended = now?.ticket === kept.ticket ? now.ended : kept.ended
+            if (seen === null && (ended ? !graceUsed : kept.at !== null && Date.now() - kept.at < RESTORE_UPLOAD_WINDOW_MS)) {
+              // Its upload may still be going, in another tab (no record
+              // yet is not no record), or its answer was lost a moment
+              // before the server recorded it: one more look.
+              if (ended) graceUsed = true
               setWaiting(kept)
               again()
               return
@@ -137,7 +145,7 @@ export function useRestoreRecord({ adminRead, recheck = 0, keepAsking = false }:
           setSource(null)
         }
         lastState = st.state
-        adminFailures = 0
+        failures = 0
         setWaiting(null)
         setUnreachable(false)
         setStatus(st)
@@ -146,15 +154,16 @@ export function useRestoreRecord({ adminRead, recheck = 0, keepAsking = false }:
       } catch {
         if (ac.signal.aborted) return
         setUnreachable(true)
+        failures++
         if (kept && byTicket) {
-          // A ticket read has no session to upset.
+          // A ticket read has no session to upset: asked again, with a
+          // growing wait while Aurora stays away.
           if (lastState === null) setWaiting(kept)
-          again()
+          again(backoff())
         } else if (lastState === 'running' || keepAsking) {
           // A refused admin read would only be refused again, unless a
           // restore was running or this tab's own got no answer.
-          adminFailures++
-          again(Math.min(ADMIN_RETRY_MAX_MS, RESTORE_POLL_MS * 2 ** (adminFailures - 1)))
+          again(backoff())
         }
       }
     }

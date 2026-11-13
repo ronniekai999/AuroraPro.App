@@ -50,6 +50,11 @@ export interface RememberedRestore {
   /** When it was kept (ms since the epoch); null for one kept before this
    *  was recorded. */
   at: number | null
+  /** The request that carried it ended in this browser without an answer
+   *  from Aurora (a lost connection, a proxy giving up, the page reloaded
+   *  or closed mid-upload): no record for it means it never started or
+   *  Aurora has restarted, not that its upload is still going. */
+  ended: boolean
 }
 
 /** 32 random bytes, base64url: the server takes 32 to 128 characters of
@@ -75,7 +80,12 @@ export function rememberedRestore(): RememberedRestore | null {
     if (!raw) return null
     const r = JSON.parse(raw) as Partial<RememberedRestore>
     if (typeof r.ticket !== 'string' || typeof r.file !== 'string') return null
-    return { ticket: r.ticket, file: r.file, seen: typeof r.seen === 'string' ? r.seen as RestoreState : null, at: typeof r.at === 'number' ? r.at : null }
+    return {
+      ticket: r.ticket, file: r.file,
+      seen: typeof r.seen === 'string' ? r.seen as RestoreState : null,
+      at: typeof r.at === 'number' ? r.at : null,
+      ended: r.ended === true,
+    }
   } catch {
     return null
   }
@@ -84,7 +94,40 @@ export function rememberedRestore(): RememberedRestore | null {
 /** A new restore's ticket, kept before its upload starts so a reload
  *  during the upload still has it. Replaces any earlier one. */
 export function rememberRestore(ticket: string, file: string): void {
-  write({ ticket, file, seen: null, at: Date.now() })
+  write({ ticket, file, seen: null, at: Date.now(), ended: false })
+}
+
+/** The request for a ticket ended here with no answer from Aurora. */
+export function markRestoreRequestEnded(ticket: string): void {
+  const r = rememberedRestore()
+  if (r && r.ticket === ticket && !r.ended) write({ ...r, ended: true })
+}
+
+// An upload this page is sending, also kept in sessionStorage (which a
+// reload of the tab keeps): a page that finds one there that it is not
+// sending itself was reloaded, or reopened, mid-upload, and that upload
+// went with the page that sent it.
+const UPLOADING_KEY = 'aurora.restoreUploading'
+const uploadingHere = new Set<string>()
+
+export function startRestoreUpload(ticket: string): void {
+  uploadingHere.add(ticket)
+  try { sessionStorage.setItem(UPLOADING_KEY, ticket) } catch { /* not kept */ }
+}
+
+export function endRestoreUpload(ticket: string): void {
+  uploadingHere.delete(ticket)
+  try { if (sessionStorage.getItem(UPLOADING_KEY) === ticket) sessionStorage.removeItem(UPLOADING_KEY) } catch { /* not kept */ }
+}
+
+/** Marks an upload an earlier load of this tab was sending as ended. */
+export function settleInterruptedUpload(): void {
+  try {
+    const ticket = sessionStorage.getItem(UPLOADING_KEY)
+    if (!ticket || uploadingHere.has(ticket)) return
+    sessionStorage.removeItem(UPLOADING_KEY)
+    markRestoreRequestEnded(ticket)
+  } catch { /* not kept */ }
 }
 
 /** The last state read for a ticket, if it is still the one kept. */
@@ -148,7 +191,7 @@ export function restoreWords(st: RestoreStatus): RestoreWords | null {
     case 'running':
       return st.step === 'checking'
         ? { title: 'A restore is running', urgent: false, says: `Aurora is checking ${file} before it changes anything. The restore goes on on the server whether or not this page is open.` }
-        : { title: 'A restore is running', urgent: true, says: `Aurora is replacing its database with ${file}. Until it has finished nobody can sign in. Do not restart Aurora meanwhile: that stops the restore and leaves the database empty. It goes on on the server whether or not this page is open.` }
+        : { title: 'A restore is running', urgent: true, says: `Aurora is replacing its database with ${file}. Until it has finished nobody can sign in. Do not restart Aurora meanwhile: that stops the restore and can leave the database empty. It goes on on the server whether or not this page is open.` }
     case 'succeeded':
       return { title: 'Restart Aurora now', urgent: true, says: `The database was restored from ${file}${timeOf(st.finished_at)}. Until Aurora is restarted, it goes on working from what it held before the restore. Sign-ins from before the restore have ended: sign in again with an account from the backup.` }
     case 'failed':

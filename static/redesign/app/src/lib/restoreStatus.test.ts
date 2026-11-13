@@ -5,8 +5,8 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  forgetRestore, lostRestoreWords, newRestoreTicket, noteRestoreSeen, putBackRestore,
-  rememberRestore, rememberedRestore, restoreWords, type RestoreStatus,
+  endRestoreUpload, forgetRestore, lostRestoreWords, newRestoreTicket, noteRestoreSeen, putBackRestore,
+  rememberRestore, rememberedRestore, restoreWords, settleInterruptedUpload, startRestoreUpload, type RestoreStatus,
 } from './restoreStatus'
 
 afterEach(() => localStorage.clear())
@@ -20,7 +20,7 @@ describe('the ticket', () => {
 
   it('is kept until forgotten, and only its own forget drops it', () => {
     rememberRestore('a'.repeat(43), 'one.dump')
-    expect(rememberedRestore()).toEqual({ ticket: 'a'.repeat(43), file: 'one.dump', seen: null, at: expect.any(Number) })
+    expect(rememberedRestore()).toEqual({ ticket: 'a'.repeat(43), file: 'one.dump', seen: null, at: expect.any(Number), ended: false })
     noteRestoreSeen('a'.repeat(43), 'running')
     noteRestoreSeen('b'.repeat(43), 'failed')
     expect(rememberedRestore()?.seen).toBe('running')
@@ -40,6 +40,21 @@ describe('the ticket', () => {
     rememberRestore('c'.repeat(43), 'newer.dump')
     putBackRestore('b'.repeat(43), previous)
     expect(rememberedRestore()?.ticket).toBe('c'.repeat(43))
+  })
+
+  it('marks an upload a reload of the tab cut off as ended, and not one this page is sending', () => {
+    rememberRestore('a'.repeat(43), 'one.dump')
+    startRestoreUpload('a'.repeat(43))
+    settleInterruptedUpload()
+    expect(rememberedRestore()?.ended).toBe(false)
+    endRestoreUpload('a'.repeat(43))
+    expect(sessionStorage.getItem('aurora.restoreUploading')).toBeNull()
+    // A page loaded after the one that was sending it.
+    sessionStorage.setItem('aurora.restoreUploading', 'a'.repeat(43))
+    settleInterruptedUpload()
+    expect(rememberedRestore()?.ended).toBe(true)
+    expect(sessionStorage.getItem('aurora.restoreUploading')).toBeNull()
+    sessionStorage.clear()
   })
 
   it('reads nothing kept from a malformed value', () => {

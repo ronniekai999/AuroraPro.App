@@ -472,6 +472,7 @@ describe('a restore’s other answers', () => {
     ['no answer', () => Promise.reject(new TypeError('Failed to fetch')), LOST],
     ['a proxy that gave up (504)', async () => json(504, { error: 'gateway timeout' }), LOST],
     ['a proxy that gave up (502)', async () => new Response('<html>Bad gateway</html>', { status: 502, headers: { 'content-type': 'text/html' } }), LOST],
+    ['a proxy that gave up (Cloudflare’s 524)', async () => new Response('<html>A timeout occurred</html>', { status: 524, headers: { 'content-type': 'text/html' } }), LOST],
     ['another restore running (409)', async () => json(409, { error: { code: 409, message: 'another backup or restore is already in progress' } }), 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.'],
     ['a file too large (413)', async () => json(413, { error: { code: 413, message: 'upload exceeds the 50 GB limit' } }), 'The file is too large to restore from here, and the database was not changed.'],
   ])('says %s', async (_what, answer, says) => {

@@ -29,7 +29,8 @@ import { backupPanelMounted, beginRestore, clearRestoreOutcome, finishRestore, u
 import { RestoreRecordNote } from '@/components/RestoreRecordNote'
 import { useRestoreRecord, type RestoreRecord } from '@/hooks/useRestoreRecord'
 import {
-  RESTORE_TICKET_HEADER, newRestoreTicket, noteRestoreSeen, putBackRestore, rememberRestore, rememberedRestore, restoreWords,
+  RESTORE_TICKET_HEADER, endRestoreUpload, markRestoreRequestEnded, newRestoreTicket, noteRestoreSeen, putBackRestore,
+  rememberRestore, rememberedRestore, restoreWords, startRestoreUpload,
 } from '@/lib/restoreStatus'
 import {
   parseReferralOptionsSetting,
@@ -158,11 +159,14 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
   // tab's answer does (that the database is empty, and what to do), so it is
   // said in its place.
   const recordFailedPastWipe = record.status?.state === 'failed' && record.status.database !== 'unchanged'
+  // A record that says the restore is running or succeeded outranks this
+  // tab's word that it failed: a proxy's own refusal can pass for Aurora's.
+  const recordContradicts = !!mine && !mine.ok && (record.status?.state === 'running' || record.status?.state === 'succeeded')
   // The record is said unless this tab's answer already says the same
   // restore; a restore running now is always said. Not while this tab has a
   // restore out (`out`, which outlives a remount of this panel): its record
   // does not exist until the upload ends.
-  const showRecord = out === 0 && recordSays && (serverRunning || !answered || recordFailedPastWipe)
+  const showRecord = out === 0 && recordSays && (serverRunning || !answered || recordFailedPastWipe || recordContradicts)
   const restored = mine?.ok ? mine.file : null
   // An outcome that lands while this panel is up is said in its status line,
   // whichever panel sent the restore (the admin may have left the section
@@ -175,7 +179,7 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
   }, [outcome, accountId, sayRestore])
   // A request that got no answer is said only until the record can say more,
   // and this tab's failure not beside a record of it that says more.
-  const lastFailure = mine && !mine.ok && (!mine.lost || !recordSays) && !(showRecord && recordFailedPastWipe) ? mine.failure : null
+  const lastFailure = mine && !mine.ok && (!mine.lost || !recordSays) && !(showRecord && (recordFailedPastWipe || recordContradicts)) ? mine.failure : null
   const restoreRef = useRef<HTMLButtonElement | null>(null)
   const noticeRef = useRef<HTMLDivElement | null>(null)
   // The restore POST can take minutes — guard against setState after
@@ -198,7 +202,13 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
     const previous = rememberedRestore()
     const ticket = newRestoreTicket()
     rememberRestore(ticket, f.name)
+    startRestoreUpload(ticket)
     beginRestore()
+    // Whether a refusal is Aurora's own: its restore route answers every
+    // failure as JSON ({ error: { message } }). Anything else came from a
+    // proxy in front of it (Cloudflare's 524 after 100 s, an HTML 502), and
+    // says nothing of the restore, which may be running still.
+    let fromAurora = true
     try {
       const form = new FormData()
       form.append('backup', f)
@@ -226,9 +236,10 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
           const nested = (errField as Record<string, unknown>).message
           if (typeof nested === 'string') errMsg = nested
         }
+        fromAurora = ct.includes('application/json') && !!errField && typeof errField === 'object' && typeof (errField as Record<string, unknown>).message === 'string'
         // Another restore was running and this one never started: the
         // ticket kept for that one (this browser's, maybe) goes back.
-        if (res.status === 409) putBackRestore(ticket, previous)
+        if (res.status === 409 && fromAurora) putBackRestore(ticket, previous)
         // An APIError, so the status reaches the words below.
         throw new APIError(res.status, errMsg, body)
       }
@@ -239,11 +250,16 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
       return null
     } catch (e) {
       console.error('[Aurora] Restore failed', e)
-      const { failure, lost } = restoreFailure(e)
-      // Aurora answered: this browser knows how it ended.
-      if (!lost) noteRestoreSeen(ticket, 'failed')
+      const { failure, lost } = restoreFailure(e, fromAurora)
+      // Aurora answered: this browser knows how it ended. Otherwise the
+      // request has ended here, and no record for it later means it never
+      // started (or Aurora restarted), not an upload still going.
+      if (lost) markRestoreRequestEnded(ticket)
+      else noteRestoreSeen(ticket, 'failed')
       finishRestore(lost ? { accountId, file: f.name, ok: false, failure, lost } : { accountId, file: f.name, ok: false, failure })
       return failure
+    } finally {
+      endRestoreUpload(ticket)
     }
   })
 
@@ -371,15 +387,19 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
  *  Aurora answered at all (`lost`: the server's record then says more). Where it stopped
  *  decides the database's state: every refusal of the file comes before the
  *  old data is cleared, and a failure of the restore itself comes after. */
-function restoreFailure(e: unknown): { failure: Failure; lost: boolean } {
-  // Aurora itself never answers a restore with 502, 503 or 504: those come
-  // from a proxy in front of it that gave up waiting, while the restore may
-  // still be running. They are no answer, not a restore that failed.
-  const noAnswer = e instanceof NetworkError || (e instanceof APIError && [502, 503, 504].includes(e.status))
+function restoreFailure(e: unknown, fromAurora = true): { failure: Failure; lost: boolean } {
+  // Aurora itself never answers a restore with 502, 503 or 504, and answers
+  // every failure as JSON: a 5xx that is not Aurora's own (`fromAurora`),
+  // like Cloudflare's 524, comes from a proxy in front of it that gave up
+  // waiting, while the restore may still be running. It is no answer, not a
+  // restore that failed. (A proxy's 4xx means the upload never reached
+  // Aurora: nothing started.)
+  const noAnswer = e instanceof NetworkError ||
+    (e instanceof APIError && e.status >= 500 && ([502, 503, 504].includes(e.status) || !fromAurora))
   const lost = 'The connection to the server was lost during the restore. If the upload had finished, the restore goes on on the server without this page: do not restart Aurora until you know how it ended, since a restart stops a restore still running. Admin, under Backup and restore, shows how it ends once Aurora can be asked, and so does the sign-in page in this browser.'
   return {
     lost: noAnswer,
-    failure: adminFailure(e, 'restore the database', { 502: lost, 503: lost, 504: lost, 400: 'The server refused this file, and the database was not changed.', 409: 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.', 413: 'The file is too large to restore from here, and the database was not changed.', noAnswer: lost, otherwise: 'The restore did not finish. Depending on where it stopped, the database is either as it was or empty. Read what the server said before going on.' }),
+    failure: adminFailure(e, 'restore the database', { ...(noAnswer && e instanceof APIError ? { [e.status]: lost } : {}), 502: lost, 503: lost, 504: lost, 400: 'The server refused this file, and the database was not changed.', 409: 'A backup or restore is already running, so this one did not start. The database was not changed by it. Wait for the other to finish, then try again.', 413: 'The file is too large to restore from here, and the database was not changed.', noAnswer: lost, otherwise: 'The restore did not finish. Depending on where it stopped, the database is either as it was or empty. Read what the server said before going on.' }),
   }
 }
 
@@ -3207,8 +3227,10 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
   const restoreUnanswered = !!restoreMine && !restoreMine.ok && !!restoreMine.lost
   const restoreRecord = useRestoreRecord({ adminRead: getAdminRestoreStatus, recheck: restoresEnded, keepAsking: restoreUnanswered })
   // This tab's own answer is said by RestoreOutcomeAlert; the record is not
-  // said beside it, except for a restore running now.
-  const restoreAnswered = !!restoreMine && (restoreMine.ok || !restoreMine.lost)
+  // said beside it, except for a restore running now, or one the record says
+  // succeeded where this tab heard it failed.
+  const restoreAnswered = !!restoreMine && (restoreMine.ok || !restoreMine.lost) &&
+    !(!restoreMine.ok && restoreRecord.status?.state === 'succeeded')
   // A restore running is always said, this tab's own included. What the
   // admin must act on is said when this tab has no answer of its own about
   // it, and not while a request of this tab's is out (its record does not

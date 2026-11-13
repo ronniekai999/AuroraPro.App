@@ -2170,11 +2170,15 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   button); again every 5 s while running, while a kept ticket gets no answer,
   and while one not yet seen has no record and was kept less than 66 minutes
   ago (`RESTORE_UPLOAD_WINDOW_MS`, past the route's 65-minute read deadline:
-  another tab may still be uploading it, so it is waiting, not lost); every
-  30 s after a success, so the restart clears it. A refused admin read is not
-  retried unless a restore was running or this tab's own got no answer
-  (`keepAsking`, with a doubling wait up to a minute). The ticket read sends
-  same-origin cookies, for a proxy in front of Aurora. Dismiss forgets only
+  another tab may still be uploading it, so it is waiting, not lost), unless
+  its request ended in this browser without an answer (`ended`, set on a
+  lost answer, and for an upload a reload cut off through a sessionStorage
+  marker, `settleInterruptedUpload`): then one more look, and lost. A success
+  read by ticket is read again every 30 s, so the restart clears it. Failed
+  reads are asked again with a doubling wait up to a minute: ticket reads
+  always, a refused admin read only while a restore was running or this
+  tab's own got no answer (`keepAsking`). The ticket read sends same-origin
+  cookies, for a proxy in front of Aurora. Dismiss forgets only
   the ticket the record was read with; on a note still waiting it only sets
   the ticket aside in this tab. The sign-in page shows it
   (`RestoreRecordNote`), since a reload during or after a restore lands
@@ -2183,13 +2187,17 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   (`restoreOutcome`'s outcome, with `lost` for no answer or a 502-504), and
   always while a restore runs, with the restore button and file input
   disabled, and in place of this tab's own answer when the record says more
-  (a failure that touched the database); the other sections say a running
+  (a failure that touched the database) or says otherwise (running or
+  succeeded where this tab heard it failed); the other sections say a running
   restore and, when this tab has no answer and no request out, one the admin
-  must act on (urgent words, or a lost ticket).
-  Nothing is said while a restore request from this tab is out
-  (`restoreOutcome`'s `out`, which outlives a remount): its ticket is kept
-  before the server has a record of it, and a read then would call it
-  unknown. `RestoreOutcomeAlert` titles an answer that never came "No answer
+  must act on (urgent words, or a lost ticket). The panel says nothing of the
+  record while a restore request from this tab is out (`restoreOutcome`'s
+  `out`, which outlives a remount): its ticket is kept before the server has
+  a record of it. The page reads the record when it mounts and when this
+  tab's restore ends, not when a section is opened. An answer is Aurora's
+  only when it is its JSON error: any other 5xx (Cloudflare's 524, an HTML
+  502) is a proxy that gave up, said as no answer (`restoreFailure`'s
+  `fromAurora`), since the restore may be running still. `RestoreOutcomeAlert` titles an answer that never came "No answer
   came back about the restore from …", never "did not go through": it may
   still be running past its wipe. The server's text (`message`) is shown on the Admin page only
   (`restoreServerLine`); the sign-in page uses the page's words. The

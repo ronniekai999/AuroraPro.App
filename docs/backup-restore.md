@@ -80,8 +80,9 @@ restart.
   ask with; a private window, or site data that is blocked or cleared, loses
   it.
 - **Any admin**, while the database can still vouch for their session, sees a
-  restore that is running, or one that needs acting on, on whichever Admin
-  section they open, and the full record under Backup and restore.
+  restore that is running, or one that needs acting on, when they open the
+  Admin page (it is read then, and again every few seconds while a restore
+  runs), and the full record under Backup and restore.
 
 The two reads behind these:
 
