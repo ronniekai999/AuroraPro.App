@@ -1003,48 +1003,68 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     stored session is dead, where it is a link just followed (a title, a
     TV's `/device?code=`) that the sign-in then opens, and for the same
     person signing in again it is the page they were on, its data asked for
-    again. The app cannot tell who signs in next, so another account also
-    lands on the previous one's address (its path can name the title,
-    collection or member page that one had open) and sorts, with what is
-    there asked for again under its own session; a title it may not see
-    sends it Home. The player is closed even for the same person: mounted
-    again at the sign-in, it booted the old title before the profile was
-    known. Every other open tab already took the expiry as a full sign-out,
-    address included (`endSession` clears the stored user, which is the
-    cross-tab logout signal). Before this, an expiry was a bare
-    `setUser(false)`, and on an account the app knew no profile for nothing
-    reset: the next account was shown the previous one's grids and their
-    totals (never asked for again: their effect fetches only an empty
-    list), its open title, its requests, its unread count and Home's rails,
-    had its title booted in the player, and was in its watch party as it.
-    When the next account had a profile, its startup binding is not a
-    switch, so the switch's resets did not run for it either. Pinned by
+    again (a grid from its first page: Load More's depth is lost). The app
+    cannot tell who signs in next, so another account also lands on the
+    previous one's address (its path can name the title, collection or
+    member page that one had open) and sorts, with what is there asked for
+    again under its own session; a title it may not see sends it Home. The
+    player is closed even for the same person: mounted again at the
+    sign-in, it booted the old title before the profile was known. The same
+    person is also out of the party (a host hands it on; it is filed under
+    their "Recently in" for a rejoin). Every other open tab already took the
+    expiry as a full sign-out, address included (`endSession` clears the
+    stored user, which is the cross-tab logout signal). `clearUserState`
+    also closes what is open over the page (a card's menu, the add-to-list
+    sheet, the watch-party composer, an admin's manual match, a PIN prompt,
+    the collections dialog, the bell's and the server's panels, a forced
+    picker): App owns their state, so the sign-in page only hid them, after
+    a sign-out in another tab too, and the next account was shown them. Before this, an
+    expiry was a bare `setUser(false)`, and on an account the app knew no
+    profile for little reset (the signed-out effects' hero, Continue
+    Watching, its wait, search words and open questions, the toasts, and a
+    cold load of Home's rails once the next startup settled): the next
+    account was shown the previous one's grids and their totals (not asked
+    for again until a live catalog update: their effect fetches only an
+    empty list), its open title, its requests, its unread count, Home's
+    rails until its own landed, and any menu or dialog left open, had its
+    title booted in the player, and was in its watch party as it. When the
+    next account had a profile, its startup binding is not a switch, so the
+    switch's resets did not run for it either. Pinned by
     `App.sessionExpiry.test.tsx`, sampling every commit: an account with no
     profile expires on Home, a grid, an open title or My requests, and
     another account (with no profile, and with one) signs in; no commit
-    shows the first one's titles, request, notifications, grid total or
-    unread count, and removing the reset of the grids, the open title, the
-    requests list (pinned only when the next account has no profile: a
-    profile changes the list's key), the notifications or Home's rails
-    fails it. Also pinned: the player is not booted again for either
-    account, the party's room is told the tab left, the same account is
-    back on its grid and its title with each asked for again, and a title
+    shows the first one's titles, request, grid total or unread count, and
+    removing the reset of the grids, the open title, the requests list
+    (pinned only when the next account has no profile: a profile changes
+    the list's key), the unread count or Home's rails fails it. Also pinned:
+    a card's menu, the composer and a PIN prompt open at the expiry are not
+    drawn for the next account; the player is not booted again for either
+    account; the party's room is told the tab left; the same account is
+    back on its grid and its title with each asked for again; and a title
     link or a `/device?code=` link followed at a cold load with a dead
     session opens after the sign-in (those last four cases fail if the
-    expiry runs `resetUserState`). The rest of `clearUserState` is not pinned on this
-    path beyond what `App.tonight.test.tsx` and `App.searchRequest.test.tsx`
-    pin (the hero, Continue Watching, its wait, the search field's words):
+    expiry runs `resetUserState`). Not pinned on this path, beyond what
+    `App.tonight.test.tsx` and `App.searchRequest.test.tsx` pin (the hero,
+    Continue Watching, its wait, the search field's words): the notification
+    list (the bell is never opened; the next sign-in's feed read also drops
+    it, after its first commit, or for an admin once its startup settles),
     the rail buffers, the aborts, `libraryServerFor`, the described search's
-    answer, the hero's pause and the detail fields are not. Still open: a
-    `/me` check that fails without the server ending the session (a network
-    error or a 5xx, at startup or after another tab changed the stored
-    user) drops to the sign-in page with a bare `setUser(false)`, and only
-    the signed-out effects run (Tonight's hero, Continue Watching and its
-    wait, the search field's words, the open questions, the toasts, the
-    badge); the party is not left there. A push subscription stays with the
-    expired account (removing it needs the session that ended), so the
-    device can keep getting that account's pushes. The grids' genre filters
-    survive a sign-out and an expiry alike.
+    answer, the hero's pause and pool generation, the detail fields, the
+    party panel's flag and the other overlays. Still open: an answer that
+    lands after the expiry's handler but before the commit that drops the
+    signed-in app (before effect cleanups mark it cancelled) can set again
+    what was just cleared, a grid's first page say, most likely when a
+    proactive refresh is refused while the access token still works; a
+    sign-out has the same window. A `/me` check that fails without the
+    server ending the session (a network error or a 5xx, at startup or after
+    another tab changed the stored user) drops to the sign-in page with a
+    bare `setUser(false)`, and only the signed-out effects run (Tonight's
+    hero, Continue Watching and its wait, the search field's words, the
+    open questions, the toasts, the badge); the party is not left there. A
+    push subscription stays with the expired account (removing it needs the
+    session that ended), so the device can keep getting that account's
+    pushes. The grids' genre filters and genre lists survive a sign-out and
+    an expiry alike.
 
 ### Member profiles and follows
 
@@ -1990,7 +2010,7 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   comes back to the front page, so the tab keeps that the viewer was on
   their way to pair (`rememberDeviceIntent`: a time in sessionStorage and
   nothing from the address; the destination is fixed). The next sign-in
-  uses it once; a sign-out and ten minutes forget it.
+  uses it once; a sign-out, an expiry and ten minutes forget it.
 - A toast is said to whoever is acting when it is raised. Toasts are
   dropped when nobody is signed in and when the account changes. Each
   takes the acting profile with its id (`nextToastId`, from a layout-effect

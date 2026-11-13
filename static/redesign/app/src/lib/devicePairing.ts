@@ -27,7 +27,7 @@ export function consumeDevicePairing(now = Date.now()): string | null {
 // So the intent is kept for this tab, as a time and nothing else: where it
 // leads is fixed (the pairing page), and no value from the address is
 // stored. It is used once, after the next sign-in, and forgotten on use, on
-// sign-out, and after ten minutes.
+// sign-out or a session's expiry, and after ten minutes.
 const INTENT = 'aurora_tv_intent_v1'
 
 export function rememberDeviceIntent(now = Date.now()): void {

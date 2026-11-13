@@ -7,12 +7,13 @@
 // refresh) used to be a bare setUser(false): the sign-in page went up and
 // everything App held for the user stayed in its state. On an account with
 // profiles the profile going to null ran the switch's resets, which covered
-// some of it; on an account the app knew no profile for nothing changed, and
-// the next account to sign in was shown the previous one's grids and their
-// totals, the title it had open, its requests, its unread count and its
-// Home, had the previous one's title booted in the player, and was in its
-// watch party. (The grids were never even asked again: their effect fetches
-// only an empty list.)
+// some of it; on an account the app knew no profile for little changed
+// (Tonight's hero, Continue Watching, the search words, the toasts), and the
+// next account to sign in was shown the previous one's grids and their
+// totals, the title it had open, its requests, its unread count, its Home
+// and any menu or dialog it had left open, had the previous one's title
+// booted in the player, and was in its watch party. (The grids were not
+// even asked again: their effect fetches only an empty list.)
 //
 // The whole App renders, against a fetch stub that answers for whichever
 // account is signed in, as the server does. Everything the first account
@@ -92,6 +93,13 @@ const PARTY_CODE = 'AVPRTY'
  *  state, finds no window. */
 const inFlight = new Set<Promise<Response>>()
 
+/** Avery's profiles, when `averyProfiles` gives Avery's account some: the
+ *  second is locked with a PIN. Named like the rest of Avery's things, so a
+ *  name drawn for Blake counts as Avery's. */
+const AVERY_PROFILES = [
+  { id: 10, user_id: 1, name: 'Averyonly Parent', is_default: true, created_at: NOW, updated_at: NOW },
+  { id: 11, user_id: 1, name: 'Averyonly Kid', is_default: false, created_at: NOW, updated_at: NOW, has_pin: true },
+]
 /** Blake's one profile, when `blakeProfile` gives Blake's account one. */
 const BLAKE_PROFILE = { id: 20, user_id: 2, name: 'Blakes', is_default: true, created_at: NOW, updated_at: NOW }
 
@@ -101,7 +109,7 @@ const BLAKE_PROFILE = { id: 20, user_id: 2, name: 'Blakes', is_default: true, cr
  *
  *  `gridAsks` lists each request for a browse grid's page, as `<type>-<account>`;
  *  `titleReads`, each read of a title by id, as `<id>-<account>`. */
-function stubServer({ signedIn: startAs = 1 as number | null, blakeProfile = false, partySockets = false } = {}) {
+function stubServer({ signedIn: startAs = 1 as number | null, blakeProfile = false, averyProfiles = false, partySockets = false } = {}) {
   let signedIn = startAs
   const gridAsks: string[] = []
   const titleReads: string[] = []
@@ -131,10 +139,10 @@ function stubServer({ signedIn: startAs = 1 as number | null, blakeProfile = fal
     if (signedIn !== asked) return refused()
     if (p === '/api/auth/me') return json(a.user)
     if (p === '/api/auth/refresh') return json({ expires_in: 900, user: a.user })
-    const hasProfile = asked === 2 && blakeProfile
-    if (p === '/api/profiles') return json(hasProfile ? [BLAKE_PROFILE] : [])
+    const profiles = asked === 2 ? (blakeProfile ? [BLAKE_PROFILE] : []) : averyProfiles ? AVERY_PROFILES : []
+    if (p === '/api/profiles') return json(profiles)
     if (p === '/api/profiles/active') {
-      return hasProfile ? json(BLAKE_PROFILE) : json({ error: { code: 404, message: 'no profile' } }, 404)
+      return profiles.length ? json(profiles[0]) : json({ error: { code: 404, message: 'no profile' } }, 404)
     }
     if (p === '/api/me/hero') return json({ picks: [{ item: a.pick, reason: 'Picked for you' }], slate_token: `slate-${asked}` })
     if (p.startsWith('/api/me/discover')) {
@@ -369,6 +377,55 @@ describe('the player across an expiry', () => {
     await screen.findAllByText(next.recent.title, undefined, find)
     await act(() => new Promise(done => setTimeout(done, 400)))
     expect(page.commits.slice(since).filter(c => c.player !== null)).toEqual([])
+  }, 20_000)
+})
+
+// App holds what is open over the page (a card's menu, the watch-party
+// composer, a PIN prompt, and more), and the sign-in page only hid it: the
+// next account to sign in was shown the menu of a title of the previous
+// one's (its actions built for that account), the composer for planning a
+// party on it, or the prompt for one of its profiles' PINs, which also held
+// the next account's own switches back while it stayed up.
+describe('what was open over the page at an expiry', () => {
+  async function expireThenBlake(page: ReturnType<typeof renderApp>) {
+    page.expire()
+    await signInAs(BLAKE)
+    const since = page.commits.length
+    await screen.findAllByText(BLAKE.recent.title, undefined, find)
+    await act(() => new Promise(done => setTimeout(done, 400)))
+    expect(page.commits.slice(since).filter(c => c.avery)).toEqual([])
+  }
+
+  it('a card\'s menu', async () => {
+    const page = renderApp('/')
+    const more = (await screen.findAllByRole('button', { name: `More actions for ${AVERY.recent.title}` }, find))[0]
+    fireEvent.click(more)
+    await screen.findByRole('menu', { name: `Actions for ${AVERY.recent.title}` }, find)
+    await expireThenBlake(page)
+    expect(screen.queryByRole('menu')).toBeNull()
+  }, 20_000)
+
+  it('the watch-party composer', async () => {
+    const page = renderApp(`/title/${AVERY.title.id}`)
+    await screen.findAllByText(AVERY.title.title, undefined, find)
+    fireEvent.click(await screen.findByRole('button', { name: /Watch together/ }, find))
+    await screen.findByRole('dialog', { name: 'Plan a watch party' }, find)
+    await expireThenBlake(page)
+    expect(screen.queryByRole('dialog', { name: 'Plan a watch party' })).toBeNull()
+  }, 20_000)
+
+  it('a PIN prompt for one of its profiles', async () => {
+    const page = renderApp('/', { averyProfiles: true })
+    await screen.findAllByText(AVERY.recent.title, undefined, find)
+    fireEvent.click(await waitFor(() => {
+      const trigger = document.querySelector<HTMLElement>('[data-identity-trigger]')
+      expect(trigger?.textContent).toContain('Averyonly Parent')
+      return trigger!
+    }, find))
+    fireEvent.click(within(screen.getByRole('group', { name: 'Watching as' })).getByRole('button', { name: /Averyonly Kid/ }))
+    await screen.findByRole('dialog', { name: 'Averyonly Kid is locked' }, find)
+    await expireThenBlake(page)
+    expect(screen.queryByRole('dialog')).toBeNull()
   }, 20_000)
 })
 

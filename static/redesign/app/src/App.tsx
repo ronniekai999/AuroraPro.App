@@ -3671,10 +3671,13 @@ export default function App() {
   // below). Must clear every per-user cache (rails, grids, detail, player,
   // …): on a shared browser a missed field shows the previous user's data to
   // the next one to sign in on the tab. An expiry used to be a bare
-  // setUser(false), and on an account the app knew no profile for nothing
-  // reset at all: the next account to sign in was shown the last one's
-  // grids and their totals, the title it had open, its requests and its
-  // unread count, and the player booted the title it had been watching.
+  // setUser(false), and on an account the app knew no profile for little
+  // reset (the signed-out effect's hero, Continue Watching and search words,
+  // the toasts, a cold load of Home's rails): the next account to sign in
+  // was shown the last one's grids and their totals, the title it had open,
+  // its requests, its unread count, Home's rails until its own landed, and
+  // any menu or dialog left open, and the player booted the title it had
+  // been watching.
   // Where the user was (the page, the grids' sorts) is not in here, nor is
   // My Library's snapshot: see resetUserState.
   const clearUserState = useCallback(() => {
@@ -3774,7 +3777,27 @@ export default function App() {
     // password sign-in, the default, before startup re-selects another).
     closePlayer()
     setPartyPanelOpen(false)
-  }, [closePlayer, forgetHeroLeadWait])
+    // Whatever was open over the page was opened by the session that has
+    // gone, and holds its things: a card's menu (its actions close over that
+    // title and profile), the add-to-list sheet, the watch-party composer,
+    // an admin's manual match, a PIN prompt naming one of its profiles, the
+    // collections dialog, the bell's and the server's panels, and the
+    // picker it was asked to open. App owns their state, so the sign-in page
+    // only hid them, and the next sign-in on the tab was shown them. (A PIN
+    // prompt left up also kept every switch and the live refreshes held for
+    // the next session: isSwitching.)
+    setContextMenu(null)
+    setAddToListMedia(null)
+    setAddToListLists(null)
+    setAddToListBusy(false)
+    setPartyComposer(null)
+    setIdentifyTarget(null)
+    setCollectionsModalOpen(false)
+    setNotifOpen(false)
+    setServerOpen(false)
+    setProfilesGateForced(false)
+    cancelPin()
+  }, [closePlayer, forgetHeroLeadWait, cancelPin])
 
   // Full state reset on sign-out, here or in another tab: everything
   // clearUserState clears, and where the user was. Hoisted above the storage
@@ -3823,7 +3846,7 @@ export default function App() {
   // address is a link just followed (a title, a TV's /device?code=) that the
   // sign-in then opens, and for the person whose session it was, the page
   // they were on. (A party link is not among them: the magic-link join
-  // below takes its code out of the address at the optimistic render,
+  // above takes its code out of the address at the optimistic render,
   // before the expiry.) It cannot tell who signs in next: another
   // account lands on the previous one's address too, with everything on it
   // asked for again under its own session. (Every other open tab of the app
@@ -3832,7 +3855,6 @@ export default function App() {
   const leaveParty = party.leave
   useEffect(() => {
     const onExpired = () => {
-      // Before setUser: leave() files the party under the user it reads.
       leaveParty()
       setUser(false)
       clearUserState()
