@@ -145,7 +145,7 @@ describe('a restore that outlives its page', () => {
     window.dispatchEvent(e)
     return cancel.mock.calls.length > 0 || (e as unknown as { returnValue: unknown }).returnValue === true
   }
-  const kept = () => JSON.parse(localStorage.getItem('aurora.restore') ?? 'null') as { ticket: string; file: string; seen: string | null } | null
+  const kept = () => JSON.parse(localStorage.getItem('aurora.restore') ?? 'null') as { ticket: string; file: string; seen: string | null; at?: number } | null
   /** Answers the status reads: the ticket read by `ticket`, the admin read
    *  by `admin`, the upload as `answerRestore` decides. */
   function serve({ ticket, admin }: { ticket?: () => Response; admin?: () => Response }) {
@@ -173,7 +173,7 @@ describe('a restore that outlives its page', () => {
     const ticket = (call[1]!.headers as Record<string, string>)['X-Aurora-Restore-Ticket']
     expect(ticket).toMatch(/^[A-Za-z0-9_-]{43}$/)
     // Kept before the answer, so a reload now can still ask about it.
-    expect(kept()).toEqual({ ticket, file: 'aurora.dump', seen: null })
+    expect(kept()).toEqual({ ticket, file: 'aurora.dump', seen: null, at: expect.any(Number) })
     expect(leavingIsChecked()).toBe(false)
     await act(async () => { answerRestore(json(200, { status: 'ok' })) })
     await waitFor(() => expect(kept()?.seen).toBe('succeeded'))
@@ -205,7 +205,8 @@ describe('a restore that outlives its page', () => {
     // The ticket read carries the ticket, and no session.
     const call = vi.mocked(fetch).mock.calls.find(([u]) => String(u) === '/api/restore/status')!
     expect((call[1]!.headers as Record<string, string>)['X-Aurora-Restore-Ticket']).toBe('k'.repeat(43))
-    expect(call[1]!.credentials).toBe('omit')
+    // Same-origin: a proxy in front of Aurora may need its own cookie.
+    expect(call[1]!.credentials).toBe('same-origin')
   })
 
   it('says a restore running, from the record, on whichever section the page opens on', async () => {
@@ -229,7 +230,8 @@ describe('a restore that outlives its page', () => {
     view.rerender(<Harness page adminUI />)
     await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
     await new Promise(resolve => setTimeout(resolve, 50))
-    expect(screen.queryByRole('region', { name: /no record/ })).toBeNull()
+    // Nothing about it at all: no "no record", and no "asking" either.
+    expect(screen.queryByRole('region', { name: /no record|Asking Aurora/ })).toBeNull()
     // And a second restore is not offered meanwhile.
     await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['y'], 'second.dump'))
     expect(screen.getByRole('button', { name: 'Restore database' })).toBeDisabled()
@@ -247,7 +249,7 @@ describe('a restore that outlives its page', () => {
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Restore database' }))
     await waitFor(() => expect(kept()?.file).toBe('aurora.dump'))
     await act(async () => { answerRestore(json(409, { error: { code: 409, message: 'another backup or restore is already in progress' } })) })
-    await waitFor(() => expect(kept()).toEqual({ ticket: 'r'.repeat(43), file: 'running.dump', seen: 'running' }))
+    await waitFor(() => expect(kept()).toMatchObject({ ticket: 'r'.repeat(43), file: 'running.dump', seen: 'running' }))
   })
 
   it('marks a refused restore as seen ending, so a later 404 for its ticket says nothing', async () => {
@@ -261,6 +263,42 @@ describe('a restore that outlives its page', () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
     await act(async () => { answerRestore(json(400, { error: { code: 400, message: 'upload is too small' } })) })
     await waitFor(() => expect(kept()?.seen).toBe('failed'))
+  })
+
+  it('says a restore of this tab’s that succeeded in its panel, and not again on the section the admin goes to next', async () => {
+    serve({ ticket: () => json(200, { state: 'succeeded', database: 'restored', file: 'aurora.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:10:00Z', restart_required: true }) })
+    const user = userEvent.setup()
+    const view = render(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
+    await user.click(screen.getByRole('button', { name: 'Restore database' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Restore database' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
+    await act(async () => { answerRestore(json(200, { status: 'ok' })) })
+    expect(await screen.findByRole('region', { name: 'Restart Aurora now' })).toBeInTheDocument()
+    // The record, read again after the answer, says the same.
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u) === '/api/restore/status')).toBe(true))
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Users' }))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    // This tab's answer was said: the record is not said again elsewhere.
+    expect(screen.queryByRole('region', { name: 'Restart Aurora now' })).toBeNull()
+  })
+
+  it('says what the record knows of a failure past the wipe in place of this tab’s vaguer answer', async () => {
+    serve({ ticket: () => json(200, { state: 'failed', step: 'restoring', database: 'empty', file: 'aurora.dump', started_at: '2026-11-13T15:00:00Z', finished_at: '2026-11-13T15:05:00Z', restart_required: false, message: 'restore failed; database is in wiped state' }) })
+    const user = userEvent.setup()
+    const view = render(<Harness page adminUI />)
+    await user.click(within(screen.getByRole('navigation', { name: 'Admin sections' })).getByRole('button', { name: 'Backup and restore' }))
+    await user.upload(view.container.querySelector<HTMLInputElement>('input[type="file"]')!, new File(['x'], 'aurora.dump'))
+    await user.click(screen.getByRole('button', { name: 'Restore database' }))
+    const d = await screen.findByRole('alertdialog')
+    await user.click(within(d).getByRole('button', { name: 'Restore database' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/admin/restore', expect.anything()))
+    await act(async () => { answerRestore(json(500, { error: { code: 500, message: 'restore failed; database is in wiped state' } })) })
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    const note = await screen.findByRole('region', { name: 'The restore from aurora.dump failed' })
+    expect(note).toHaveTextContent('Restore a backup from the server’s command line before restarting Aurora')
+    expect(view.container).not.toHaveTextContent('Depending on where it stopped, the database is either as it was or empty.')
   })
 
   it('lets the server’s record say how a restore that got no answer ended', async () => {

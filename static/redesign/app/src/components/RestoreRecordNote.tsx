@@ -21,11 +21,12 @@ export function RestoreRecordNote({ record, server = null, className = '' }: {
     : status
       ? restoreWords(status)
       : waiting
-        ? { title: `Asking Aurora about the restore from ${waiting.file}`, says: 'This browser started a restore that has not been heard from since.', urgent: false }
+        ? { title: `Asking Aurora about the restore from ${waiting.file}`, says: 'Aurora has no word on it yet: its upload may still be going, or Aurora is not answering just now.', urgent: false }
         : null
   if (!words) return null
-  // Nothing to put away while it runs, or before the server has said anything.
-  const running = runningNow || (!status && !lost && !!waiting)
+  // Nothing to put away while it runs. A note still waiting can be set
+  // aside in this tab (useRestoreRecord's dismiss).
+  const running = runningNow
   return (
     <div
       role="region"

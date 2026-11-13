@@ -20,7 +20,7 @@ describe('the ticket', () => {
 
   it('is kept until forgotten, and only its own forget drops it', () => {
     rememberRestore('a'.repeat(43), 'one.dump')
-    expect(rememberedRestore()).toEqual({ ticket: 'a'.repeat(43), file: 'one.dump', seen: null })
+    expect(rememberedRestore()).toEqual({ ticket: 'a'.repeat(43), file: 'one.dump', seen: null, at: expect.any(Number) })
     noteRestoreSeen('a'.repeat(43), 'running')
     noteRestoreSeen('b'.repeat(43), 'failed')
     expect(rememberedRestore()?.seen).toBe('running')

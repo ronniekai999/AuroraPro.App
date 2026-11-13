@@ -37,17 +37,18 @@ Fix or file each item, and delete it here when it is no longer true.
   pins. Playback health cannot tell a playback whose page the browser set
   aside from one that ended well, nor a window where nothing was watched from
   a measured 0% of buffering; it says so, and the missing denominators are
-  server work. A restore's outcome is kept for the account's id from before
-  the restore, so after a restore from another install's backup the admin may
-  not be told; it is kept in memory, so a reload loses it. On the Admin page,
+  server work. This tab's own answer about a restore is kept for the account's id
+  from before the restore, so after a restore from another install's backup
+  the admin may not be told it in the tab; the server's record of the restore
+  (read by ticket on the sign-in page, and on the Admin page) is what survives
+  a reload, until Aurora restarts. On the Admin page,
   an answer that lands after its section has been left is said nowhere, except
   a restore's outcome and the AI settings' restart notice (shown when that
   section is opened again). The server's approve checks a request's status and
   then writes it with nothing atomic between, so two approves of one request
   at once could both pass and send it to the downloader twice (server, older
   than the redesign); the page no longer sends a second approve while one is
-  out. The browser's leave-this-page check, held while a restore is out, was
-  not seen in a real browser.
+  out.
 - Report a bug: a pick from the picker that an unreadable startup binding
   opens is not counted as a switch, so a dialog opened in that moment stays
   open across it; a remembered title page that the profile may no longer see

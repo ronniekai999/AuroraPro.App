@@ -241,9 +241,10 @@ func TestARestoreRunsOnAfterItsRequestEnds(t *testing.T) {
 			if _, err := os.Stat(archive); !os.IsNotExist(err) {
 				t.Errorf("the uploaded archive %s is still there (stat: %v)", archive, err)
 			}
-			// Nothing was written to a client that had gone.
-			if rec.Body.Len() != 0 {
-				t.Errorf("the handler wrote %q after its client left", rec.Body.String())
+			// Nothing was written to a client that had gone, and the request
+			// log reads 499, not 200.
+			if rec.Body.Len() != 0 || rec.Code != 499 {
+				t.Errorf("the handler wrote %d %q after its client left", rec.Code, rec.Body.String())
 			}
 			// The ticket still reads it: the admin who started it, signed out
 			// by the restore, can learn how it ended.
@@ -273,7 +274,7 @@ func TestARestoreStillAnswersAClientThatWaited(t *testing.T) {
 		{"the wipe fails", restoreStepClearing, "permission denied for schema public", http.StatusInternalServerError,
 			"pre-restore wipe failed: exit status 1 — psql said: permission denied for schema public", restoreStateFailed, "clearing", restoreDBUnchanged},
 		{"pg_restore fails after the wipe", restoreStepRestoring, "relation already exists", http.StatusInternalServerError,
-			"restore failed; database is in wiped state, retry with a valid backup. pg_restore said: relation already exists", restoreStateFailed, "restoring", restoreDBEmpty},
+			"restore failed; database is in wiped state. Restore a valid backup with pg_restore from the server's command line before restarting Aurora (docs/backup-restore.md). pg_restore said: relation already exists", restoreStateFailed, "restoring", restoreDBEmpty},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -617,6 +618,7 @@ func TestAFailedWipeSaysWhatItLeft(t *testing.T) {
 		{"a script error under ON_ERROR_STOP", exitError(t, "exit 3"), "ERROR:  syntax error", restoreDBUnchanged},
 		{"never connected (libpq 14+)", exitError(t, "exit 2"), `psql: error: connection to server at "db" (10.0.0.2), port 5432 failed: Connection refused`, restoreDBUnchanged},
 		{"never connected (older libpq)", exitError(t, "exit 2"), "psql: could not connect to server: No such file or directory", restoreDBUnchanged},
+		{"lost, after NOTICEs naming a failed_jobs table", exitError(t, "exit 2"), "NOTICE:  drop cascades to constraint failed_jobs_fkey on table failed_jobs\nserver closed the connection unexpectedly\nconnection to server was lost", restoreDBUnknown},
 		{"lost mid-statement", exitError(t, "exit 2"), "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally", restoreDBUnknown},
 		{"lost, as libpq says it", exitError(t, "exit 2"), "connection to server was lost", restoreDBUnknown},
 		{"killed", exitError(t, "kill -9 $$"), "", restoreDBUnknown},

@@ -47,6 +47,9 @@ export interface RememberedRestore {
   file: string
   /** The last state this browser read for it; null before the first. */
   seen: RestoreState | null
+  /** When it was kept (ms since the epoch); null for one kept before this
+   *  was recorded. */
+  at: number | null
 }
 
 /** 32 random bytes, base64url: the server takes 32 to 128 characters of
@@ -72,7 +75,7 @@ export function rememberedRestore(): RememberedRestore | null {
     if (!raw) return null
     const r = JSON.parse(raw) as Partial<RememberedRestore>
     if (typeof r.ticket !== 'string' || typeof r.file !== 'string') return null
-    return { ticket: r.ticket, file: r.file, seen: typeof r.seen === 'string' ? r.seen as RestoreState : null }
+    return { ticket: r.ticket, file: r.file, seen: typeof r.seen === 'string' ? r.seen as RestoreState : null, at: typeof r.at === 'number' ? r.at : null }
   } catch {
     return null
   }
@@ -81,7 +84,7 @@ export function rememberedRestore(): RememberedRestore | null {
 /** A new restore's ticket, kept before its upload starts so a reload
  *  during the upload still has it. Replaces any earlier one. */
 export function rememberRestore(ticket: string, file: string): void {
-  write({ ticket, file, seen: null })
+  write({ ticket, file, seen: null, at: Date.now() })
 }
 
 /** The last state read for a ticket, if it is still the one kept. */
@@ -109,7 +112,9 @@ export function forgetRestore(ticket: string): void {
 export async function readRestoreByTicket(ticket: string, signal?: AbortSignal): Promise<RestoreStatus | null> {
   const res = await fetch('/api/restore/status', {
     headers: { [RESTORE_TICKET_HEADER]: ticket },
-    credentials: 'omit',
+    // The route reads no cookie, but a proxy in front of Aurora (basic
+    // auth, an access gateway) may need its own.
+    credentials: 'same-origin',
     cache: 'no-store',
     signal,
   })

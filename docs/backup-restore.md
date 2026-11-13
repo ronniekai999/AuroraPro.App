@@ -22,7 +22,12 @@ sudo -u aurora bash -c 'set -a; . /etc/aurora/aurora.env; pg_dump --format=custo
 ```
 
 These are the flags the Admin page's download uses. `DATABASE_URL` is in
-`/etc/aurora/aurora.env`, which the `aurora` user can read.
+`/etc/aurora/aurora.env`, which the `aurora` user can read. The commands on
+this page pass it, password included, on the command line, where other users
+of the machine can see it with `ps` while the command runs (Aurora itself
+hands the password over in `PGPASSWORD` instead). On a machine others log in
+to, put the password in the `aurora` user's `~/.pgpass` and leave it out of
+the URL you pass.
 
 ## What a restore does
 
@@ -91,7 +96,7 @@ Both answer:
 | --- | --- |
 | `state` | `none` (no restore since Aurora started), `running`, `succeeded`, `failed` |
 | `step` | `checking`, `clearing` or `restoring`: where a running restore is, or where a failed one stopped |
-| `database` | `unchanged`, `empty`, `restored`, or `unknown`: the old data is being cleared (while running), or a step stopped part way and may or may not have landed (the timeout, a shutdown, psql losing its connection mid-statement, an internal error) |
+| `database` | `unchanged`, `empty`, `restored`, or `unknown`: the old data is being cleared (while running), or the clear or the restore stopped part way and may or may not have landed (the timeout, a shutdown, psql losing its connection mid-statement, an internal error). A check that is cut short changed nothing and says `unchanged` |
 | `file`, `started_at`, `finished_at` | the uploaded file's name, and when the restore began and ended |
 | `restart_required` | a restore has succeeded since Aurora started; a later restore that is refused does not clear it |
 | `message` | the server's account of a finished restore: the same text its request was, or would have been, answered with. The admin read only: it can quote `pg_restore`'s or `psql`'s output, which can include a row of the table that failed, and the ticket read has no session behind it |

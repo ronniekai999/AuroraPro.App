@@ -154,11 +154,15 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
   // This tab's own answer, when it is one: Aurora said how the restore went.
   const answered = !!mine && (mine.ok || !mine.lost)
   const recordSays = (!!record.status && record.status.state !== 'none') || !!record.lost || !!record.waiting
+  // A record of a failure that touched the database says more than this
+  // tab's answer does (that the database is empty, and what to do), so it is
+  // said in its place.
+  const recordFailedPastWipe = record.status?.state === 'failed' && record.status.database !== 'unchanged'
   // The record is said unless this tab's answer already says the same
   // restore; a restore running now is always said. Not while this tab has a
   // restore out (`out`, which outlives a remount of this panel): its record
-  // does not exist until the upload ends, and a read would call it unknown.
-  const showRecord = out === 0 && recordSays && (serverRunning || !answered)
+  // does not exist until the upload ends.
+  const showRecord = out === 0 && recordSays && (serverRunning || !answered || recordFailedPastWipe)
   const restored = mine?.ok ? mine.file : null
   // An outcome that lands while this panel is up is said in its status line,
   // whichever panel sent the restore (the admin may have left the section
@@ -169,8 +173,9 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
     outcomeAtMount.current = outcome
     if (outcome.ok) sayRestore(`Restored the database from ${outcome.file}. Restart Aurora now.`)
   }, [outcome, accountId, sayRestore])
-  // A request that got no answer is said only until the record can say more.
-  const lastFailure = mine && !mine.ok && (!mine.lost || !recordSays) ? mine.failure : null
+  // A request that got no answer is said only until the record can say more,
+  // and this tab's failure not beside a record of it that says more.
+  const lastFailure = mine && !mine.ok && (!mine.lost || !recordSays) && !(showRecord && recordFailedPastWipe) ? mine.failure : null
   const restoreRef = useRef<HTMLButtonElement | null>(null)
   const noticeRef = useRef<HTMLDivElement | null>(null)
   // The restore POST can take minutes — guard against setState after
@@ -289,9 +294,10 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
           state until you do.
         </p>
         <p className="text-ink-2 text-xs mb-4 leading-relaxed">
-          Once the file is uploaded, the restore runs on the server to its end, whether or not this
-          page stays open, and this browser shows how it went: here, or on the sign-in page. While it
-          replaces the data nobody can sign in. It wraps every change in a single transaction: if any
+          Once the file is uploaded, the restore runs on the server to its end whether or not this
+          page stays open, and this browser shows how it went: here, or on the sign-in page. Restarting
+          Aurora stops it, and so does an automatic update: pause <code>aurora-update.timer</code> first.
+          While it replaces the data nobody can sign in. It wraps every change in a single transaction: if any
           statement fails, the restore rolls back and the database is left empty, and nobody can sign
           in to restore again from here, so restore a backup from the server's command line before
           restarting Aurora. Legacy <code>.sql.gz</code> backups need to be restored via the
@@ -353,8 +359,9 @@ function AdminBackupRestore({ downloadBackup, accountId, record }: {
         accounts, profiles, libraries, watch history, lists and settings. What is there now cannot be brought
         back except from another backup. Once the file is uploaded the restore runs on the server to its end:
         reloading or closing this tab does not stop it, and this browser shows how it went, here or on the
-        sign-in page. Everyone is signed out by it. Do not restart Aurora until it has finished; restart it
-        once it has.
+        sign-in page. Restarting Aurora does stop it, and so does an automatic update, which does not wait for
+        it: pause aurora-update.timer first. Everyone is signed out by it. Restart Aurora once it has succeeded;
+        if it fails, read what it says before restarting.
       </ConfirmDialog>
     </div>
   )
@@ -3194,15 +3201,20 @@ export default function AdminView({ currentAdminId, catalogVersion = 0, initialS
   // restore no longer ends with its request, so a reload, another admin or a
   // request that got no answer learns of it here.
   const { outcome: restoreOutcomeNow, out: restoresOut, ended: restoresEnded } = useRestoreOutcome()
-  const restoreRecord = useRestoreRecord({ adminRead: getAdminRestoreStatus, recheck: restoresEnded })
   const restoreMine = restoreOutcomeNow && restoreOutcomeNow.accountId === currentAdminId ? restoreOutcomeNow : null
+  // A restore of this tab's that got no answer: keep asking until the server
+  // says how it went (the no-answer words promise it).
+  const restoreUnanswered = !!restoreMine && !restoreMine.ok && !!restoreMine.lost
+  const restoreRecord = useRestoreRecord({ adminRead: getAdminRestoreStatus, recheck: restoresEnded, keepAsking: restoreUnanswered })
   // This tab's own answer is said by RestoreOutcomeAlert; the record is not
   // said beside it, except for a restore running now.
   const restoreAnswered = !!restoreMine && (restoreMine.ok || !restoreMine.lost)
-  const restoreAside = restoresOut === 0 && (
-    restoreRecord.status?.state === 'running' ||
-    (!restoreAnswered && (!!restoreRecord.lost || (!!restoreRecord.status && !!restoreWords(restoreRecord.status)?.urgent)))
-  )
+  // A restore running is always said, this tab's own included. What the
+  // admin must act on is said when this tab has no answer of its own about
+  // it, and not while a request of this tab's is out (its record does not
+  // exist until the upload ends).
+  const restoreAside = restoreRecord.status?.state === 'running' || (restoresOut === 0 && !restoreAnswered &&
+    (!!restoreRecord.lost || (!!restoreRecord.status && !!restoreWords(restoreRecord.status)?.urgent)))
   useEffect(() => {
     if (initialSection) setTab(initialSection)
   }, [sectionAsk, initialSection])

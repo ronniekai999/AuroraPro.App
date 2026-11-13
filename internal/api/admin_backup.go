@@ -638,6 +638,10 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	case <-r.Context().Done():
 		slog.Warn("restore request ended before the restore did; the restore runs on to its end",
 			"file", file, "err", r.Context().Err())
+		// Nothing reaches a client that has gone, but the request log reads
+		// the status from here: 499 (nginx's "client closed request"), not
+		// the 200 a handler that wrote nothing is logged with.
+		w.WriteHeader(499)
 	}
 }
 
@@ -674,7 +678,7 @@ func (h *AdminHandler) runRestore(tmpPath string, run *restoreRun) restoreResult
 	// shutting down) rather than one that failed by itself.
 	stopped := func() string {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return fmt.Sprintf("the restore ran out of time (%s)", restoreTimeout)
+			return fmt.Sprintf("the restore ran out of time (%d minutes)", int(restoreTimeout.Minutes()))
 		}
 		return "the restore was stopped because Aurora is shutting down"
 	}
@@ -915,7 +919,10 @@ $do$;
 		// The --single-transaction wrapped the whole thing, so on
 		// failure the DB is back to the wiped (empty) state. Tell the
 		// operator that explicitly so they know to retry.
-		msg := "restore failed; database is in wiped state, retry with a valid backup."
+		// Not "retry": nobody can sign in to an empty database, so a retry
+		// from the Admin page is not possible, and a restart first would
+		// let anyone register as its admin.
+		msg := "restore failed; database is in wiped state. Restore a valid backup with pg_restore from the server's command line before restarting Aurora (docs/backup-restore.md)."
 		if stderrTail != "" {
 			msg += " pg_restore said: " + stderrTail
 		}
@@ -950,11 +957,19 @@ func wipeLeftDatabase(err error, stderr string) string {
 }
 
 // neverConnected reports libpq's account of a connection that was never
-// made: "connection to server ... failed" (libpq 14 and later) or "could
-// not connect to server" (before). A connection lost mid-statement says
-// "server closed the connection unexpectedly" or "connection to server
-// was lost", which this does not match.
+// made, as psql prints it at the start of a line: "psql: error: connection
+// to server ... failed" (libpq 14 and later) or "psql: could not connect to
+// server" (before). Read by line, so the wipe's own NOTICE lines (which name
+// the objects dropped) cannot match. A connection lost mid-statement says
+// "server closed the connection unexpectedly" or "connection to server was
+// lost", which this does not match.
 func neverConnected(stderr string) bool {
-	return strings.Contains(stderr, "could not connect to server") ||
-		(strings.Contains(stderr, "connection to server") && strings.Contains(stderr, "failed"))
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "psql: could not connect to server") ||
+			(strings.HasPrefix(line, "psql: error: connection to server") && strings.Contains(line, "failed")) {
+			return true
+		}
+	}
+	return false
 }

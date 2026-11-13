@@ -2127,7 +2127,11 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   context (`SetRootContext`) under the 60-minute `restoreTimeout`, on a
   goroutine that owns `backupRestoreMu` (the 409 for a second backup or
   restore) and the temp file, releasing both before it answers a client that
-  stayed. A client that left gets nothing; the restore runs on. A shutdown
+  stayed. A client that left gets nothing (logged as 499); the restore runs
+  on. A failure past the wipe tells the admin to restore from the command
+  line before restarting, never to retry: nobody can sign in to an empty
+  database, and a restart on one makes the first account registered its
+  admin. A shutdown
   still ends it (the lifecycle context, and systemd stops the unit's
   processes), as does the updater's deploy restart. A panic on that
   goroutine is recovered and recorded. The answers to a client that stayed
@@ -2137,9 +2141,10 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   latest restore that got past its upload (refusals of the upload itself
   record nothing): `state` none/running/succeeded/failed, `step`
   checking/clearing/restoring, `database` unchanged/unknown/empty/restored
-  (`unknown` while the wipe runs, and for a step the context cut short, a
-  wipe whose psql lost its connection mid-statement (`wipeLeftDatabase`,
-  which reads psql's exit code and libpq's words) or a recovered panic),
+  (`unknown` while the wipe runs, and for a wipe or `pg_restore` the context
+  cut short, a wipe whose psql lost its connection mid-statement
+  (`wipeLeftDatabase`, which reads psql's exit code and, by line, libpq's
+  words) or a recovered panic; a check cut short is `unchanged`),
   file, times, message, and `restart_required` (a restore succeeded since
   boot; a later refusal does not clear it). Two reads of it:
   `GET /api/admin/restore/status` behind `requireAdmin`, and
@@ -2162,16 +2167,25 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   works signed out and never sets off the session-expiry path), else through
   the admin route on the Admin page, which also asks it after a kept ticket
   the server no longer knows (so a restore running now is said and holds the
-  button); again every 5 s while running, and while a kept ticket gets no
-  answer, but a refused admin read is not retried. Dismiss forgets only the
-  ticket the record was read with. The sign-in page shows it
+  button); again every 5 s while running, while a kept ticket gets no answer,
+  and while one not yet seen has no record and was kept less than 66 minutes
+  ago (`RESTORE_UPLOAD_WINDOW_MS`, past the route's 65-minute read deadline:
+  another tab may still be uploading it, so it is waiting, not lost); every
+  30 s after a success, so the restart clears it. A refused admin read is not
+  retried unless a restore was running or this tab's own got no answer
+  (`keepAsking`, with a doubling wait up to a minute). The ticket read sends
+  same-origin cookies, for a proxy in front of Aurora. Dismiss forgets only
+  the ticket the record was read with; on a note still waiting it only sets
+  the ticket aside in this tab. The sign-in page shows it
   (`RestoreRecordNote`), since a reload during or after a restore lands
   there. The Admin page reads it once for every section (`AdminView`); the
   backup panel says it when this tab has no answer of its own
   (`restoreOutcome`'s outcome, with `lost` for no answer or a 502-504), and
   always while a restore runs, with the restore button and file input
-  disabled; the other sections say a running restore and, when this tab has
-  no answer, one the admin must act on (urgent words, or a lost ticket).
+  disabled, and in place of this tab's own answer when the record says more
+  (a failure that touched the database); the other sections say a running
+  restore and, when this tab has no answer and no request out, one the admin
+  must act on (urgent words, or a lost ticket).
   Nothing is said while a restore request from this tab is out
   (`restoreOutcome`'s `out`, which outlives a remount): its ticket is kept
   before the server has a record of it, and a read then would call it
@@ -2185,8 +2199,9 @@ Code: `components/admin/` (`AdminView.tsx`, `useConfirmedAction.tsx`,
   backup panel is mounted as it lands. Nothing holds the page any more (the
   leave-this-page prompt is gone).
 - Known gaps: a restart (a deploy by the auto-updater included, which does
-  not wait for a restore) still ends a running restore and forgets the
-  record, so the browser that started it can say only that Aurora has no
+  not wait for a restore: the drain block does not know of one, and the
+  dialog and panel tell the admin to pause `aurora-update.timer`) still ends
+  a running restore and forgets the record, so the browser that started it can say only that Aurora has no
   record of it; a restore cannot be cancelled; the ticket lives in one
   browser's localStorage (a private window or cleared site data loses it,
   and then only the admin read is left); a client older than the ticket
