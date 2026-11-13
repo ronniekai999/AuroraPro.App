@@ -318,6 +318,21 @@ describe('onboarding: leaving without finishing', () => {
     expect(api.saveOnboardingSeeds).not.toHaveBeenCalled()
   })
 
+  it('takes Escape as "Go back"', async () => {
+    const user = userEvent.setup()
+    const onDone = flow()
+    await user.type(age(), '8')
+    await user.click(headerSkip())
+    await screen.findByRole('alertdialog', { name: ASK })
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(question()).toBeNull())
+    expect(api.skipOnboarding).not.toHaveBeenCalled()
+    expect(onDone).not.toHaveBeenCalled()
+    // The flow is still there, with what was entered, and has the focus back.
+    expect(age()).toHaveValue('8')
+    await waitFor(() => expect(headerSkip()).toHaveFocus())
+  })
+
   it('asks on the titles step too, where the age is no longer in sight', async () => {
     const user = userEvent.setup()
     flow()
@@ -700,6 +715,8 @@ describe('onboarding: the build', () => {
     // Its row is the picks, and only the picks.
     const row = document.querySelector('[data-build-picks]')!
     expect(row.children).toHaveLength(5)
+    // A pick's name, where its picture is missing, is not drawn under 12px.
+    for (const name of row.querySelectorAll('[aria-hidden="true"]')) expect(name.className).toMatch(/(^|\s)text-\[1[2-9]px\]/)
     expect(row).toHaveTextContent('KestrelHarbor LightsIronwoodSmall HoursGlasshouse')
   })
 
@@ -823,12 +840,16 @@ describe('onboarding: the build', () => {
   })
 
   // The profile write's own refusals, in the words Settings has for them.
+  // Two of them are about the limit the age would set, and the same write
+  // would meet them again: in place of a Try again that cannot work, the
+  // way back to the age.
+  const BACK = ' Without an age the rest can be saved: go back to your details, or skip for now.'
   it.each([
-    [409, 'last_unrestricted_profile', 'One profile has to stay without a limit, so that someone can manage the others. Take the limit off another profile first. Nothing was saved.'],
-    [403, 'profile_restricted', 'The profile you are watching as has a content limit, so it cannot change this. Switch to a profile without a limit first. Nothing was saved.'],
-    // There is no list here to have been reloaded.
-    [409, 'profile_changed', 'This profile was changed on another device a moment ago. Try again. Nothing was saved.'],
-  ])('words a refused profile write as Settings does (%i %s)', async (status, reason, words) => {
+    [409, 'last_unrestricted_profile', `One profile has to stay without a limit, so that someone can manage the others. Take the limit off another profile first. Nothing was saved.${BACK}`, 'Back to your details'],
+    [403, 'profile_restricted', `The profile you are watching as has a content limit, so it cannot change this. Switch to a profile without a limit first. Nothing was saved.${BACK}`, 'Back to your details'],
+    // There is no list here to have been reloaded; and this one can be tried again.
+    [409, 'profile_changed', 'This profile was changed on another device a moment ago. Try again. Nothing was saved.', 'Try again'],
+  ])('words a refused profile write as Settings does, and offers what can work (%i %s)', async (status, reason, words, button) => {
     const user = userEvent.setup()
     api.updateProfile.mockReset().mockRejectedValue(refusal(status, 'a message written for logs', reason))
     flow()
@@ -839,6 +860,89 @@ describe('onboarding: the build', () => {
     expect(alert.textContent).toBe(words)
     expect(api.saveOnboardingSeeds).not.toHaveBeenCalled()
     expect(document.querySelector('[data-skip-keeps-limit]')).toBeNull()
+    const offered = within(alert.parentElement!).getAllByRole('button').map(b => b.textContent)
+    expect(offered).toEqual([button, 'Skip'])
+  })
+
+  it('goes back to the details with the picks kept, and the next Finish is a new build', async () => {
+    const user = userEvent.setup()
+    api.updateProfile.mockReset()
+      .mockRejectedValueOnce(refusal(409, 'refused', 'last_unrestricted_profile'))
+      .mockResolvedValue({})
+    flow()
+    await user.type(age(), '8')
+    await pickFive(user)
+    await user.click(next())
+    await user.click(await screen.findByRole('button', { name: 'Back to your details' }))
+    const heading = screen.getByRole('heading', { level: 1, name: 'Make it yours' })
+    await waitFor(() => expect(heading).toHaveFocus())
+    expect(screen.queryByRole('alert')).toBeNull()
+    // The age is still what it was, to be changed.
+    expect(age()).toHaveValue('8')
+    await user.clear(age())
+    await user.click(next())
+    // The picks are as they were left.
+    expect(document.querySelector('[data-picked]')).toHaveTextContent('5 picked')
+    await user.click(next())
+    await waitFor(() => expect(api.saveOnboardingSeeds).toHaveBeenCalledWith(FIVE_IDS, 7))
+    expect(api.updateProfile).toHaveBeenCalledTimes(2)
+    expect(patchOf(1)[1]).toEqual({ name: 'Sam', avatar_url: 'nebula:tidal' })
+  })
+
+  // The profile write was sent and has not answered. The page cannot say
+  // that skipping sets no limit: the write may still land.
+  describe('after a profile write that has not answered', () => {
+    const UNKNOWN = 'Skip without knowing whether the limit was set?'
+
+    async function stalled() {
+      let answer!: { land: () => void; fail: (e: Error) => void }
+      api.updateProfile.mockReset().mockImplementation(() => new Promise((resolve, reject) => { answer = { land: () => resolve({}), fail: reject } }))
+      vi.useFakeTimers()
+      const onDone = flow()
+      await act(async () => {})
+      fireEvent.change(age(), { target: { value: '8' } })
+      fireEvent.click(next())
+      await act(async () => {})
+      for (const name of FIVE) fireEvent.click(tile(name))
+      fireEvent.click(next())
+      await act(async () => {})
+      await pass(20_100)
+      expect(screen.getByRole('alert')).toHaveTextContent(/^This is taking longer than expected\./)
+      return { onDone, answer }
+    }
+
+    it('says the limit may or may not have been set, and where to look', async () => {
+      const { onDone } = await stalled()
+      fireEvent.click(screen.getByRole('button', { name: 'Skip' }))
+      await act(async () => {})
+      const dialog = screen.getByRole('alertdialog', { name: UNKNOWN })
+      expect(dialog).toHaveTextContent('The age you entered limits this profile to titles up to PG and TV-Y7. That was sent, and the server has not answered: the limit may or may not have been set. If you skip, look in Settings, under Profiles and parental controls, and set it there if it is not.')
+      expect(dialog).not.toHaveTextContent(/sets no limit|saves nothing/)
+      expect(within(dialog).getAllByRole('button').map(b => b.textContent)).toEqual(['Go back', 'Skip anyway'])
+      expect(api.skipOnboarding).not.toHaveBeenCalled()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Skip anyway' }))
+      await act(async () => {})
+      expect(api.skipOnboarding).toHaveBeenCalledTimes(1)
+      expect(onDone).toHaveBeenCalledTimes(1)
+    })
+
+    it('asks nothing once the write has landed after all, and says the limit is set', async () => {
+      const { onDone, answer } = await stalled()
+      await act(async () => { answer.land() })
+      expect(document.querySelector('[data-skip-keeps-limit]')).toHaveTextContent('Skipping leaves the limit set.')
+      fireEvent.click(screen.getByRole('button', { name: 'Skip' }))
+      await act(async () => {})
+      expect(question()).toBeNull()
+      expect(onDone).toHaveBeenCalledTimes(1)
+    })
+
+    it('asks the plain question once the write has failed after all', async () => {
+      const { answer } = await stalled()
+      await act(async () => { answer.fail(new Error('offline')) })
+      fireEvent.click(screen.getByRole('button', { name: 'Skip' }))
+      await act(async () => {})
+      expect(screen.getByRole('alertdialog', { name: 'Skip without setting a limit?' })).toHaveTextContent('Skipping now sets no limit and saves nothing from this page.')
+    })
   })
 })
 
@@ -921,6 +1025,95 @@ describe('onboarding: picks refused under the limit the build has just written',
     expect(question()).toBeNull()
   })
 
+  // The re-read is part of the build. One that never answers must not
+  // leave the build screen with no way out.
+  it('gives up on a re-read that never answers, within the build\'s own wait, and offers the ways out', async () => {
+    vi.useFakeTimers()
+    api.saveOnboardingSeeds.mockReset().mockRejectedValue(PICKS_REFUSED())
+    flow()
+    await act(async () => {})
+    fireEvent.change(age(), { target: { value: '10' } })
+    fireEvent.click(next())
+    await act(async () => {})
+    for (const name of FIVE) fireEvent.click(tile(name))
+    // The re-read is held; "more like your picks", asked for on a timer of
+    // its own, is answered.
+    let late!: (items: unknown[]) => void
+    api.getOnboardingGrid.mockReset().mockImplementation((opts: { selected?: number[] }) =>
+      (opts.selected ? Promise.resolve([]) : new Promise(resolve => { late = resolve })))
+    fireEvent.click(next())
+    await act(async () => {})
+    // The profile is written, the picks are refused, the re-read is out.
+    expect(api.updateProfile).toHaveBeenCalledTimes(1)
+    expect(api.saveOnboardingSeeds).toHaveBeenCalledTimes(1)
+    expect(api.getOnboardingGrid.mock.calls.filter(c => !(c[0] as { selected?: number[] }).selected)).toHaveLength(1)
+    expect(screen.queryByRole('alert')).toBeNull()
+    await act(async () => { await vi.advanceTimersByTimeAsync(19_000) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_100) })
+    expect(screen.getByRole('alert')).toHaveTextContent(/^Your name and avatar are saved, and this profile is now limited to titles up to PG and TV-Y7\. The rest is taking longer than expected\. Check your connection, then try again or skip for now\.$/)
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'Building your Tonight' })).toBeInTheDocument()
+    // An answer that comes after the build gave up changes nothing: the
+    // person is not moved off the screen they were just told about.
+    await act(async () => { late(TITLES.filter(t => t.id !== 2)) })
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'Building your Tonight' })).toBeInTheDocument()
+    expect(document.querySelector('[data-picks-removed]')).toBeNull()
+  })
+
+  // A title picked from "More like your picks" is not on the list that is
+  // read again: it goes with the ones the limit hides, and is counted.
+  it('takes out a pick that came from "More like your picks"', async () => {
+    const user = userEvent.setup()
+    flow()
+    await user.type(age(), '10')
+    await user.click(next())
+    await user.click(await screen.findByRole('button', { name: FIVE[0] }))
+    for (const name of [FIVE[2], FIVE[4], 'Copper Sky (2017)']) await user.click(tile(name))
+    await user.click(await screen.findByRole('button', { name: 'Blackwater County (2015)' }, { timeout: 2000 }))
+    api.saveOnboardingSeeds.mockReset().mockRejectedValueOnce(PICKS_REFUSED()).mockResolvedValue({})
+    api.getOnboardingGrid.mockReset().mockImplementation(async (opts: { selected?: number[] }) => (opts.selected ? [] : TITLES))
+    await user.click(next())
+    const notice = await waitFor(() => {
+      const el = document.querySelector('[data-picks-removed]')
+      expect(el).not.toBeNull()
+      return el!
+    })
+    expect(notice).toHaveTextContent('1 of your picks is no longer among them and was removed.')
+    expect(document.querySelector('[data-picked]')).toHaveTextContent('4 picked')
+    expect(screen.queryByRole('button', { name: 'Blackwater County (2015)' })).toBeNull()
+  })
+
+  // As many titles as were on the page are read again, in pages the server
+  // allows (a hundred at most).
+  it('reads again as many titles as were on the page, a hundred at a time', async () => {
+    const user = userEvent.setup()
+    const page = (from: number, n: number) => Array.from({ length: n }, (_, i) => ({ id: from + i, title: `Title ${from + i}`, year: 2000, poster: '/p.jpg' }))
+    api.getOnboardingGrid.mockReset().mockImplementation(async (opts: { selected?: number[]; offset?: number }) => (opts.selected ? [] : page(100 + (opts.offset ?? 0), 40)))
+    flow()
+    await user.type(age(), '10')
+    await user.click(next())
+    await user.click(await screen.findByRole('button', { name: 'Show more' }))
+    await screen.findByRole('button', { name: 'Title 140 (2000)' })
+    await user.click(screen.getByRole('button', { name: 'Show more' }))
+    await screen.findByRole('button', { name: 'Title 180 (2000)' })
+    for (const n of [100, 101, 102, 150, 219]) await user.click(tile(`Title ${n} (2000)`))
+    api.saveOnboardingSeeds.mockReset().mockRejectedValueOnce(PICKS_REFUSED()).mockResolvedValue({})
+    // Under the limit the server's list is the same but for one title,
+    // which it leaves out before it cuts the page.
+    const underLimit = page(100, 400).filter(t => t.id !== 150)
+    api.getOnboardingGrid.mockReset().mockImplementation(async (opts: { selected?: number[]; offset?: number; limit?: number }) =>
+      (opts.selected ? [] : underLimit.slice(opts.offset ?? 0, (opts.offset ?? 0) + (opts.limit ?? 40))))
+    await user.click(next())
+    await waitFor(() => expect(document.querySelector('[data-picks-removed]')).not.toBeNull())
+    const reread = api.getOnboardingGrid.mock.calls.map(c => c[0] as { limit: number; offset: number; selected?: number[] }).filter(o => !o.selected)
+    expect(reread.map(o => [o.limit, o.offset])).toEqual([[100, 0], [20, 100]])
+    expect(document.querySelector('[data-picked]')).toHaveTextContent('4 picked')
+    expect(tile('Title 219 (2000)')).toHaveAttribute('aria-pressed', 'true')
+  })
+
   it('says one pick was removed as one', async () => {
     const user = userEvent.setup()
     await refused(user, async () => TITLES.filter(t => t.id !== 2))
@@ -994,8 +1187,9 @@ describe('onboarding: picks refused under the limit the build has just written',
     expect(api.submitReferral).toHaveBeenCalledTimes(1)
     await user.click(tile('Copper Sky (2017)'))
     await user.click(tile('Field Notes (2016)'))
-    // The picks are the last step now.
+    // The picks are the last step now, and the bar counts it so.
     expect(next()).toHaveTextContent('Finish')
+    expect(screen.getByRole('img', { name: 'Step 2 of 2' })).toBeInTheDocument()
     await user.click(next())
     await waitFor(() => expect(api.saveOnboardingSeeds).toHaveBeenCalledTimes(2))
     expect(screen.queryByRole('heading', { level: 1, name: 'One quick thing' })).toBeNull()

@@ -934,6 +934,19 @@ through `auth.Service`. Code: `internal/api/profile_handlers.go`,
     (`ceilingLocked`) is tested at its patch helper and at the page (the
     field is disabled and nothing about content is written,
     `onboardingFlow.test.tsx`); the server refuses the change regardless.
+    Three more rules of that flow, each pinned in `onboardingFlow.test.tsx`
+    under the heading named: the limit an age sets is written when setup
+    finishes, so every way out that does not finish it (`leave`: the
+    header's Skip, "Continue to Aurora" on an empty list, Skip after a
+    failed build) asks first when it would leave that limit unset
+    (`limitToSet`, `limitLeftUnset`; "leaving without finishing"); picks
+    refused under a limit the flow has just written are recognised by the
+    refusal's status with that limit in force and confirmed by reading the
+    grid again, because the server gives that refusal no code of its own
+    (`recoverPicksUnderLimit`; "picks refused under the limit the build has
+    just written"); and `main` is inert while the flow is up, and the flow
+    is inert under the "Who's watching?" picker or a PIN prompt ("under the
+    profile picker", and `App.onboarding.test.tsx` for the app's wiring).
   - Account-level actions still open to a restricted session, for example:
     changing the account password (it needs the current one), approving a
     device pairing (the device binds to the restricted profile, or, when

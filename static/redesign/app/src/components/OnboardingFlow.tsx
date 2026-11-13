@@ -60,6 +60,9 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 /** The build's own watchdog ran out: nothing answered in time. */
 class BuildTimeout extends Error {}
+/** How long the build waits for its writes, and for the re-read that can
+ *  follow them, before it says so and offers a way out. */
+const BUILD_WAIT_MS = 20_000
 
 // ratingForAge maps a chosen age to the profile's content settings, matching the
 // canonical rating ladder (internal/db/ratings.go): max_age_rating is a HARD
@@ -252,6 +255,10 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
 
   // --- loading screen state ---
   const [error, setError] = useState<string | null>(null)
+  // A build that failed in a way trying again cannot change, but a change
+  // on the first step can: the failure then offers the way back there.
+  // Set with every failure, and read only while one is shown.
+  const [fixInDetails, setFixInDetails] = useState(false)
   const [loadNonce, setLoadNonce] = useState(0)
   const [phaseMsg, setPhaseMsg] = useState(0)
   const ranLoadRef = useRef(-1)
@@ -264,6 +271,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   // the limit was written no longer leaves one unset.
   const [landed, setLanded] = useState<{ profile: boolean; limit: string | null }>({ profile: false, limit: null })
   const landedRef = useRef(landed)
+  // The profile write has been sent and has not answered: whether it will
+  // land is not known. True through a build that gave up waiting for it.
+  const [profileWriteOut, setProfileWriteOut] = useState(false)
   // Picks taken back out because the grid, read again under a limit that
   // had just been written, no longer offered them.
   const [removedPicks, setRemovedPicks] = useState(0)
@@ -450,7 +460,10 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
 
   // ---- navigation ----
   const stepIndex = machine.order.indexOf(step)
-  const inputIndex = machine.inputs.indexOf(step)
+  // The steps the bar counts. The question, once it has been answered and
+  // passed, is not one of them any more (see stepAfter).
+  const countedSteps = referralSent && step !== 'referral' ? machine.inputs.filter((s) => s !== 'referral') : machine.inputs
+  const inputIndex = countedSteps.indexOf(step)
   const canAdvance = (): boolean => {
     switch (step) {
       case 'you':
@@ -527,12 +540,14 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   }
   const limitLeftUnset = (): string | null => (landed.limit !== null ? null : limitToSet())
   // The limit the open question is about; null while it is not asked.
-  const [leaveAsk, setLeaveAsk] = useState<string | null>(null)
+  // `unknown`: the write that carries it is out and has not answered, so
+  // the question cannot say that skipping sets no limit.
+  const [leaveAsk, setLeaveAsk] = useState<{ limit: string; unknown: boolean } | null>(null)
   // Every way out that does not finish setup: the header's Skip, "Continue
   // to Aurora" on an empty list, Skip after a build that failed.
   const leave = () => {
     const limit = limitLeftUnset()
-    if (limit) { setLeaveAsk(limit); return }
+    if (limit) { setLeaveAsk({ limit, unknown: profileWriteOut }); return }
     void skip()
   }
 
@@ -542,6 +557,12 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     headingRef.current?.focus()
     setError(null)
     setLoadNonce((n) => n + 1)
+  }
+  // From a failed build back to the first step, with the picks kept. The
+  // next Finish is a new build.
+  const backToDetails = () => {
+    setLoadNonce((n) => n + 1)
+    goTo(machine.order[0])
   }
 
   // ---- a build refused because of the limit it had just written ----
@@ -600,7 +621,13 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
     if (saved.profile) return `${kept}Your picks could not be saved just now. Try again, or skip for now.`
     // The profile write itself was refused. A refusal with a reason is
     // worded as Settings words it; here there is no list that was reloaded.
-    if (refusalReason(e)) return `${refusalMessage(e, '', { reloaded: false })} Nothing was saved.`
+    const reason = refusalReason(e)
+    // These two are about the limit the age would set: without the age
+    // there is nothing to refuse, and the way back to it is offered.
+    if (reason === 'last_unrestricted_profile' || reason === 'profile_restricted') {
+      return `${refusalMessage(e, '', { reloaded: false })} Nothing was saved. Without an age the rest can be saved: go back to your details, or skip for now.`
+    }
+    if (reason) return `${refusalMessage(e, '', { reloaded: false })} Nothing was saved.`
     return 'Your choices could not be saved just now. Try again, or skip for now.'
   }
 
@@ -638,7 +665,12 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         //     hero rebuilds fast; discover/engagement run in the background (their
         //     LLM/SQL builds finish via Home's own loading path).
         const work = (async () => {
-          await updateProfile(pid, patch)
+          if (!cancelled) setProfileWriteOut(true)
+          try {
+            await updateProfile(pid, patch)
+          } finally {
+            if (!cancelled) setProfileWriteOut(false)
+          }
           // The profile is written, and with it the limit when the patch
           // carried one. Known from here on, whatever happens next.
           landedRef.current = { profile: true, limit: patch.max_age_rating || landedRef.current.limit }
@@ -655,7 +687,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         // never trap the user here. If the writes don't settle in time, surface
         // the error UI (Try again / Skip) instead of spinning forever.
         let timedOut = false
-        await Promise.race([work, sleep(20000).then(() => void (timedOut = true))])
+        await Promise.race([work, sleep(BUILD_WAIT_MS).then(() => void (timedOut = true))])
         if (timedOut) throw new BuildTimeout()
         if (!cancelled) setBuildSaid('Your Tonight is ready.')
         // Hold a minimum beat so the celebratory loader never just flashes.
@@ -669,10 +701,26 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         // browser said is kept for whoever looks at the console.
         console.warn('onboarding: the build did not finish', e)
         const saved = landedRef.current
-        if (saved.limit !== null && refusedAsBadRequest(e) && await recoverPicksUnderLimit(() => !cancelled)) return
-        if (cancelled) return
+        let failure: unknown = e
+        if (saved.limit !== null && refusedAsBadRequest(e)) {
+          // The re-read is part of the build, and under the same watchdog:
+          // what is left of the build's time, and no longer. One that
+          // answers after that changes nothing on the page.
+          let gaveUp = false
+          const left = Math.max(0, BUILD_WAIT_MS - (Date.now() - t0))
+          const recovered = await Promise.race([
+            recoverPicksUnderLimit(() => !cancelled && !gaveUp),
+            sleep(left).then(() => { gaveUp = true; return null }),
+          ])
+          if (cancelled || recovered === true) return
+          if (recovered === null) failure = new BuildTimeout()
+        }
         setBuildSaid('')
-        setError(buildFailure(e, saved))
+        // A refusal the same write would meet again, which a change of the
+        // age can avoid: the way on is back to the first step.
+        const reason = saved.profile ? null : refusalReason(failure)
+        setFixInDetails(reason === 'last_unrestricted_profile' || reason === 'profile_restricted')
+        setError(buildFailure(failure, saved))
       }
     })()
 
@@ -750,9 +798,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
             phones, where the progress and Skip need the room. */}
         <AuroraWordmark ink="var(--ink)" className="hidden h-[15px] w-auto min-[360px]:block" />
         <span className="flex-1" />
-        {inputIndex >= 0 && machine.inputs.length > 1 && (
-          <div role="img" aria-label={`Step ${inputIndex + 1} of ${machine.inputs.length}`} className="flex gap-1.5">
-            {machine.inputs.map((s, i) => (
+        {inputIndex >= 0 && countedSteps.length > 1 && (
+          <div role="img" aria-label={`Step ${inputIndex + 1} of ${countedSteps.length}`} className="flex gap-1.5">
+            {countedSteps.map((s, i) => (
               <span key={s} className={`h-1 w-6 rounded-[2px] sm:w-12 ${i <= inputIndex ? 'bg-action' : 'bg-line-strong'}`} />
             ))}
           </div>
@@ -834,9 +882,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           "Who's watching?" picker. */}
       <ConfirmDialog
         open={leaveAsk !== null}
-        title="Skip without setting a limit?"
+        title={leaveAsk?.unknown ? 'Skip without knowing whether the limit was set?' : 'Skip without setting a limit?'}
         cancelLabel="Go back"
-        confirmLabel="Skip, no limit"
+        confirmLabel={leaveAsk?.unknown ? 'Skip anyway' : 'Skip, no limit'}
         destructive
         safeFirst
         overlayClassName="z-[82]"
@@ -845,7 +893,11 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
         onConfirm={() => { setLeaveAsk(null); void skip() }}
         fallbackFocus={() => headingRef.current}
       >
-        The age you entered would have limited this profile to titles {limitPhrase(leaveAsk)}. Skipping now sets no limit and saves nothing from this page. You can set a limit in Settings, under Profiles and parental controls.
+        {leaveAsk?.unknown
+          // The write that carries the limit was sent and has not answered:
+          // the page cannot say which way it went.
+          ? <>The age you entered limits this profile to titles {limitPhrase(leaveAsk.limit)}. That was sent, and the server has not answered: the limit may or may not have been set. If you skip, look in Settings, under Profiles and parental controls, and set it there if it is not.</>
+          : <>The age you entered would have limited this profile to titles {limitPhrase(leaveAsk?.limit)}. Skipping now sets no limit and saves nothing from this page. You can set a limit in Settings, under Profiles and parental controls.</>}
       </ConfirmDialog>
     </div>
   )
@@ -1178,7 +1230,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
           <div className="mt-8">
             <p role="alert" className="max-w-[560px] text-[15px] leading-snug text-danger-ink">{error}</p>
             <div className="mt-4 flex flex-wrap gap-3">
-              <button type="button" onClick={retryLoad} className="stage-btn stage-btn-primary">Try again</button>
+              {fixInDetails
+                ? <button type="button" onClick={backToDetails} className="stage-btn stage-btn-primary">Back to your details</button>
+                : <button type="button" onClick={retryLoad} className="stage-btn stage-btn-primary">Try again</button>}
               <button type="button" onClick={leave} className="stage-btn stage-btn-ghost">Skip</button>
             </div>
             {/* The limit is already written: skipping does not take it back. */}
@@ -1211,7 +1265,7 @@ function TitleArt({ m, className = '', small = false }: { m: UIMedia; className?
   const [failed, setFailed] = useState(false)
   return (
     <span className={`relative block overflow-hidden rounded-art bg-surface-raised-2 ${className}`}>
-      <span aria-hidden="true" className={`absolute inset-0 flex items-end font-semibold leading-tight text-ink ${small ? 'p-1 text-[9px]' : 'p-2.5 text-[13px]'}`}>
+      <span aria-hidden="true" className={`absolute inset-0 flex items-end font-semibold leading-tight text-ink ${small ? 'p-1 text-[12px]' : 'p-2.5 text-[13px]'}`}>
         <span className="line-clamp-3 [overflow-wrap:anywhere]">{m.title}</span>
       </span>
       {m.poster && !failed && (
