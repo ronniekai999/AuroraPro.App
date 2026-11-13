@@ -2024,7 +2024,8 @@ Code: `components/AuthView.tsx`, `components/Toast.tsx`, App's
   profiles have, with the Parent's removal out across a switch; a title
   the Kid's stored copy holds and its list leaves out, with the Parent's
   save out across a switch; a queue that ends failed across a switch, its
-  read of the Parent's list kept off the Kid's) and
+  read of the Parent's list not asked for, and one whose read is already
+  out at the switch, its answer kept off the Kid's) and
   `App.searchRequest.test.tsx` (a sign-out, an expiry, the TV intent).
 - Known gaps: the owner half of `undoMayRestore` is pinned at the function
   only (once toasts go at a switch no press reaches it in the app); a

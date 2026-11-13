@@ -133,6 +133,8 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
   const libraryWrites: string[] = []
   /** How many of the next such writes the server refuses. */
   const libraryWriteFails = { n: 0 }
+  /** Each read of a profile's own list, by the profile the address names. */
+  const libraryReads: number[] = []
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
@@ -201,6 +203,10 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     // only that one (403), an unrestricted one any of the account's.
     if (/^\/api\/profiles\/\d+\/library$/.test(p)) {
       const named = Number(p.split('/')[3])
+      libraryReads.push(named)
+      // 'library-read-<profile>' keeps a read of that profile's list back.
+      const kept = holds.get(`library-read-${named}`)
+      if (kept) await kept
       if (named !== asked && profiles.find(x => x.id === asked)?.max_age_rating) {
         return json({ error: { code: 403, message: 'profile is restricted', reason: 'profile_restricted' } }, 403)
       }
@@ -261,6 +267,7 @@ function stubServer({ bindingUnreadable = false, homeCountFails = false, kidUnre
     heroPools,
     searches,
     libraryWrites,
+    libraryReads,
     failLibraryWrites(n = 1) { libraryWriteFails.n = n },
     /** From now on the server fails to answer for this profile's own list. */
     failListFor(profile: number) { listFails.add(profile) },
@@ -945,11 +952,37 @@ describe('a profile switch never commits the new name over the previous profileâ
     switchToKid()
     await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
     const before = commits.length
+    const reads = server.libraryReads.length
     release()
     await waitFor(() => expect(server.libraryWrites).toEqual(['DELETE /api/profiles/1/library/104', 'POST /api/profiles/1/library']))
     await new Promise(done => setTimeout(done, 300))
+    // The queue ended after the switch: the Parent's list is not asked for.
+    expect(server.libraryReads.slice(reads)).not.toContain(1)
     expect(commits.slice(before).every(c => c.label === 'Kid' && !c.parentTitles && c.kidSavedCard)).toBe(true)
     expect(screen.queryByText(/Couldn't|Parentonly/)).toBeNull()
+    expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toEqual(['Kidonly Saved'])
+  })
+
+  // The read is already out when the switch is made: the Parent's removal
+  // was refused and its queue ended, so the Parent's list is being read
+  // again; the switch comes before its answer. The answer is the Parent's
+  // list and lands while the Kid's is on screen: it is not merged into it.
+  it('with the read at the end of a failed queue out across a switch: its answer is not merged into the new profile\'s list', async () => {
+    vi.unstubAllGlobals()
+    server = stubServer({ kidUnrestricted: true })
+    const commits = renderApp('/library')
+    await screen.findAllByText('Parentonly Saved', undefined, { timeout: 5000 })
+    const releaseRead = server.hold('library-read-1')
+    server.failLibraryWrites()
+    const reads = server.libraryReads.length
+    await removeTheSavedTitle()
+    await waitFor(() => expect(server.libraryReads.slice(reads)).toContain(1))
+    switchToKid()
+    await screen.findAllByText('Kidonly Saved', undefined, { timeout: 5000 })
+    const before = commits.length
+    releaseRead()
+    await new Promise(done => setTimeout(done, 300))
+    expect(commits.slice(before).every(c => c.label === 'Kid' && !c.parentTitles && c.kidSavedCard)).toBe(true)
     expect(JSON.parse(localStorage.getItem('aurora_my_library:1:2') ?? '[]').map((m: { title: string }) => m.title)).toEqual(['Kidonly Saved'])
   })
 
