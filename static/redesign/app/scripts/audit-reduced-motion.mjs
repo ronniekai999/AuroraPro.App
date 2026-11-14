@@ -55,9 +55,9 @@ const css = cssRaw.replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '))
  *
  *  Needed because the reduced-motion rule and the animation rule routinely name
  *  DIFFERENT classes on the SAME element: an animation declared on a variant
- *  (`.orb-l1`), the escape hatch written against its base (`.orb-l`), and the
- *  markup `<span className="orb-l orb-l1" />`. (That was the old nebula orb
- *  avatar's exact shape; the orb is gone, the pattern is not.) The first version of this check compared
+ *  (`.neb-l1`), the escape hatch written against its base (`.neb-l`), and the
+ *  markup `<span className="neb-l neb-l1" />`. (Those were the nebula orb
+ *  avatar's classes; the orb is gone, the pattern is not.) The first version of this check compared
  *  only the first class of the declaring selector and reported seven covered
  *  animations as uncovered — a new gate's false positives are how a gate gets
  *  disabled, so this resolves the pair instead of guessing. */

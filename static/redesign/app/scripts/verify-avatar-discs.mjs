@@ -14,10 +14,11 @@
 //   - every onboarding disc is square, the size of its button, and not
 //     empty, with the profile's name in it, with the name cleared (a bare
 //     disc) and with another name typed;
-//   - the initial is centred on its disc and about 42% of its width tall
-//     (its cap height is a fraction of that);
-//   - the same for Settings' picker (Your profile), and the top bar's 28px
-//     avatar.
+//   - the initial is centred on its disc, its font size is 42% of the
+//     disc's width, and it is filled with the action ink (--on-action), the
+//     colour NebulaAvatar.test.tsx checks the gradients' contrast against;
+//   - the same for Settings' picker (Your profile) at a phone's width and a
+//     desktop's, and the top bar's 28px avatar, its letter in that ink.
 //
 // Run after a build (the audit chain does): node scripts/verify-avatar-discs.mjs
 
@@ -69,6 +70,15 @@ async function productionCSP() {
   return csp
 }
 const CSP = await productionCSP()
+
+/** The action ink as the browser reports a computed colour. */
+const INK = await (async () => {
+  const css = await readFile(path.join(SCRIPTS, '..', 'src', 'index.css'), 'utf8')
+  const m = css.match(/--on-action:\s*#([0-9a-fA-F]{6})\s*;/)
+  if (!m) throw new Error('--on-action not found in src/index.css')
+  const [r, g, b] = [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16))
+  return `rgb(${r}, ${g}, ${b})`
+})()
 
 const server = createServer(async (req, res) => {
   const rel = decodeURIComponent(new URL(req.url, 'http://x').pathname).replace(/^\/v2\/?/, '')
@@ -131,7 +141,8 @@ async function open(width, route, onboarding) {
 
 /** Each disc in the buttons under `where` (a CSS selector, or "legend:<text>"
  *  for the fieldset with that legend): its box, its button's, and its
- *  initial's text box (null for a bare disc). */
+ *  initial's text box, fill, and font size as a share of the disc's width
+ *  (nulls for a bare disc). */
 function discs(where) {
   const box = el => { const b = el.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height } }
   const root = where.startsWith('legend:')
@@ -141,18 +152,23 @@ function discs(where) {
   return [...root.querySelectorAll('button')].map(button => {
     const disc = button.querySelector('.nebula-disc')
     const text = disc?.querySelector('text')
+    const svg = text?.ownerSVGElement
+    // SVG font sizes are in user units; the viewBox scales them to the disc.
+    const scale = svg ? svg.getBoundingClientRect().width / svg.viewBox.baseVal.width : 0
     return {
       label: button.getAttribute('aria-label'),
       button: box(button),
       disc: disc ? box(disc) : null,
       letter: text?.textContent ?? '',
       ink: text ? box(text) : null,
+      fill: text ? getComputedStyle(text).fill : null,
+      fontShare: text && disc ? parseFloat(getComputedStyle(text).fontSize) * scale / disc.getBoundingClientRect().width : null,
     }
   })
 }
 
 /** Square, its button's size, at least `min` wide; the letter as expected,
- *  centred, and a plausible size. */
+ *  centred, 42% of the disc and in the ink. */
 function judge(where, found, letter, min) {
   if (!found) return fail(`${where}: the picker is not on the page`)
   if (found.length !== 10) fail(`${where}: ${found.length} avatars, not 10`)
@@ -173,10 +189,12 @@ function judge(where, found, letter, min) {
       if (Math.abs(cx) > d.disc.w * 0.08 || Math.abs(cy) > d.disc.h * 0.12) {
         fail(`${at}: the initial is off centre by ${cx.toFixed(1)}, ${cy.toFixed(1)}px`)
       }
-      // The text box spans the font's ascent and descent: for 42 units of
-      // font size, roughly 45% to 60% of the disc.
+      if (Math.abs(d.fontShare - 0.42) > 0.005) fail(`${at}: the initial's font size is ${(d.fontShare * 100).toFixed(1)}% of the disc, not 42%`)
+      if (d.fill !== INK) fail(`${at}: the initial is filled ${d.fill}, not the action ink ${INK}`)
+      // The text box spans the font's ascent and descent, which no font
+      // makes less than its size or twice it: a glyph that did not draw.
       const share = d.ink.h / d.disc.h
-      if (share < 0.3 || share > 0.7) fail(`${at}: the initial's box is ${(share * 100).toFixed(0)}% of the disc's height`)
+      if (share < 0.42 || share > 0.84) fail(`${at}: the initial's box is ${(share * 100).toFixed(0)}% of the disc's height`)
     }
   }
   return [...sizes].join(', ')
@@ -201,27 +219,30 @@ for (const width of [320, 390, 1440]) {
   await ctx.close()
 }
 
-{
-  const { ctx, page } = await open(1440, '/v2/profile', false)
+for (const width of [390, 1440]) {
+  const { ctx, page } = await open(width, '/v2/profile', false)
   const picker = '[role="radiogroup"][aria-label="Avatar for Sam"]'
   try {
     await page.locator(picker).waitFor({ timeout: 10_000 })
-    const sizes = judge('Settings, Your profile', await page.evaluate(discs, picker), 'S', 47)
-    console.log(`── 1440px  settings picker discs ${sizes}`)
+    const sizes = judge(`${width}px Settings, Your profile`, await page.evaluate(discs, picker), 'S', 47)
+    console.log(`── ${String(width).padStart(4)}px  settings picker discs ${sizes}`)
   } catch (err) {
-    fail(`Settings' avatar picker never appeared (${err.message.split('\n')[0]})`)
+    fail(`${width}px: Settings' avatar picker never appeared (${err.message.split('\n')[0]})`)
   }
-  const bar = await page.evaluate(() => {
-    const el = document.querySelector('header [data-profile-avatar], nav [data-profile-avatar]')
-    if (!el) return null
-    const b = el.getBoundingClientRect()
-    return { kind: el.dataset.profileAvatar, w: b.width, h: b.height, text: el.textContent }
-  })
-  if (!bar) fail('the top bar has no avatar')
-  else {
-    if (bar.kind !== 'nebula' || bar.text !== 'S') fail(`the top bar's avatar is ${bar.kind} "${bar.text}", not the nebula with "S"`)
-    if (Math.round(bar.w) !== 28 || Math.round(bar.h) !== 28) fail(`the top bar's avatar is ${bar.w}x${bar.h}, not 28x28`)
-    console.log(`── 1440px  top bar avatar ${bar.kind} "${bar.text}" ${Math.round(bar.w)}x${Math.round(bar.h)}`)
+  if (width === 1440) {
+    const bar = await page.evaluate(() => {
+      const el = document.querySelector('header [data-profile-avatar], nav [data-profile-avatar]')
+      if (!el) return null
+      const b = el.getBoundingClientRect()
+      return { kind: el.dataset.profileAvatar, w: b.width, h: b.height, text: el.textContent, color: getComputedStyle(el).color }
+    })
+    if (!bar) fail('the top bar has no avatar')
+    else {
+      if (bar.kind !== 'nebula' || bar.text !== 'S') fail(`the top bar's avatar is ${bar.kind} "${bar.text}", not the nebula with "S"`)
+      if (Math.round(bar.w) !== 28 || Math.round(bar.h) !== 28) fail(`the top bar's avatar is ${bar.w}x${bar.h}, not 28x28`)
+      if (bar.color !== INK) fail(`the top bar's initial is ${bar.color}, not the action ink ${INK}`)
+      console.log(`── 1440px  top bar avatar ${bar.kind} "${bar.text}" ${Math.round(bar.w)}x${Math.round(bar.h)}, ink ${bar.color}`)
+    }
   }
   await ctx.close()
 }
