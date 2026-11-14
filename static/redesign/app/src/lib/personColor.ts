@@ -25,9 +25,23 @@ export function personColor(key: number | string | null | undefined): string {
   return PERSON_COLORS[h % PERSON_COLORS.length]
 }
 
+// Whole characters as a reader sees them: an emoji, a flag, an accented
+// letter written as a letter and a combining mark.
+const graphemes = typeof Intl !== 'undefined' && 'Segmenter' in Intl
+  ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  : null
+
+/** The first character of a name, upper-cased, or '?' for no name. A whole
+ *  character, not its first UTF-16 unit: charAt(0) took half of an emoji's
+ *  surrogate pair, and a profile called "🎬 Movies" was drawn as a
+ *  replacement glyph on every avatar it has. */
 export function personInitial(name: string | null | undefined): string {
-  const c = (name ?? '').trim().charAt(0)
-  return c ? c.toUpperCase() : '?'
+  const s = (name ?? '').trim()
+  if (!s) return '?'
+  const first = graphemes
+    ? graphemes.segment(s)[Symbol.iterator]().next().value?.segment ?? s
+    : Array.from(s)[0]
+  return first.toUpperCase()
 }
 
 /** The bubble a chat line is printed on over playing video (the party's chat

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   NAME_BUBBLE_DIM_OPACITY, NAME_BUBBLE_FILL_ALPHA, NAME_BUBBLE_FILL_RGB, PERSON_COLORS, personColor, personInitial,
 } from './personColor'
@@ -22,6 +22,36 @@ describe('personColor', () => {
     expect(personInitial(' morgan')).toBe('M')
     expect(personInitial('')).toBe('?')
     expect(personInitial(null)).toBe('?')
+  })
+  // One whole character, never half of one: charAt(0) gave the first half of
+  // an emoji's surrogate pair, drawn as a replacement glyph.
+  it('takes the first whole character of a name', () => {
+    expect(personInitial('🎬 Movies')).toBe('🎬')
+    expect(personInitial('👨‍👩‍👧 Family')).toBe('👨‍👩‍👧')
+    expect(personInitial('🇫🇷 Amélie')).toBe('🇫🇷')
+    expect(personInitial('e\u0301clair')).toBe('E\u0301')
+    expect(personInitial('éclair')).toBe('É')
+  })
+  // Without Intl.Segmenter (Firefox before 125) it falls back to the first
+  // code point: still never half a surrogate pair, though a flag gives its
+  // first regional letter and a joined emoji its first person.
+  it('falls back to the first code point where there is no Intl.Segmenter', async () => {
+    // Removed to model a browser without it; the flag's answer below shows
+    // the fallback really ran.
+    const segmenter = Object.getOwnPropertyDescriptor(Intl, 'Segmenter')!
+    Reflect.deleteProperty(Intl, 'Segmenter')
+    try {
+      vi.resetModules()
+      const { personInitial: initial } = await import('./personColor')
+      expect(initial('🎬 Movies')).toBe('🎬')
+      expect(initial('🇫🇷 Amélie')).toBe('🇫')
+      expect(initial('👨‍👩‍👧 Family')).toBe('👨')
+      expect(initial('sam')).toBe('S')
+      expect(initial(' ')).toBe('?')
+    } finally {
+      Object.defineProperty(Intl, 'Segmenter', segmenter)
+      vi.resetModules()
+    }
   })
 })
 

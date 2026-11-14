@@ -7,6 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { NebulaAvatar, NEBULAS, nebulaValue, parseNebula } from '@/components/NebulaAvatar'
+import { personInitial } from '@/lib/personColor'
 import { MATURITY_OPTIONS, type MaturityPref } from '@/lib/maturity'
 import { nextRadioIndex } from '@/lib/radiogroup'
 
@@ -24,6 +25,8 @@ export function AvatarPicker({ profileId, profileName, avatarUrl, onPick }: {
   const selectedId = parseNebula(local ?? avatarUrl)?.id ?? null
   // With nothing chosen yet the first one is the tab stop.
   const tabStop = selectedId ?? NEBULAS[0].id
+  // Each disc shows the profile's own initial, as its avatar will.
+  const initial = profileName.trim() ? personInitial(profileName) : ''
 
   const pick = (id: string) => {
     const value = nebulaValue(id)
@@ -62,7 +65,7 @@ export function AvatarPicker({ profileId, profileName, avatarUrl, onPick }: {
             // the ink colour with a gap of the page between it and the disc.
             className={`relative h-12 w-12 flex-none rounded-full ${sel ? 'ring-2 ring-ink ring-offset-2 ring-offset-surface-page' : ''}`}
           >
-            <NebulaAvatar nebula={n} active={sel} className="block h-full w-full" />
+            <NebulaAvatar nebula={n} initial={initial} className="h-full w-full" />
           </button>
         )
       })}

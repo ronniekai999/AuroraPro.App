@@ -108,6 +108,20 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); localStorage.clear() })
 
 describe('onboarding: "Make it yours"', () => {
+  // The avatars are the profile's initial on a gradient, so they show the
+  // name being typed, and no letter while there is none.
+  it('draws each avatar with the initial of the name typed, and none without a name', async () => {
+    const user = userEvent.setup()
+    flow({ profile: profile({ avatar_url: '' }) })
+    const discs = () => within(screen.getByRole('group', { name: 'Pick your avatar' })).getAllByRole('button')
+      .map(b => b.querySelector('.nebula-disc')?.textContent)
+    expect(discs()).toEqual(Array(10).fill('S'))
+    await user.clear(screen.getByLabelText('Name'))
+    expect(discs()).toEqual(Array(10).fill(''))
+    await user.type(screen.getByLabelText('Name'), ' robin')
+    expect(discs()).toEqual(Array(10).fill('R'))
+  })
+
   // A profile on the list has a name; it may have no avatar yet.
   it('opens on its heading, as step 1 of 2, and says what Continue is waiting for', async () => {
     const user = userEvent.setup()

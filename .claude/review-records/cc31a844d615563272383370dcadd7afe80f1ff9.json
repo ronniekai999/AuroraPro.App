@@ -1,0 +1,10 @@
+{
+  "sha": "cc31a844d615563272383370dcadd7afe80f1ff9",
+  "verdict": "lows-only",
+  "summary": "Final diff 4a3790f..cc31a84 (gradient-monogram avatars). Two fresh-context reviews; first found a high (onboarding grid collapsed to 0px in Chromium), fixed in f69be63 and confirmed by browser check and mutation. Remaining lows: browser ink check ignores opacity/fill-opacity; a comment overstates font-metric bounds; 24px tab bar and ProfileRow picker copy not browser-checked. Firefox/Safari and forced-colors not run.",
+  "reviewer": "fresh-context-subagent",
+  "findings": "3",
+  "diff_digest": "3cdeeb1386dfd5e60e50aac66870f9795af26bbb0adcdfc47eea1b4081331b2e",
+  "branch": "claude/practical-curie-f2p8co",
+  "recorded_at": "2026-11-14T01:24:14Z"
+}

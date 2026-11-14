@@ -54,9 +54,10 @@ const css = cssRaw.replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '))
 /** Every className string in the app, so a base/variant pair can be resolved.
  *
  *  Needed because the reduced-motion rule and the animation rule routinely name
- *  DIFFERENT classes on the SAME element: `animation: onbDrift1` is declared on
- *  `.neb-l1`, the escape hatch is written against `.neb-l`, and the markup is
- *  `<span className="neb-l neb-l1" />`. The first version of this check compared
+ *  DIFFERENT classes on the SAME element: an animation declared on a variant
+ *  (`.neb-l1`), the escape hatch written against its base (`.neb-l`), and the
+ *  markup `<span className="neb-l neb-l1" />`. (Those were the nebula orb
+ *  avatar's classes; the orb is gone, the pattern is not.) The first version of this check compared
  *  only the first class of the declaring selector and reported seven covered
  *  animations as uncovered — a new gate's false positives are how a gate gets
  *  disabled, so this resolves the pair instead of guessing. */
