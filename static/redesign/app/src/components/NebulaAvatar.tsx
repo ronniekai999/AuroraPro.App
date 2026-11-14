@@ -1,30 +1,33 @@
-import type { CSSProperties } from 'react'
+// The built-in avatars a profile can choose: the profile's initial in dark ink
+// on a bright two-tone disc. Stored on a profile as `avatar_url =
+// "nebula:<id>"` (the server's avatar validation accepts this id form beside
+// http(s) image URLs), so the choice follows the profile everywhere its avatar
+// renders. The ids keep the "nebula" name from when each was drawn as an
+// animated orb; that orb was buried under a fixed 30px inner shadow and an 11px
+// blur, which at 24-56px left a near-black disc, so the stored values stayed
+// and only the drawing changed.
 
-// The built-in animated "nebula" avatars offered during onboarding. Each is a
-// living aurora orb — three drifting, screen-blended gradient blobs in a colour
-// family. Stored on a profile as `avatar_url = "nebula:<id>"` (the server's
-// avatar validation accepts this id form alongside http(s) image URLs), so the
-// choice follows the profile everywhere its avatar renders.
 export interface NebulaDef {
   id: string
-  /** Poetic display name shown under the orb in the picker. */
+  /** Display name, read out as the picker button's label. */
   name: string
-  c1: string
-  c2: string
-  c3: string
+  /** The gradient's colour stops, top-left to bottom-right. Every point of
+   *  the gradient carries the dark initial at 4.5:1 or better, so a 12px
+   *  initial on a 24px disc still passes AA (NebulaAvatar.test.ts checks). */
+  stops: readonly string[]
 }
 
 export const NEBULAS: readonly NebulaDef[] = [
-  { id: 'amethyst', name: 'Amethyst', c1: '#A855F7', c2: '#D8B4FE', c3: '#7E22CE' },
-  { id: 'tidal', name: 'Tidal', c1: '#2dd4bf', c2: '#22d3ee', c3: '#0ea5e9' },
-  { id: 'blossom', name: 'Blossom', c1: '#ec4899', c2: '#f9a8d4', c3: '#db2777' },
-  { id: 'ember', name: 'Ember', c1: '#f59e0b', c2: '#fcd34d', c3: '#fb7185' },
-  { id: 'verdant', name: 'Verdant', c1: '#10b981', c2: '#6ee7b7', c3: '#34d399' },
-  { id: 'cobalt', name: 'Cobalt', c1: '#6366f1', c2: '#a5b4fc', c3: '#818cf8' },
-  { id: 'rose', name: 'Rose', c1: '#f43f5e', c2: '#fda4af', c3: '#fb7185' },
-  { id: 'mirage', name: 'Mirage', c1: '#06b6d4', c2: '#c084fc', c3: '#8b5cf6' },
-  { id: 'solstice', name: 'Solstice', c1: '#eab308', c2: '#fde047', c3: '#f59e0b' },
-  { id: 'aurora', name: 'Aurora', c1: '#A855F7', c2: '#2dd4bf', c3: '#ec4899' },
+  { id: 'amethyst', name: 'Amethyst', stops: ['#d8b4fe', '#a855f7'] },
+  { id: 'tidal', name: 'Tidal', stops: ['#5eead4', '#06b6d4'] },
+  { id: 'blossom', name: 'Blossom', stops: ['#f9a8d4', '#ec4899'] },
+  { id: 'ember', name: 'Ember', stops: ['#fcd34d', '#f97316'] },
+  { id: 'verdant', name: 'Verdant', stops: ['#86efac', '#10b981'] },
+  { id: 'cobalt', name: 'Cobalt', stops: ['#c7d2fe', '#818cf8'] },
+  { id: 'rose', name: 'Rose', stops: ['#fda4af', '#f43f5e'] },
+  { id: 'mirage', name: 'Mirage', stops: ['#67e8f9', '#a855f7'] },
+  { id: 'solstice', name: 'Solstice', stops: ['#fef08a', '#eab308'] },
+  { id: 'aurora', name: 'Aurora', stops: ['#ec4899', '#a855f7', '#2dd4bf'] },
 ]
 
 export const NEBULA_PREFIX = 'nebula:'
@@ -48,38 +51,36 @@ export function nebulaValue(id: string): string {
   return NEBULA_PREFIX + id
 }
 
+/** The CSS background a nebula's disc is painted with: its gradient under a
+ *  soft white highlight at the top left. The highlight only lightens, so it
+ *  can only raise the initial's contrast. */
+export function nebulaFill(def: NebulaDef): string {
+  return 'radial-gradient(110% 80% at 28% 0%, rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0) 60%), '
+    + `linear-gradient(150deg, ${def.stops.join(', ')})`
+}
+
 interface NebulaAvatarProps {
   /** A nebula def, a bare id ("aurora"), or a stored value ("nebula:aurora"). */
   nebula: NebulaDef | string
-  /** Diameter in px. Omit to size via className (e.g. "w-full h-full"). */
-  size?: number
-  /** Extra classes applied to the orb element. */
+  /** The letter drawn on the disc; empty draws the disc alone (a picker
+   *  shown before the profile has a name). */
+  initial?: string
+  /** Extra classes on the disc. It has no size of its own: size it here
+   *  (e.g. "h-full w-full"). The initial scales with the disc's width. */
   className?: string
-  /** Brighter, livelier "selected" treatment used by the picker grid. */
-  active?: boolean
 }
 
 /**
- * NebulaAvatar renders the living aurora orb for a nebula. Colours are passed as
- * CSS custom properties so the shared `.neb-*` keyframes in index.css drive the
- * drift animation for every instance without per-instance styles. Provide `size`
- * for a fixed diameter, or omit it and size the orb via `className`.
+ * NebulaAvatar draws a nebula's disc at whatever size its className gives it,
+ * for the pickers, whose discs are sized by their grid. A profile's avatar at
+ * a fixed size is ProfileAvatar, which paints the same fill.
  */
-export function NebulaAvatar({ nebula, size, className = '', active = false }: NebulaAvatarProps) {
+export function NebulaAvatar({ nebula, initial = '', className = '' }: NebulaAvatarProps) {
   const def = typeof nebula === 'string' ? parseNebula(nebula) : nebula
   if (!def) return null
-  const style = {
-    '--c1': def.c1,
-    '--c2': def.c2,
-    '--c3': def.c3,
-    ...(size != null ? { width: size, height: size } : {}),
-  } as CSSProperties
   return (
-    <span className={`neb${active ? ' neb-active' : ''}${className ? ' ' + className : ''}`} style={style} aria-hidden="true">
-      <span className="neb-l neb-l1" />
-      <span className="neb-l neb-l2" />
-      <span className="neb-l neb-l3" />
-      <span className="neb-core" />
+    <span className={`nebula-disc ${className}`} style={{ background: nebulaFill(def) }} aria-hidden="true">
+      {initial && <span className="nebula-disc-initial font-display font-bold text-action-on">{initial}</span>}
     </span>
   )
 }

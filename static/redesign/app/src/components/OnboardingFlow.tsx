@@ -26,6 +26,7 @@ import {
 } from '@/lib/referral'
 import { nextRadioIndex } from '@/lib/radiogroup'
 import { NEBULAS, NebulaAvatar, nebulaValue, parseNebula } from './NebulaAvatar'
+import { personInitial } from '@/lib/personColor'
 import { AuroraMark } from './TopNav'
 import { AuroraWordmark } from './AuroraWordmark'
 import { SkeletonBlock } from './Skeletons'
@@ -959,6 +960,9 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
   // Who this profile is: an avatar, a name, and an age for whoever wants to
   // give one.
   function renderYou() {
+    // Each disc shows the initial of the name typed below, as the avatar
+    // will; none until there is a name.
+    const avatarInitial = name.trim() ? personInitial(name) : ''
     return (
       <div className="flex flex-col gap-8 sm:gap-9">
         <div>
@@ -986,7 +990,7 @@ export function OnboardingFlow({ profileId, profile, status, taste, referral, so
                   // focus ring is drawn where the ring was.
                   className={`relative block aspect-square w-full rounded-full p-0 ${sel ? 'shadow-[0_0_0_3px_var(--surface-page),0_0_0_5px_#ffffff]' : ''}`}
                 >
-                  <NebulaAvatar nebula={n} active={sel} className="block h-full w-full" />
+                  <NebulaAvatar nebula={n} initial={avatarInitial} className="h-full w-full" />
                   {sel && (
                     <span aria-hidden="true" data-avatar-check="" className="absolute -right-0.5 -top-0.5 grid h-6 w-6 place-items-center rounded-full bg-action text-action-on">
                       <CheckIcon className="h-3.5 w-3.5" />

@@ -5726,30 +5726,28 @@ html[data-player-surface="theater"] .toast-stack {
 }
 
 /* ============================================================
-   Nebula avatars, and the onboarding flow that offers them.
-   Namespaced .neb-* selectors and onbDrift* keyframes so they
-   can't collide with existing app styles/animations.
+   Nebula avatars (the initial on a two-tone disc, NebulaAvatar),
+   and the onboarding flow that offers them.
    ============================================================ */
 
-/* --- Nebula avatar: a living aurora orb (3 drifting screen-blended blobs) --- */
-.neb {
-  position: relative;
-  display: inline-block;
-  border-radius: 50%;
-  overflow: hidden;
+/* --- A nebula disc sized by its picker. It is its own inline-size
+   container so the initial scales with the disc: 44% of its width, the
+   share ProfileAvatar gives a fixed-size disc, and never below the same
+   12px floor. --- */
+.nebula-disc {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
-  background: radial-gradient(circle at 50% 62%, #17131f 0%, #0a0810 75%);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  border-radius: 50%;
+  container-type: inline-size;
 }
-.neb-l { position: absolute; border-radius: 50%; filter: blur(11px); mix-blend-mode: screen; opacity: 0.78; }
-.neb-l1 { width: 95%; height: 80%; left: -15%; top: -22%; background: radial-gradient(circle, var(--c1), transparent 68%); animation: onbDrift1 7.5s ease-in-out infinite; }
-.neb-l2 { width: 90%; height: 90%; right: -22%; bottom: -26%; background: radial-gradient(circle, var(--c2), transparent 68%); animation: onbDrift2 9.5s ease-in-out infinite; }
-.neb-l3 { width: 82%; height: 78%; right: -18%; top: 6%; background: radial-gradient(circle, var(--c3), transparent 70%); animation: onbDrift3 8.5s ease-in-out infinite; }
-.neb-core { position: absolute; inset: 0; border-radius: 50%; box-shadow: inset 0 0 30px rgba(0, 0, 0, 0.55); }
-.neb-active .neb-l { filter: blur(8px); opacity: 1; }
-@keyframes onbDrift1 { 0%,100% { transform: translate(0,0) scale(1); } 33% { transform: translate(18%,12%) scale(1.18); } 66% { transform: translate(8%,22%) scale(1.05); } }
-@keyframes onbDrift2 { 0%,100% { transform: translate(0,0) scale(1); } 33% { transform: translate(-16%,-10%) scale(1.12); } 66% { transform: translate(-22%,6%) scale(1.2); } }
-@keyframes onbDrift3 { 0%,100% { transform: translate(0,0) scale(1.05); } 50% { transform: translate(-14%,16%) scale(0.9); } }
+.nebula-disc-initial {
+  font-size: max(12px, 44cqi);
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
 
 /* --- The onboarding flow's own two rules. Its fields are 52px with the
    text at 17px ((0,2,1), over the global input rule; see the note at the
@@ -5784,10 +5782,6 @@ input.stage-minidock-field:not([type="range"]) {
     grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
     gap: 20px;
   }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .neb-l { animation: none !important; }
 }
 
 /* 2026-06-17 (a11y quick-win) — global reduced-motion catch-all. The
