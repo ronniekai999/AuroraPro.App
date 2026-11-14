@@ -13,7 +13,7 @@ export interface NebulaDef {
   name: string
   /** The gradient's colour stops, top-left to bottom-right. Every point of
    *  the gradient carries the dark initial at 4.5:1 or better, so a 12px
-   *  initial on a 24px disc still passes AA (NebulaAvatar.test.ts checks). */
+   *  initial on a 24px disc still passes AA (NebulaAvatar.test.tsx checks). */
   stops: readonly string[]
 }
 
@@ -66,7 +66,7 @@ interface NebulaAvatarProps {
    *  shown before the profile has a name). */
   initial?: string
   /** Extra classes on the disc. It has no size of its own: size it here
-   *  (e.g. "h-full w-full"). The initial scales with the disc's width. */
+   *  (e.g. "h-full w-full"). The initial scales with the disc. */
   className?: string
 }
 
@@ -74,13 +74,23 @@ interface NebulaAvatarProps {
  * NebulaAvatar draws a nebula's disc at whatever size its className gives it,
  * for the pickers, whose discs are sized by their grid. A profile's avatar at
  * a fixed size is ProfileAvatar, which paints the same fill.
+ *
+ * The initial is SVG text on a 100-unit square, so it is 42% of the disc's
+ * width (ProfileAvatar's share) at any size, with nothing measured. It was
+ * sized in container units first, and the disc had to be a size container
+ * for that: inside onboarding's fieldset, whose minimum width is its
+ * content's, Chromium then laid every button out zero pixels wide.
  */
 export function NebulaAvatar({ nebula, initial = '', className = '' }: NebulaAvatarProps) {
   const def = typeof nebula === 'string' ? parseNebula(nebula) : nebula
   if (!def) return null
   return (
     <span className={`nebula-disc ${className}`} style={{ background: nebulaFill(def) }} aria-hidden="true">
-      {initial && <span className="nebula-disc-initial font-display font-bold text-action-on">{initial}</span>}
+      {initial && (
+        <svg viewBox="0 0 100 100" className="nebula-disc-initial font-display font-bold text-action-on" focusable="false">
+          <text x="50" y="50" textAnchor="middle" dominantBaseline="central" fontSize="42" fill="currentColor">{initial}</text>
+        </svg>
+      )}
     </span>
   )
 }

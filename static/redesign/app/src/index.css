@@ -5730,23 +5730,22 @@ html[data-player-surface="theater"] .toast-stack {
    and the onboarding flow that offers them.
    ============================================================ */
 
-/* --- A nebula disc sized by its picker. It is its own inline-size
-   container so the initial scales with the disc: 44% of its width, the
-   share ProfileAvatar gives a fixed-size disc, and never below the same
-   12px floor. --- */
+/* --- A nebula disc sized by its picker. Block-level, so a button holding
+   it is exactly the disc (an inline disc sat on a line box and made its
+   button taller than wide, and the selected ring oval). The initial is an
+   SVG filling the disc; see NebulaAvatar. --- */
 .nebula-disc {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   justify-content: center;
   flex: none;
   overflow: hidden;
   border-radius: 50%;
-  container-type: inline-size;
 }
 .nebula-disc-initial {
-  font-size: max(12px, 44cqi);
-  line-height: 1;
-  letter-spacing: -0.02em;
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 /* --- The onboarding flow's own two rules. Its fields are 52px with the

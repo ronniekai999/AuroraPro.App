@@ -2,15 +2,19 @@
 //
 // The built-in avatars: the profile's initial in dark ink on a two-tone disc.
 // They replaced an animated orb that drew as a near-black disc at the sizes
-// the app uses (24-56px), so what is pinned here is that the new disc keeps
-// the initial readable at every point of every gradient, and that every value
-// already stored on a profile still resolves.
+// the app uses (24px and up), so what is pinned here is that the new disc
+// keeps the initial readable at every point of every gradient, that it is
+// drawn in the ink that check reads, and that every value already stored on
+// a profile still resolves. Their layout in a real browser (a picker's discs
+// are square and not empty) is scripts/verify-avatar-discs.mjs.
 
 import { render } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { NEBULAS, NebulaAvatar, nebulaFill, parseNebula } from './NebulaAvatar'
 import { ProfileAvatar } from './ProfileAvatar'
+import { AvatarPicker } from './settings/ProfilePickers'
 import css from '../index.css?raw'
+import tailwindConfig from '../../tailwind.config.js?raw'
 
 const lin = (c: number) => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4 }
 const lum = ([r, g, b]: readonly number[]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
@@ -35,7 +39,8 @@ describe('the nebula avatars', () => {
   // gradient in sRGB, and a mix of two passing stops can be darker than
   // either (the midpoint of red and green is darker than red), so the
   // gradient is sampled along its length, not just at its stops. The white
-  // highlight on top only lightens, so it is left out: this is the worst case.
+  // highlight on top only lightens (pinned below), so it is left out: this
+  // is the worst case.
   it('carry the dark initial at 4.5:1 or better everywhere on every gradient', () => {
     for (const n of NEBULAS) {
       const stops = n.stops.map(hex)
@@ -47,6 +52,31 @@ describe('the nebula avatars', () => {
         }
       }
     }
+  })
+
+  // The check above reads --on-action; the discs are drawn with the
+  // text-action-on utility. Both renderers use that class, and Tailwind maps
+  // it to that variable, so the ink checked is the ink drawn.
+  it('draw the initial in the ink the contrast check reads', () => {
+    expect(tailwindConfig).toMatch(/action:\s*\{[^}]*\bon:\s*"var\(--on-action\)"/)
+    const { container } = render(
+      <>
+        <ProfileAvatar avatarUrl="nebula:tidal" name="Maya" colorKey={3} />
+        <NebulaAvatar nebula="tidal" initial="M" className="h-full w-full" />
+      </>,
+    )
+    expect(container.querySelector('[data-profile-avatar="nebula"]')).toHaveClass('text-action-on')
+    expect(container.querySelector('.nebula-disc svg')).toHaveClass('text-action-on')
+    expect(container.querySelector('.nebula-disc text')).toHaveAttribute('fill', 'currentColor')
+  })
+
+  // The whole fill, so the highlight cannot gain a darkening stop or a layer
+  // without this changing too.
+  it('paint the gradient under a white highlight and nothing else', () => {
+    expect(nebulaFill(parseNebula('aurora')!)).toBe(
+      'radial-gradient(110% 80% at 28% 0%, rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0) 60%), '
+      + 'linear-gradient(150deg, #ec4899, #a855f7, #2dd4bf)',
+    )
   })
 
   // Profiles store these ids; renaming one would drop every profile that
@@ -67,7 +97,7 @@ describe('the nebula avatars', () => {
     expect(disc.dataset.profileAvatar).toBe('nebula')
     expect(disc).toHaveAttribute('aria-hidden', 'true')
     expect(disc.textContent).toBe('M')
-    // The 12px floor: half of 24 would be 10.
+    // The 12px floor: 42% of 24 would be 10.
     expect(disc.style.fontSize).toBe('12px')
     expect(disc.style.background).toBe(painted(nebulaFill(parseNebula('tidal')!)))
   })
@@ -79,20 +109,27 @@ describe('the nebula avatars', () => {
     expect(disc.textContent).toBe('M')
   })
 
-  it('draw the picker\'s disc with the initial given, or bare without one', () => {
+  // The picker's disc has no fixed size, so its initial is SVG text on a
+  // 100-unit square: 42 units is 42% of the disc at any size.
+  it('draw the picker\'s disc with the initial given, scaled with the disc, or bare without one', () => {
     const tidal = parseNebula('tidal')!
     const { container, rerender } = render(<NebulaAvatar nebula={tidal} initial="S" className="h-full w-full" />)
     const disc = container.querySelector<HTMLElement>('.nebula-disc')!
     expect(disc).toHaveAttribute('aria-hidden', 'true')
     expect(disc.textContent).toBe('S')
     expect(disc.style.background).toBe(painted(nebulaFill(tidal)))
+    expect(disc.querySelector('svg')).toHaveAttribute('viewBox', '0 0 100 100')
+    expect(disc.querySelector('text')).toHaveAttribute('font-size', '42')
     rerender(<NebulaAvatar nebula={tidal} className="h-full w-full" />)
     expect(container.querySelector('.nebula-disc')!.textContent).toBe('')
+    expect(container.querySelector('.nebula-disc svg')).toBeNull()
   })
 
-  it('paint the gradient under a highlight that only lightens', () => {
-    const fill = nebulaFill(parseNebula('aurora')!)
-    expect(fill).toContain('linear-gradient(150deg, #ec4899, #a855f7, #2dd4bf)')
-    expect(fill).toMatch(/^radial-gradient\([^;]*rgba\(255, 255, 255, 0\.45\)/)
+  it('show the profile\'s own initial on every disc of the Settings picker, and none without a name', () => {
+    const discs = () => [...document.querySelectorAll('[role="radio"] .nebula-disc')].map(d => d.textContent)
+    const { rerender } = render(<AvatarPicker profileId={1} profileName=" 🎬 Movies" avatarUrl="nebula:tidal" onPick={async () => {}} />)
+    expect(discs()).toEqual(Array(NEBULAS.length).fill('🎬'))
+    rerender(<AvatarPicker profileId={1} profileName="  " avatarUrl="nebula:tidal" onPick={async () => {}} />)
+    expect(discs()).toEqual(Array(NEBULAS.length).fill(''))
   })
 })

@@ -23,6 +23,15 @@ describe('personColor', () => {
     expect(personInitial('')).toBe('?')
     expect(personInitial(null)).toBe('?')
   })
+  // One whole character, never half of one: charAt(0) gave the first half of
+  // an emoji's surrogate pair, drawn as a replacement glyph.
+  it('takes the first whole character of a name', () => {
+    expect(personInitial('🎬 Movies')).toBe('🎬')
+    expect(personInitial('👨‍👩‍👧 Family')).toBe('👨‍👩‍👧')
+    expect(personInitial('🇫🇷 Amélie')).toBe('🇫🇷')
+    expect(personInitial('e\u0301clair')).toBe('E\u0301')
+    expect(personInitial('éclair')).toBe('É')
+  })
 })
 
 // A name in the party's chat ticker is drawn in the person's colour on a dark
